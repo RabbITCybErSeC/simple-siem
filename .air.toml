@@ -1,0 +1,12 @@
+root = "."
+tmp_dir = "bin"
+
+[build]
+  cmd = "go build -o ./bin/simple-siem ./cmd/simple-siem"
+  entrypoint = ["./bin/simple-siem"]
+  include_dir = ["cmd", "internal"]
+  include_ext = ["go"]
+  exclude_dir = ["bin"]
+  delay = 1000
+  poll = true
+  stop_on_error = true
