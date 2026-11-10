@@ -8,11 +8,13 @@ import (
 )
 
 func TestRun(t *testing.T) {
+	previousVersion := version.Version
+	previousCommit := version.Commit
 	version.Version = "v1.2.3"
 	version.Commit = "abc1234"
 	t.Cleanup(func() {
-		version.Version = "dev"
-		version.Commit = "unknown"
+		version.Version = previousVersion
+		version.Commit = previousCommit
 	})
 
 	tests := []struct {

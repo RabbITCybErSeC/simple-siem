@@ -1,4 +1,4 @@
-FROM golang:1.27.4-bookworm AS toolchain
+FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm AS toolchain
 
 ARG GOLANGCI_LINT_VERSION=v2.15.0
 ARG GOOSE_VERSION=v3.30.0
@@ -10,7 +10,7 @@ RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI
 
 WORKDIR /src
 
-FROM --platform=$BUILDPLATFORM toolchain AS build
+FROM toolchain AS build
 
 ARG TARGETOS
 ARG TARGETARCH
