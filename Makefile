@@ -27,13 +27,17 @@ POSTGRES_PUBLISH ?=
 endif
 
 VERSION_PACKAGE := github.com/RabbITCybErSeC/simple-siem/internal/version
-# $$(git ...) stays literal for the container shell, so the host needs no git.
-LDFLAGS = -X $(VERSION_PACKAGE).Version=$$(git describe --tags --always --dirty) -X $(VERSION_PACKAGE).Commit=$$(git rev-parse --short HEAD)
+# Apple Git ships with the Xcode command line tools that also provide make.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+LDFLAGS := -X $(VERSION_PACKAGE).Version=$(VERSION) -X $(VERSION_PACKAGE).Commit=$(COMMIT)
+IMAGE := simple-siem:dev
+DEBUG_IMAGE := simple-siem-build:dev
 
 ENV_FILE := $(wildcard .env)
 RUN = $(CONTAINER) run --rm --network $(NETWORK) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(GO_BUILD_CACHE_VOLUME):/root/.cache/go-build $(if $(ENV_FILE),--env-file $(ENV_FILE),)
 
-.PHONY: toolchain network postgres test lint build run dev db-shell down clean
+.PHONY: toolchain network postgres test lint build run dev db-shell image debug down clean
 
 toolchain: $(TOOLCHAIN_STAMP)
 
@@ -65,6 +69,13 @@ dev: postgres $(TOOLCHAIN_STAMP)
 
 db-shell: postgres
 	$(CONTAINER) run --rm -i --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) $(POSTGRES_IMAGE) sh -c 'PGPASSWORD="$$POSTGRES_PASSWORD" exec psql -h $(POSTGRES_HOST) -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+image: $(TOOLCHAIN_STAMP)
+	$(CONTAINER) build --target runtime --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE) .
+
+debug: postgres $(TOOLCHAIN_STAMP)
+	$(CONTAINER) build --target build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(DEBUG_IMAGE) .
+	$(CONTAINER) run --rm -it --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) $(DEBUG_IMAGE) bash
 
 down:
 	@$(CONTAINER) stop $(POSTGRES_CONTAINER) $(DEV_CONTAINER) 2>/dev/null || true
