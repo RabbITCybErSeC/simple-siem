@@ -40,6 +40,7 @@ RUN = $(CONTAINER) run --rm --network $(NETWORK) -v $(CURDIR):/src -w /src -v $(
 
 .PHONY: toolchain network postgres test lint build run dev db-shell image debug down clean
 
+# The stamp alone misses an image deleted outside make, so check the image first.
 toolchain:
 	@$(CONTAINER) image inspect $(TOOLCHAIN_IMAGE) >/dev/null 2>&1 || rm -f $(TOOLCHAIN_STAMP)
 	@$(MAKE) --no-print-directory $(TOOLCHAIN_STAMP)
