@@ -213,6 +213,21 @@ func TestRecordRejectsMissingRequiredFields(t *testing.T) {
 	}
 }
 
+func TestRecordRejectsUnmarshallableChanges(t *testing.T) {
+	db := databasetest.New(t)
+	baseline := countEvents(t, db, "")
+	event := validEvent("unmarshallable")
+	event.Changes = map[string]any{"after": map[string]any{"value": func() {}}}
+
+	err := audit.Record(db, event)
+	if err == nil {
+		t.Fatal("Record accepted changes that cannot be marshalled")
+	}
+	if got := countEvents(t, db, ""); got != baseline {
+		t.Errorf("audit events changed from %d to %d after a rejected event", baseline, got)
+	}
+}
+
 func TestRecordRejectsUnknownOutcome(t *testing.T) {
 	db := databasetest.New(t)
 	event := validEvent("unknown-outcome")
@@ -256,8 +271,8 @@ func TestRecordDoesNotMutateCallerChanges(t *testing.T) {
 	event := validEvent("caller-unchanged")
 	event.Changes = map[string]any{
 		"after": map[string]any{
-			"auth":     auth,
-			"sessions": []any{session},
+			"auth":    auth,
+			"entries": []any{session},
 		},
 	}
 
@@ -288,16 +303,16 @@ func TestRecordDoesNotMutateCallerChanges(t *testing.T) {
 	if got := storedAuth["apiKey"]; got != redactedValue {
 		t.Errorf("stored changes.after.auth.apiKey = %v, want %s", got, redactedValue)
 	}
-	sessions, ok := after["sessions"].([]any)
-	if !ok || len(sessions) != 1 {
-		t.Fatalf("stored changes has no after.sessions array: %s", stored.Changes)
+	entries, ok := after["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("stored changes has no after.entries array: %s", stored.Changes)
 	}
-	storedSession, ok := sessions[0].(map[string]any)
+	storedSession, ok := entries[0].(map[string]any)
 	if !ok {
-		t.Fatalf("stored changes has no after.sessions[0] object: %s", stored.Changes)
+		t.Fatalf("stored changes has no after.entries[0] object: %s", stored.Changes)
 	}
 	if got := storedSession["token"]; got != redactedValue {
-		t.Errorf("stored changes.after.sessions[0].token = %v, want %s", got, redactedValue)
+		t.Errorf("stored changes.after.entries[0].token = %v, want %s", got, redactedValue)
 	}
 }
 
@@ -307,7 +322,7 @@ func TestRecordRedactsNestedSecrets(t *testing.T) {
 	event.Changes = map[string]any{
 		"after": map[string]any{
 			"auth": map[string]any{"apiKey": "k-123"},
-			"sessions": []any{
+			"entries": []any{
 				map[string]any{"token": "t-456"},
 			},
 		},
@@ -329,20 +344,20 @@ func TestRecordRedactsNestedSecrets(t *testing.T) {
 	if got := auth["apiKey"]; got != redactedValue {
 		t.Errorf("stored changes.after.auth.apiKey = %v, want %s", got, redactedValue)
 	}
-	sessions, ok := after["sessions"].([]any)
-	if !ok || len(sessions) != 1 {
-		t.Fatalf("stored changes has no after.sessions array: %s", stored.Changes)
+	entries, ok := after["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("stored changes has no after.entries array: %s", stored.Changes)
 	}
-	session, ok := sessions[0].(map[string]any)
+	session, ok := entries[0].(map[string]any)
 	if !ok {
-		t.Fatalf("stored changes has no after.sessions[0] object: %s", stored.Changes)
+		t.Fatalf("stored changes has no after.entries[0] object: %s", stored.Changes)
 	}
 	if got := session["token"]; got != redactedValue {
-		t.Errorf("stored changes.after.sessions[0].token = %v, want %s", got, redactedValue)
+		t.Errorf("stored changes.after.entries[0].token = %v, want %s", got, redactedValue)
 	}
 
 	redactions := storedRedactions(t, stored)
-	for _, path := range []string{"changes.after.auth.apiKey", "changes.after.sessions[0].token"} {
+	for _, path := range []string{"changes.after.auth.apiKey", "changes.after.entries[0].token"} {
 		if !slices.Contains(redactions, path) {
 			t.Errorf("redactions %v do not contain %s", redactions, path)
 		}
@@ -359,9 +374,91 @@ func TestRecordRedactsNestedSecrets(t *testing.T) {
 	}
 }
 
+func TestRecordRedactsNestedTypedChanges(t *testing.T) {
+	db := databasetest.New(t)
+	event := validEvent("typed-nested-redaction")
+	event.Changes = map[string]any{
+		"after": map[string]any{
+			"headers": map[string]string{
+				"Authorization": "Bearer header-secret",
+				"Accept":        "application/json",
+			},
+			"accounts": []map[string]any{
+				{"name": "primary", "password": "array-secret"},
+			},
+			"details": struct {
+				SessionToken string `json:"sessionToken"`
+			}{SessionToken: "struct-secret"},
+		},
+	}
+
+	if err := audit.Record(db, event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	stored := storedEventByTarget(t, db, event.TargetID)
+	for _, secret := range []string{"header-secret", "array-secret", "struct-secret"} {
+		if strings.Contains(string(stored.Changes), secret) {
+			t.Errorf("stored changes contain the secret %q: %s", secret, stored.Changes)
+		}
+	}
+
+	changes := storedChanges(t, stored)
+	after, ok := changes["after"].(map[string]any)
+	if !ok {
+		t.Fatalf("stored changes has no after object: %s", stored.Changes)
+	}
+	headers, ok := after["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("stored changes has no after.headers object: %s", stored.Changes)
+	}
+	if got := headers["Authorization"]; got != redactedValue {
+		t.Errorf("stored changes.after.headers.Authorization = %v, want %s", got, redactedValue)
+	}
+	if got := headers["Accept"]; got != "application/json" {
+		t.Errorf("stored changes.after.headers.Accept = %v, want application/json", got)
+	}
+
+	accounts, ok := after["accounts"].([]any)
+	if !ok || len(accounts) != 1 {
+		t.Fatalf("stored changes has no after.accounts array: %s", stored.Changes)
+	}
+	account, ok := accounts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("stored changes has no after.accounts[0] object: %s", stored.Changes)
+	}
+	if got := account["password"]; got != redactedValue {
+		t.Errorf("stored changes.after.accounts[0].password = %v, want %s", got, redactedValue)
+	}
+	if got := account["name"]; got != "primary" {
+		t.Errorf("stored changes.after.accounts[0].name = %v, want primary", got)
+	}
+
+	details, ok := after["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("stored changes has no after.details object: %s", stored.Changes)
+	}
+	if got := details["sessionToken"]; got != redactedValue {
+		t.Errorf("stored changes.after.details.sessionToken = %v, want %s", got, redactedValue)
+	}
+
+	redactions := storedRedactions(t, stored)
+	for _, path := range []string{
+		"changes.after.headers.Authorization",
+		"changes.after.accounts[0].password",
+		"changes.after.details.sessionToken",
+	} {
+		if !slices.Contains(redactions, path) {
+			t.Errorf("redactions %v do not contain %s", redactions, path)
+		}
+	}
+}
+
 func TestRecordRedactsEverySensitiveKeyPart(t *testing.T) {
 	db := databasetest.New(t)
-	for _, part := range []string{"password", "token", "secret", "apikey", "api_key", "authorization"} {
+	for _, part := range []string{
+		"password", "token", "secret", "apikey", "api_key", "authorization",
+		"passwd", "credential", "cookie", "private_key", "privatekey", "session", "bearer",
+	} {
 		t.Run(part, func(t *testing.T) {
 			key := "my" + strings.ToUpper(part) + "Value"
 			secret := "sensitive-value-" + part
@@ -429,6 +526,43 @@ func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	}
 	if got := countEvents(t, db, ""); got != 1 {
 		t.Errorf("second Migrate changed the audit event count to %d, want 1", got)
+	}
+}
+
+func TestMigrateRestoresMissingMigrationAuditEvent(t *testing.T) {
+	db := databasetest.New(t)
+	if err := db.Exec("DELETE FROM audit_events WHERE target_type = ? AND target_id = ?", "DATABASE_MIGRATION", "1").Error; err != nil {
+		t.Fatalf("delete migration audit event: %v", err)
+	}
+	if got := countEvents(t, db, "target_type = ? AND target_id = ?", "DATABASE_MIGRATION", "1"); got != 0 {
+		t.Fatalf("migration 1 has %d audit events after deletion, want 0", got)
+	}
+
+	applied, err := database.Migrate(context.Background(), db)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if len(applied) != 0 {
+		t.Errorf("Migrate applied %v on an up-to-date database, want none", applied)
+	}
+	if got := countEvents(t, db, "target_type = ? AND target_id = ?", "DATABASE_MIGRATION", "1"); got != 1 {
+		t.Errorf("migration 1 has %d audit events after Migrate, want 1", got)
+	}
+}
+
+func TestMigrateDoesNotDuplicateMigrationAuditEvents(t *testing.T) {
+	db := databasetest.New(t)
+
+	for run := 1; run <= 2; run++ {
+		if _, err := database.Migrate(context.Background(), db); err != nil {
+			t.Fatalf("Migrate run %d: %v", run, err)
+		}
+	}
+	if got := countEvents(t, db, "target_type = ? AND target_id = ?", "DATABASE_MIGRATION", "1"); got != 1 {
+		t.Errorf("migration 1 has %d audit events after two Migrate runs, want 1", got)
+	}
+	if got := countEvents(t, db, ""); got != 1 {
+		t.Errorf("database has %d audit events after two Migrate runs, want 1", got)
 	}
 }
 

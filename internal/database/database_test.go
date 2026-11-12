@@ -2,6 +2,7 @@ package database_test
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -82,18 +83,35 @@ func TestMigrateRefusesNewerSchema(t *testing.T) {
 }
 
 func TestOpenErrorDoesNotLeakPassword(t *testing.T) {
-	password := "not-a-real-password-4f7c2"
-	databaseURL := "postgres://test_user:" + password + "@127.0.0.1:1/test?sslmode=disable"
+	password := "p@ss%word-4f7c2"
+	userInfo := url.UserPassword("test_user", password)
+	databaseURL := "postgres://" + userInfo.String() + "@127.0.0.1:1/test?sslmode=disable"
 
 	_, err := database.Open(context.Background(), config.Config{DatabaseURL: databaseURL})
 	if err == nil {
 		t.Fatal("Open returned no error for an unreachable database")
 	}
-	if strings.Contains(err.Error(), password) {
-		t.Errorf("Open error contains the password: %v", err)
+	for _, secret := range []string{password, userInfo.String(), databaseURL} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("Open error contains %q: %v", secret, err)
+		}
 	}
-	if strings.Contains(err.Error(), databaseURL) {
-		t.Errorf("Open error contains the database URL: %v", err)
+}
+
+func TestCheckSchemaRejectsNewerSchema(t *testing.T) {
+	db := databasetest.New(t)
+	if err := db.Exec("INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, ?)", 9999, true).Error; err != nil {
+		t.Fatalf("record newer schema version: %v", err)
+	}
+
+	err := database.CheckSchema(context.Background(), db)
+	if err == nil {
+		t.Fatal("CheckSchema accepted a database newer than the embedded migrations")
+	}
+	for _, version := range []string{"9999", "1"} {
+		if !strings.Contains(err.Error(), version) {
+			t.Errorf("CheckSchema error %q does not name version %s", err, version)
+		}
 	}
 }
 

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/RabbITCybErSeC/simple-siem/internal/version"
@@ -146,6 +148,28 @@ func TestRunMigrateAppliesPendingMigrations(t *testing.T) {
 	}
 	if err := database.CheckSchema(context.Background(), testDatabase); err != nil {
 		t.Errorf("schema after migrate: %v", err)
+	}
+}
+
+func TestNewHTTPServerSetsTimeouts(t *testing.T) {
+	db := databasetest.New(t)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, db, logger)
+
+	timeouts := []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"ReadHeaderTimeout", server.ReadHeaderTimeout, 10 * time.Second},
+		{"ReadTimeout", server.ReadTimeout, 30 * time.Second},
+		{"WriteTimeout", server.WriteTimeout, 60 * time.Second},
+		{"IdleTimeout", server.IdleTimeout, 120 * time.Second},
+	}
+	for _, timeout := range timeouts {
+		if timeout.got != timeout.want {
+			t.Errorf("server.%s = %s, want %s", timeout.name, timeout.got, timeout.want)
+		}
 	}
 }
 

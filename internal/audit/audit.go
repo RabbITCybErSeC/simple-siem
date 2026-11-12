@@ -1,6 +1,8 @@
 package audit
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,12 +13,19 @@ import (
 const redactedValue = "[REDACTED]"
 
 var sensitiveKeyParts = []string{
-	"password",
-	"token",
-	"secret",
-	"apikey",
 	"api_key",
+	"apikey",
 	"authorization",
+	"bearer",
+	"cookie",
+	"credential",
+	"passwd",
+	"password",
+	"private_key",
+	"privatekey",
+	"secret",
+	"session",
+	"token",
 }
 
 var validOutcomes = map[string]struct{}{
@@ -35,11 +44,34 @@ func Record(tx *gorm.DB, event Event) error {
 	if err := validate(event); err != nil {
 		return err
 	}
-	event.Changes, event.Redactions = redact(event.Changes)
+	changes, err := normalizeChanges(event.Changes)
+	if err != nil {
+		return err
+	}
+	event.Changes, event.Redactions = redact(changes)
 	if err := tx.Create(&event).Error; err != nil {
 		return fmt.Errorf("record audit event: %w", err)
 	}
 	return nil
+}
+
+// normalizeChanges round-trips changes through JSON, so redaction walks nested
+// maps, slices, and structs uniformly and never mutates the caller's values.
+func normalizeChanges(changes map[string]any) (map[string]any, error) {
+	if changes == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(changes)
+	if err != nil {
+		return nil, fmt.Errorf("encode audit changes: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var normalized map[string]any
+	if err := decoder.Decode(&normalized); err != nil {
+		return nil, fmt.Errorf("decode audit changes: %w", err)
+	}
+	return normalized, nil
 }
 
 func validate(event Event) error {

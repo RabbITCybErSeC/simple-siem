@@ -33,6 +33,9 @@ commands:
 	versionUsage = "usage: simple-siem version"
 
 	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = 60 * time.Second
+	idleTimeout       = 120 * time.Second
 )
 
 func main() {
@@ -94,7 +97,12 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 		return 1
 	}
 
-	server := &http.Server{
+	server := newHTTPServer(settings, db, logger)
+	return serveHTTP(ctx, server, settings.ShutdownTimeout)
+}
+
+func newHTTPServer(settings config.Config, db *gorm.DB, logger *slog.Logger) *http.Server {
+	return &http.Server{
 		Addr: settings.Listen,
 		Handler: api.NewRouter(api.Dependencies{
 			DB:             db,
@@ -104,8 +112,10 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 			Commit:         version.Commit,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
-	return serveHTTP(ctx, server, settings.ShutdownTimeout)
 }
 
 func runMigrate(ctx context.Context, args []string, getenv func(string) string, stderr io.Writer, logger *slog.Logger) int {
