@@ -7,9 +7,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
@@ -91,7 +93,8 @@ func CheckSchema(ctx context.Context, db *gorm.DB) error {
 }
 
 // Migrate applies every pending migration under a PostgreSQL advisory lock and
-// returns the versions it applied, so callers can audit them.
+// returns the versions it applied. Each applied version is audited in one
+// transaction.
 func Migrate(ctx context.Context, db *gorm.DB) ([]int64, error) {
 	provider, currentVersion, newestVersion, err := newMigrationProvider(ctx, db)
 	if err != nil {
@@ -112,6 +115,28 @@ func Migrate(ctx context.Context, db *gorm.DB) ([]int64, error) {
 	applied := make([]int64, 0, len(results))
 	for _, result := range results {
 		applied = append(applied, result.Source.Version)
+	}
+	if len(applied) > 0 {
+		err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			for _, version := range applied {
+				event := audit.Event{
+					EventName:     "simple_siem.database.migration_applied",
+					EventCategory: "DATABASE",
+					EventOutcome:  "SUCCESS",
+					ActorType:     "SYSTEM",
+					TargetType:    "DATABASE_MIGRATION",
+					TargetID:      strconv.FormatInt(version, 10),
+					Action:        "apply",
+				}
+				if err := audit.Record(tx, event); err != nil {
+					return fmt.Errorf("record migration %d: %w", version, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return applied, fmt.Errorf("record applied migrations: %w", err)
+		}
 	}
 	return applied, nil
 }
