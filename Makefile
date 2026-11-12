@@ -42,7 +42,10 @@ DEBUG_IMAGE := simple-siem-build:dev
 
 # A TTY only for interactive psql; piped queries must not allocate one.
 DB_SHELL_TTY := $(shell test -t 0 && echo -t)
-RUN = $(CONTAINER) run --rm --network $(NETWORK) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(GO_BUILD_CACHE_VOLUME):/root/.cache/go-build --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) --env SIMPLE_SIEM_DATABASE_URL=$(DATABASE_URL) --env SIMPLE_SIEM_ENV=development
+# Apple container gives a container 1 GiB by default; cold Go builds of the
+# dependencies need more.
+TOOLCHAIN_MEMORY := 4g
+RUN = $(CONTAINER) run --rm --memory $(TOOLCHAIN_MEMORY) --network $(NETWORK) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(GO_BUILD_CACHE_VOLUME):/root/.cache/go-build --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) --env SIMPLE_SIEM_DATABASE_URL=$(DATABASE_URL) --env SIMPLE_SIEM_ENV=development
 
 .PHONY: toolchain network postgres test lint build run dev db-shell image debug down clean
 
