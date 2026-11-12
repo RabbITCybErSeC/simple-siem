@@ -88,7 +88,7 @@ run: build
 
 dev: postgres toolchain
 	@$(CONTAINER) rm -f $(DEV_CONTAINER) >/dev/null 2>&1 || true
-	$(RUN) --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
+	$(RUN) -p 127.0.0.1:8080:8080 --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
 
 db-shell: postgres
 	$(CONTAINER) run --rm -i $(DB_SHELL_TTY) --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) $(POSTGRES_IMAGE) sh -c 'PGPASSWORD="$$POSTGRES_PASSWORD" exec psql -h $(POSTGRES_HOST) -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'

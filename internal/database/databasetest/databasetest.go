@@ -21,9 +21,22 @@ import (
 // test finishes. It fails instead of skipping when PostgreSQL is unreachable.
 func New(t *testing.T) *gorm.DB {
 	t.Helper()
+	testDatabase, _ := NewUnmigrated(t)
+	if _, err := database.Migrate(context.Background(), testDatabase); err != nil {
+		t.Fatalf("databasetest: migrate test database: %v", err)
+	}
+	return testDatabase
+}
+
+// NewUnmigrated creates a uniquely named database without applying migrations
+// and returns it with its connection URL. It drops the database when the test
+// finishes and fails instead of skipping when PostgreSQL is unreachable.
+func NewUnmigrated(t *testing.T) (*gorm.DB, string) {
+	t.Helper()
 	checkEnvironment(t)
 
 	name := databaseName(t)
+	databaseURL := connectionURL(name)
 	adminURL := connectionURL(os.Getenv("POSTGRES_DB"))
 
 	admin, err := database.Open(context.Background(), config.Config{DatabaseURL: adminURL})
@@ -50,14 +63,11 @@ func New(t *testing.T) *gorm.DB {
 		dropDatabase(t, adminURL, name)
 	})
 
-	testDatabase, err = database.Open(context.Background(), config.Config{DatabaseURL: connectionURL(name)})
+	testDatabase, err = database.Open(context.Background(), config.Config{DatabaseURL: databaseURL})
 	if err != nil {
 		t.Fatalf("databasetest: connect to database %s: %v", name, err)
 	}
-	if _, err := database.Migrate(context.Background(), testDatabase); err != nil {
-		t.Fatalf("databasetest: migrate database %s: %v", name, err)
-	}
-	return testDatabase
+	return testDatabase, databaseURL
 }
 
 func checkEnvironment(t *testing.T) {

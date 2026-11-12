@@ -4,6 +4,7 @@ tmp_dir = "bin"
 [build]
   cmd = "go build -o ./bin/simple-siem ./cmd/simple-siem"
   entrypoint = ["./bin/simple-siem"]
+  args_bin = ["serve"]
   include_dir = ["cmd", "internal"]
   include_ext = ["go"]
   delay = 1000
