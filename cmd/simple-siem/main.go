@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -10,14 +11,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/api"
+	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/version"
 	"github.com/RabbITCybErSeC/simple-siem/web"
+	"golang.org/x/term"
 	"gorm.io/gorm"
 )
 
@@ -27,10 +31,13 @@ const (
 commands:
   serve    run the HTTP API
   migrate  apply pending database migrations
+  admin     create or recover admin accounts
   version  print the version`
 
 	serveUsage   = "usage: simple-siem serve [--migrate=true|false]"
 	migrateUsage = "usage: simple-siem migrate"
+	adminUsage   = `usage: simple-siem admin create --email <email> [--display-name <name>] [--password-file <path>]
+usage: simple-siem admin reset-password --email <email> [--password-file <path>]`
 	versionUsage = "usage: simple-siem version"
 
 	readHeaderTimeout = 10 * time.Second
@@ -42,11 +49,11 @@ commands:
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
+	os.Exit(run(ctx, os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
 }
 
 // run dispatches one command and returns the process exit status.
-func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
 	logger := slog.New(slog.NewJSONHandler(stdout, nil))
 	slog.SetDefault(logger)
 
@@ -60,12 +67,199 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		return runServe(ctx, args[1:], getenv, stderr, logger)
 	case "migrate":
 		return runMigrate(ctx, args[1:], getenv, stderr, logger)
+	case "admin":
+		return runAdmin(ctx, args[1:], getenv, stdin, stdout, stderr, logger)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintln(stderr, topLevelUsage)
 		return 2
 	}
+}
+
+func runAdmin(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, logger *slog.Logger) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintln(stderr, adminUsage)
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return runAdminCreate(ctx, args[1:], getenv, stdin, stdout, stderr, logger)
+	case "reset-password":
+		return runAdminResetPassword(ctx, args[1:], getenv, stdin, stdout, stderr, logger)
+	default:
+		_, _ = fmt.Fprintln(stderr, adminUsage)
+		return 2
+	}
+}
+
+func runAdminCreate(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, logger *slog.Logger) int {
+	flags := newFlagSet("admin create", stderr, adminUsage)
+	email := flags.String("email", "", "email address of the admin")
+	displayName := flags.String("display-name", "", "display name (defaults to the part before @)")
+	passwordFile := flags.String("password-file", "", "file whose first line is the password")
+	if status, done := parseFlags(flags, args); done {
+		return status
+	}
+	if *email == "" {
+		flags.Usage()
+		return 2
+	}
+
+	settings, err := config.Load(getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	db, err := database.Open(ctx, settings)
+	if err != nil {
+		logger.Error("open database", "error", err)
+		return 1
+	}
+	defer closeDatabase(db, logger)
+
+	if err := database.CheckSchema(ctx, db); err != nil {
+		logger.Error("check database schema", "error", err)
+		return 1
+	}
+
+	password, err := readPassword(stdin, *passwordFile)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	service, err := auth.NewService(ctx, db, auth.Settings{
+		IdleTimeout:      settings.SessionIdleTimeout,
+		AbsoluteLifetime: settings.SessionAbsoluteLifetime,
+	}, logger)
+	if err != nil {
+		logger.Error("build auth service", "error", err)
+		return 1
+	}
+
+	name := *displayName
+	if name == "" {
+		name, _, _ = strings.Cut(*email, "@")
+	}
+	user, err := service.CreateAdmin(ctx, *email, name, password)
+	if err != nil {
+		if isAdminInputError(err) {
+			_, _ = fmt.Fprintln(stderr, err)
+		} else {
+			logger.Error("create admin", "error", err)
+		}
+		return 1
+	}
+
+	_, _ = fmt.Fprintf(stdout, "created admin %s\n", user.ID)
+	return 0
+}
+
+func runAdminResetPassword(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, logger *slog.Logger) int {
+	flags := newFlagSet("admin reset-password", stderr, adminUsage)
+	email := flags.String("email", "", "email address of the admin")
+	passwordFile := flags.String("password-file", "", "file whose first line is the new password")
+	if status, done := parseFlags(flags, args); done {
+		return status
+	}
+	if *email == "" {
+		flags.Usage()
+		return 2
+	}
+
+	settings, err := config.Load(getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	db, err := database.Open(ctx, settings)
+	if err != nil {
+		logger.Error("open database", "error", err)
+		return 1
+	}
+	defer closeDatabase(db, logger)
+
+	if err := database.CheckSchema(ctx, db); err != nil {
+		logger.Error("check database schema", "error", err)
+		return 1
+	}
+
+	password, err := readPassword(stdin, *passwordFile)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	service, err := auth.NewService(ctx, db, auth.Settings{
+		IdleTimeout:      settings.SessionIdleTimeout,
+		AbsoluteLifetime: settings.SessionAbsoluteLifetime,
+	}, logger)
+	if err != nil {
+		logger.Error("build auth service", "error", err)
+		return 1
+	}
+
+	revokedCount, err := service.ResetPassword(ctx, *email, password)
+	if err != nil {
+		if isAdminInputError(err) {
+			_, _ = fmt.Fprintln(stderr, err)
+		} else {
+			logger.Error("reset password", "error", err)
+		}
+		return 1
+	}
+
+	_, _ = fmt.Fprintf(stdout, "reset password for %s; revoked %d sessions\n", *email, revokedCount)
+	return 0
+}
+
+// isAdminInputError reports whether the operator can fix the failure by
+// changing the arguments.
+func isAdminInputError(err error) bool {
+	return errors.Is(err, auth.ErrInvalidEmail) || errors.Is(err, auth.ErrPasswordLength) ||
+		errors.Is(err, auth.ErrUserExists) || errors.Is(err, auth.ErrUserNotFound)
+}
+
+// readPassword takes the first line of the password file, the terminal without
+// echo, or the first line of stdin.
+func readPassword(stdin io.Reader, passwordFile string) (string, error) {
+	source := stdin
+	if passwordFile != "" {
+		file, err := os.Open(passwordFile)
+		if err != nil {
+			return "", fmt.Errorf("open password file: %w", err)
+		}
+		defer func() { _ = file.Close() }()
+		source = file
+	} else if file, ok := stdin.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		_, _ = fmt.Fprint(os.Stderr, "Password: ")
+		password, err := term.ReadPassword(int(file.Fd()))
+		_, _ = fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+		if len(password) == 0 {
+			return "", errors.New("no password given")
+		}
+		return string(password), nil
+	}
+
+	line, err := bufio.NewReader(source).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	if strings.HasSuffix(line, "\r\n") {
+		line = strings.TrimSuffix(line, "\r\n")
+	} else {
+		line = strings.TrimSuffix(line, "\n")
+	}
+	if line == "" {
+		return "", errors.New("no password given")
+	}
+	return line, nil
 }
 
 func runServe(ctx context.Context, args []string, getenv func(string) string, stderr io.Writer, logger *slog.Logger) int {
@@ -98,21 +292,39 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 		return 1
 	}
 
+	authService, err := auth.NewService(ctx, db, auth.Settings{
+		IdleTimeout:      settings.SessionIdleTimeout,
+		AbsoluteLifetime: settings.SessionAbsoluteLifetime,
+	}, logger)
+	if err != nil {
+		logger.Error("build auth service", "error", err)
+		return 1
+	}
+	userCount, err := authService.CountUsers(ctx)
+	if err != nil {
+		logger.Error("count users", "error", err)
+		return 1
+	}
+	if userCount == 0 {
+		logger.Warn(`no users exist; run "simple-siem admin create --email <email>"`)
+	}
+
 	sqlDatabase, err := db.DB()
 	if err != nil {
 		logger.Error("get database connection pool", "error", err)
 		return 1
 	}
-	server := newHTTPServer(settings, sqlDatabase, logger)
+	server := newHTTPServer(settings, sqlDatabase, authService, logger)
 	return serveHTTP(ctx, server, settings.ShutdownTimeout)
 }
 
-func newHTTPServer(settings config.Config, database api.ReadinessChecker, logger *slog.Logger) *http.Server {
+func newHTTPServer(settings config.Config, database api.ReadinessChecker, authService *auth.Service, logger *slog.Logger) *http.Server {
 	return &http.Server{
 		Addr: settings.Listen,
 		Handler: api.NewRouter(api.Dependencies{
 			Database:       database,
 			Logger:         logger,
+			Auth:           authService,
 			Web:            web.Files(),
 			TrustedProxies: settings.TrustedProxies,
 			Version:        version.Version,
