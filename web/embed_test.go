@@ -47,6 +47,10 @@ func TestBuiltFrontendIsSelfContained(t *testing.T) {
 		t.Fatalf("read embedded index.html: %v", err)
 	}
 
+	if !strings.Contains(string(indexHTML), `property="csp-nonce"`) || !strings.Contains(string(indexHTML), "SIMPLE_SIEM_CSP_NONCE") {
+		t.Errorf("index.html lacks the csp-nonce meta with the build placeholder: %s", indexHTML)
+	}
+
 	for _, tag := range scriptTagPattern.FindAll(indexHTML, -1) {
 		if !strings.Contains(string(tag), "src=") {
 			t.Errorf("index.html has an inline script tag: %s", tag)
