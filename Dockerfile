@@ -19,6 +19,12 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 
 WORKDIR /src
 
+FROM toolchain AS e2e
+
+ARG PLAYWRIGHT_VERSION
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN test -n "$PLAYWRIGHT_VERSION" && npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium
+
 FROM toolchain AS web
 
 WORKDIR /web
