@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"path"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -21,10 +20,8 @@ const (
 	apiPathPrefix   = "/api"
 	unmatchedRoute  = "unmatched"
 
-	webRouteLabel    = "web"
-	assetsRouteLabel = "assets"
-	routeLabelKey    = "route_label"
-	assetsPathPrefix = "/assets/"
+	webRouteLabel = "web"
+	routeLabelKey = "route_label"
 
 	immutableCacheControl = "public, max-age=31536000, immutable"
 	noCacheControl        = "no-cache"
@@ -63,9 +60,13 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 		requestLog(dependencies.Logger),
 		recovery(dependencies.Logger),
 	)
-	router.GET("/healthz", healthz)
-	router.GET("/readyz", readyz(dependencies.DB, dependencies.Logger))
-	router.GET("/version", version(dependencies.Version, dependencies.Commit))
+	// Gin does not answer HEAD from GET routes; without these a HEAD /readyz
+	// would fall through to the web page and report ready.
+	readMethods := []string{http.MethodGet, http.MethodHead}
+	router.Match(readMethods, "/healthz", healthz)
+	router.Match(readMethods, "/readyz", readyz(dependencies.DB, dependencies.Logger))
+	router.Match(readMethods, "/version", version(dependencies.Version, dependencies.Commit))
+	router.Match(readMethods, "/assets/*filepath", assets(dependencies.Web))
 
 	indexHTML := []byte(frontendNotBuiltPage)
 	if dependencies.Web != nil {
@@ -73,7 +74,7 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 			indexHTML = content
 		}
 	}
-	router.NoRoute(noRoute(dependencies.Web, indexHTML))
+	router.NoRoute(noRoute(indexHTML))
 	return router
 }
 
@@ -205,7 +206,26 @@ func version(version, commit string) gin.HandlerFunc {
 	}
 }
 
-func noRoute(files fs.FS, indexHTML []byte) gin.HandlerFunc {
+// assets serves hashed build files. The path is deliberately not cleaned:
+// io/fs rejects any ".." element, which keeps requests inside the build.
+func assets(files fs.FS) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		assetPath := "assets" + c.Param("filepath")
+		if files == nil {
+			c.String(http.StatusNotFound, "not found")
+			return
+		}
+		info, err := fs.Stat(files, assetPath)
+		if err != nil || info.IsDir() {
+			c.String(http.StatusNotFound, "not found")
+			return
+		}
+		c.Header("Cache-Control", immutableCacheControl)
+		http.ServeFileFS(c.Writer, c.Request, files, assetPath)
+	}
+}
+
+func noRoute(indexHTML []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 		if requestPath == apiPathPrefix || strings.HasPrefix(requestPath, apiPathPrefix+"/") {
@@ -216,23 +236,6 @@ func noRoute(files fs.FS, indexHTML []byte) gin.HandlerFunc {
 		}
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
 			c.String(http.StatusNotFound, "not found")
-			return
-		}
-		if strings.HasPrefix(requestPath, assetsPathPrefix) {
-			c.Set(routeLabelKey, assetsRouteLabel)
-			cleanedPath := path.Clean(requestPath)
-			if files == nil || !strings.HasPrefix(cleanedPath, assetsPathPrefix) {
-				c.String(http.StatusNotFound, "not found")
-				return
-			}
-			assetPath := strings.TrimPrefix(cleanedPath, "/")
-			info, err := fs.Stat(files, assetPath)
-			if err != nil || info.IsDir() {
-				c.String(http.StatusNotFound, "not found")
-				return
-			}
-			c.Header("Cache-Control", immutableCacheControl)
-			http.ServeFileFS(c.Writer, c.Request, files, assetPath)
 			return
 		}
 		c.Set(routeLabelKey, webRouteLabel)

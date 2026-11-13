@@ -10,6 +10,12 @@ GO_MOD_CACHE_VOLUME := simple-siem-go-mod
 GO_BUILD_CACHE_VOLUME := simple-siem-go-build
 PNPM_STORE_VOLUME := simple-siem-pnpm-store
 NODE_MODULES_VOLUME := simple-siem-web-node-modules
+# make dev containers keep their own caches: Apple container will not share a
+# volume between running containers, and make lint test must keep working
+# while make dev runs.
+DEV_NODE_MODULES_VOLUME := simple-siem-web-dev-node-modules
+DEV_GO_MOD_CACHE_VOLUME := simple-siem-dev-go-mod
+DEV_GO_BUILD_CACHE_VOLUME := simple-siem-dev-go-build
 
 POSTGRES_IMAGE := postgres:18-alpine
 POSTGRES_CONTAINER := simple-siem-postgres
@@ -30,12 +36,16 @@ include $(POSTGRES_ENV_FILE)
 ifeq ($(CONTAINER),container)
 POSTGRES_HOST ?= $(NETWORK_GATEWAY)
 POSTGRES_PUBLISH ?= -p $(NETWORK_GATEWAY):5432:5432
+# One host port cannot be published on two addresses, so Vite reaches the API
+# through a second port on the gateway and the host keeps 127.0.0.1:8080.
 API_HOST ?= $(NETWORK_GATEWAY)
-API_PUBLISH ?= -p $(NETWORK_GATEWAY):8080:8080
+API_PORT ?= 8081
+API_PUBLISH ?= -p 127.0.0.1:8080:8080 -p $(NETWORK_GATEWAY):$(API_PORT):8080
 else
 POSTGRES_HOST ?= $(POSTGRES_CONTAINER)
 POSTGRES_PUBLISH ?=
 API_HOST ?= $(DEV_CONTAINER)
+API_PORT ?= 8080
 API_PUBLISH ?= -p 127.0.0.1:8080:8080
 endif
 
@@ -116,8 +126,8 @@ shadcn-mcp: network toolchain web/node_modules
 
 dev: postgres toolchain web/node_modules
 	@$(CONTAINER) rm -f $(WEB_CONTAINER) $(DEV_CONTAINER) >/dev/null 2>&1 || true
-	$(WEB_RUN) -d --name $(WEB_CONTAINER) -p 127.0.0.1:$(WEB_PORT):$(WEB_PORT) --env API_HOST=$(API_HOST) --env WEB_PORT=$(WEB_PORT) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm dev'
-	$(RUN) $(API_PUBLISH) --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
+	$(COMMON_RUN) -d --name $(WEB_CONTAINER) -v $(CURDIR):/src -w /src/web -v $(DEV_NODE_MODULES_VOLUME):/src/web/node_modules -p 127.0.0.1:$(WEB_PORT):$(WEB_PORT) --env API_HOST=$(API_HOST) --env API_PORT=$(API_PORT) --env WEB_PORT=$(WEB_PORT) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm dev'
+	$(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(DEV_GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(DEV_GO_BUILD_CACHE_VOLUME):/root/.cache/go-build $(API_PUBLISH) --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
 
 db-shell: postgres
 	$(CONTAINER) run --rm -i $(DB_SHELL_TTY) --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) $(POSTGRES_IMAGE) sh -c 'PGPASSWORD="$$POSTGRES_PASSWORD" exec psql -h $(POSTGRES_HOST) -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
@@ -135,6 +145,6 @@ down:
 clean:
 	@$(CONTAINER) rm -f $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) 2>/dev/null || true
 	@$(CONTAINER) network rm $(NETWORK) 2>/dev/null || true
-	@$(CONTAINER) volume rm $(POSTGRES_VOLUME) $(GO_MOD_CACHE_VOLUME) $(GO_BUILD_CACHE_VOLUME) $(PNPM_STORE_VOLUME) $(NODE_MODULES_VOLUME) 2>/dev/null || true
+	@$(CONTAINER) volume rm $(POSTGRES_VOLUME) $(GO_MOD_CACHE_VOLUME) $(GO_BUILD_CACHE_VOLUME) $(PNPM_STORE_VOLUME) $(NODE_MODULES_VOLUME) $(DEV_NODE_MODULES_VOLUME) $(DEV_GO_MOD_CACHE_VOLUME) $(DEV_GO_BUILD_CACHE_VOLUME) 2>/dev/null || true
 	@$(CONTAINER) image rm $(TOOLCHAIN_IMAGE) 2>/dev/null || true
 	rm -rf bin .make web/node_modules

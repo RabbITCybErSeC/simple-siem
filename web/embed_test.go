@@ -11,11 +11,32 @@ import (
 var (
 	scriptTagPattern          = regexp.MustCompile(`(?i)<script\b[^>]*>`)
 	styleTagPattern           = regexp.MustCompile(`(?i)<style\b`)
-	remoteAttributePattern    = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']?https?://`)
-	remoteCSSReferencePattern = regexp.MustCompile(`(?i)url\(\s*["']?https?://`)
+	remoteAttributePattern    = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']?(?:https?:)?//`)
+	remoteCSSReferencePattern = regexp.MustCompile(`(?i)url\(\s*["']?(?:https?:)?//`)
 )
 
 // shortcut: static scan of the build, replace with Playwright under the real CSP in Phase 2b
+func TestRemoteReferencePatterns(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern *regexp.Regexp
+		text    string
+		remote  bool
+	}{
+		{"https script", remoteAttributePattern, `<script src="https://cdn.example.com/lib.js">`, true},
+		{"protocol-relative script", remoteAttributePattern, `<script src="//cdn.example.com/lib.js">`, true},
+		{"local script", remoteAttributePattern, `<script src="/assets/index.js">`, false},
+		{"protocol-relative font", remoteCSSReferencePattern, `url(//fonts.example.com/font.woff2)`, true},
+		{"local font", remoteCSSReferencePattern, `url(/assets/font.woff2)`, false},
+	}
+
+	for _, test := range tests {
+		if got := test.pattern.MatchString(test.text); got != test.remote {
+			t.Errorf("%s: remote match = %v, want %v for %s", test.name, got, test.remote, test.text)
+		}
+	}
+}
+
 func TestBuiltFrontendIsSelfContained(t *testing.T) {
 	files := Files()
 	indexHTML, err := fs.ReadFile(files, "index.html")

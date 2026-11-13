@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
-const apiTarget = `http://${process.env.API_HOST ?? "127.0.0.1"}:8080`;
+const apiTarget = `http://${process.env.API_HOST ?? "127.0.0.1"}:${process.env.API_PORT ?? "8080"}`;
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -20,10 +20,10 @@ export default defineConfig({
       usePolling: true,
     },
     proxy: {
-      "/api": apiTarget,
-      "/healthz": apiTarget,
-      "/readyz": apiTarget,
-      "/version": apiTarget,
+      // Keys starting with ^ are regular expressions; plain keys are prefixes
+      // and would also proxy client routes such as /api-keys or /versions.
+      "^/api(/|$)": apiTarget,
+      "^/(healthz|readyz|version)$": apiTarget,
     },
   },
   test: {

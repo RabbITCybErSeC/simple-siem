@@ -3,11 +3,11 @@ package api_test
 import (
 	"io/fs"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/fstest"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/gin-gonic/gin"
 )
 
@@ -62,7 +62,7 @@ func TestUnknownPageRoutesReturnIndexHTML(t *testing.T) {
 		})
 	}
 
-	response := send(router, http.MethodPost, "/cases/42")
+	response := send(router, http.MethodPost, "/cases/42", "", nil)
 	if response.Code != http.StatusNotFound {
 		t.Errorf("POST /cases/42 = %d, want 404: %s", response.Code, response.Body)
 	}
@@ -86,6 +86,26 @@ func TestHealthRouteIsNotShadowedByWebUI(t *testing.T) {
 	}
 }
 
+func TestHeadOnHealthRoutesReachesHandlers(t *testing.T) {
+	db := databasetest.New(t)
+	closeDatabase(t, db)
+	router, _ := newTestRouter(t, db, nil, newTestWebFiles())
+
+	for target, wantStatus := range map[string]int{
+		"/healthz": http.StatusOK,
+		"/readyz":  http.StatusServiceUnavailable,
+		"/version": http.StatusOK,
+	} {
+		response := send(router, http.MethodHead, target, "", nil)
+		if response.Code != wantStatus {
+			t.Errorf("HEAD %s with the database down = %d, want %d", target, response.Code, wantStatus)
+		}
+		if strings.Contains(response.Body.String(), indexShellMarker) {
+			t.Errorf("HEAD %s returned index.html", target)
+		}
+	}
+}
+
 func TestUnknownAPIPathsReturnJSON(t *testing.T) {
 	router, _ := newTestRouter(t, nil, nil, newTestWebFiles())
 	tests := []struct {
@@ -100,7 +120,7 @@ func TestUnknownAPIPathsReturnJSON(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			response := send(router, test.method, test.target)
+			response := send(router, test.method, test.target, "", nil)
 			if response.Code != http.StatusNotFound {
 				t.Fatalf("%s %s = %d, want 404: %s", test.method, test.target, response.Code, response.Body)
 			}
@@ -207,8 +227,8 @@ func TestRequestLogWebRouteLabels(t *testing.T) {
 	}{
 		{name: "page", target: "/", wantRoute: "web"},
 		{name: "client route", target: "/cases/42", wantRoute: "web"},
-		{name: "asset", target: "/assets/index-abc123.js", wantRoute: "assets"},
-		{name: "missing asset", target: "/assets/missing.js", wantRoute: "assets"},
+		{name: "asset", target: "/assets/index-abc123.js", wantRoute: "/assets/*filepath"},
+		{name: "missing asset", target: "/assets/missing.js", wantRoute: "/assets/*filepath"},
 	}
 
 	for _, test := range tests {
@@ -232,11 +252,4 @@ func newTestWebFiles() fstest.MapFS {
 		"assets/index-abc123.js": {Data: []byte(testAssetScript)},
 		"embed.go":               {Data: []byte("package web\n")},
 	}
-}
-
-func send(router http.Handler, method, target string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, target, nil)
-	response := httptest.NewRecorder()
-	router.ServeHTTP(response, request)
-	return response
 }

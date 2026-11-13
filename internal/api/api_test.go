@@ -205,30 +205,6 @@ func TestUnknownAPIRoute(t *testing.T) {
 	}
 }
 
-func TestUnknownNonAPIRouteReturnsWebUI(t *testing.T) {
-	router, logs := newTestRouter(t, nil, nil, nil)
-
-	response := get(router, "/not-an-api-route", "", nil)
-	if response.Code != http.StatusOK {
-		t.Fatalf("GET /not-an-api-route = %d, want 200: %s", response.Code, response.Body)
-	}
-	if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "text/html") {
-		t.Errorf("non-API path Content-Type = %q, want HTML", contentType)
-	}
-	body := response.Body.String()
-	if !strings.Contains(body, "frontend is not built") {
-		t.Errorf("non-API path body = %s, want the frontend-not-built page", body)
-	}
-	if strings.Contains(body, "NOT_FOUND") {
-		t.Errorf("non-API path uses the API error format: %s", body)
-	}
-
-	record := logRecord(t, logs, "route")
-	if record["route"] != "web" {
-		t.Errorf("non-API request log route = %v, want \"web\"", record["route"])
-	}
-}
-
 func TestPanicRecovery(t *testing.T) {
 	router, logs := newTestRouter(t, nil, nil, nil)
 	const panicValue = "secret panic value"
@@ -382,7 +358,11 @@ func newTestRouter(t *testing.T, db *gorm.DB, trustedProxies []string, files fs.
 }
 
 func get(router http.Handler, target, remoteAddress string, headers map[string]string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodGet, target, nil)
+	return send(router, http.MethodGet, target, remoteAddress, headers)
+}
+
+func send(router http.Handler, method, target, remoteAddress string, headers map[string]string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, target, nil)
 	if remoteAddress != "" {
 		request.RemoteAddr = remoteAddress
 	}
