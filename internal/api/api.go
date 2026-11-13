@@ -1,50 +1,20 @@
 package api
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"io/fs"
-	"log/slog"
 	"net/http"
-	"runtime/debug"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 const (
-	requestIDHeader = "X-Request-Id"
-	apiPathPrefix   = "/api"
-	unmatchedRoute  = "unmatched"
-
-	webRouteLabel = "web"
+	apiPathPrefix = "/api"
+	// routeLabelKey names a request on the context when it matched no Gin
+	// route, so the request log can still say what it was.
 	routeLabelKey = "route_label"
-
-	immutableCacheControl = "public, max-age=31536000, immutable"
-	noCacheControl        = "no-cache"
-
-	contentSecurityPolicy = "default-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
-
-	frontendNotBuiltPage = `<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Simple SIEM</title></head>
-<body><h1>Simple SIEM</h1><p>The frontend is not built. Run <code>make build</code>.</p></body>
-</html>
-`
-
-	requestIDBytes   = 16
-	maxRequestID     = 64
-	readinessTimeout = time.Second
-
-	codeNotFound      = "NOT_FOUND"
-	codeInternalError = "INTERNAL_ERROR"
 )
 
-// NewRouter builds the HTTP engine with request ids, panic recovery, request
-// logging, health routes, and the API error format.
+// NewRouter builds the HTTP engine: middleware first, then the health and web
+// routes, then the fallback for every other path.
 func NewRouter(dependencies Dependencies) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -60,186 +30,22 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 		requestLog(dependencies.Logger),
 		recovery(dependencies.Logger),
 	)
+
+	health := healthHandler{
+		database:     dependencies.Database,
+		logger:       dependencies.Logger,
+		buildVersion: dependencies.Version,
+		buildCommit:  dependencies.Commit,
+	}
+	web := newWebHandler(dependencies.Web)
+
 	// Gin does not answer HEAD from GET routes; without these a HEAD /readyz
 	// would fall through to the web page and report ready.
 	readMethods := []string{http.MethodGet, http.MethodHead}
-	router.Match(readMethods, "/healthz", healthz)
-	router.Match(readMethods, "/readyz", readyz(dependencies.DB, dependencies.Logger))
-	router.Match(readMethods, "/version", version(dependencies.Version, dependencies.Commit))
-	router.Match(readMethods, "/assets/*filepath", assets(dependencies.Web))
-
-	indexHTML := []byte(frontendNotBuiltPage)
-	if dependencies.Web != nil {
-		if content, err := fs.ReadFile(dependencies.Web, "index.html"); err == nil {
-			indexHTML = content
-		}
-	}
-	router.NoRoute(noRoute(indexHTML))
+	router.Match(readMethods, "/healthz", health.healthz)
+	router.Match(readMethods, "/readyz", health.readyz)
+	router.Match(readMethods, "/version", health.version)
+	router.Match(readMethods, "/assets/*filepath", web.assets)
+	router.NoRoute(web.page)
 	return router
-}
-
-func securityHeaders() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("Content-Security-Policy", contentSecurityPolicy)
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("Referrer-Policy", "same-origin")
-		c.Next()
-	}
-}
-
-func requestID() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		identifier := c.GetHeader(requestIDHeader)
-		if !validRequestID(identifier) {
-			identifier = newRequestID()
-		}
-		c.Header(requestIDHeader, identifier)
-		c.Set(RequestIDKey, identifier)
-		c.Next()
-	}
-}
-
-// validRequestID accepts only the characters that are safe in a header and a
-// log line, so an incoming value can never inject either.
-func validRequestID(identifier string) bool {
-	if len(identifier) < 1 || len(identifier) > maxRequestID {
-		return false
-	}
-	for _, character := range identifier {
-		switch {
-		case character >= 'a' && character <= 'z':
-		case character >= 'A' && character <= 'Z':
-		case character >= '0' && character <= '9':
-		case character == '-', character == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func newRequestID() string {
-	identifier := make([]byte, requestIDBytes)
-	// crypto/rand.Read never returns an error since Go 1.24.
-	_, _ = rand.Read(identifier)
-	return hex.EncodeToString(identifier)
-}
-
-func recovery(logger *slog.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		defer func() {
-			recovered := recover()
-			if recovered == nil {
-				return
-			}
-			logger.Error("panic recovered",
-				"request_id", c.GetString(RequestIDKey),
-				"panic", recovered,
-				"stack", string(debug.Stack()),
-			)
-			if c.Writer.Written() {
-				c.Abort()
-				return
-			}
-			c.AbortWithStatusJSON(http.StatusInternalServerError, errorResponse{
-				Error: errorDetail{Code: codeInternalError, Message: "internal server error"},
-			})
-		}()
-		c.Next()
-	}
-}
-
-func requestLog(logger *slog.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		started := time.Now()
-		c.Next()
-
-		route := c.FullPath()
-		if route == "" {
-			route = c.GetString(routeLabelKey)
-		}
-		if route == "" {
-			route = unmatchedRoute
-		}
-		logger.Info("request",
-			"method", c.Request.Method,
-			"route", route,
-			"status", c.Writer.Status(),
-			"duration", time.Since(started),
-			"client_address", c.ClientIP(),
-			"request_id", c.GetString(RequestIDKey),
-		)
-	}
-}
-
-func healthz(c *gin.Context) {
-	c.JSON(http.StatusOK, statusResponse{Status: "ok"})
-}
-
-func readyz(db *gorm.DB, logger *slog.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		pingContext, cancel := context.WithTimeout(c.Request.Context(), readinessTimeout)
-		defer cancel()
-
-		sqlDatabase, err := db.DB()
-		if err == nil {
-			err = sqlDatabase.PingContext(pingContext)
-		}
-		if err != nil {
-			logger.Warn("readiness check failed",
-				"request_id", c.GetString(RequestIDKey),
-				"error", err,
-			)
-			c.JSON(http.StatusServiceUnavailable, readinessResponse{
-				Status: "unavailable",
-				Checks: map[string]string{"database": "unreachable"},
-			})
-			return
-		}
-		c.JSON(http.StatusOK, readinessResponse{Status: "ready"})
-	}
-}
-
-func version(version, commit string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, versionResponse{Version: version, Commit: commit})
-	}
-}
-
-// assets serves hashed build files. The path is deliberately not cleaned:
-// io/fs rejects any ".." element, which keeps requests inside the build.
-func assets(files fs.FS) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		assetPath := "assets" + c.Param("filepath")
-		if files == nil {
-			c.String(http.StatusNotFound, "not found")
-			return
-		}
-		info, err := fs.Stat(files, assetPath)
-		if err != nil || info.IsDir() {
-			c.String(http.StatusNotFound, "not found")
-			return
-		}
-		c.Header("Cache-Control", immutableCacheControl)
-		http.ServeFileFS(c.Writer, c.Request, files, assetPath)
-	}
-}
-
-func noRoute(indexHTML []byte) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		requestPath := c.Request.URL.Path
-		if requestPath == apiPathPrefix || strings.HasPrefix(requestPath, apiPathPrefix+"/") {
-			c.JSON(http.StatusNotFound, errorResponse{
-				Error: errorDetail{Code: codeNotFound, Message: "route not found"},
-			})
-			return
-		}
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			c.String(http.StatusNotFound, "not found")
-			return
-		}
-		c.Set(routeLabelKey, webRouteLabel)
-		c.Header("Cache-Control", noCacheControl)
-		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
-	}
 }

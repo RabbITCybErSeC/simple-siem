@@ -6,3 +6,4 @@ bin
 .make
 web/node_modules
 web/dist
+.pnpm-store

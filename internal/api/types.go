@@ -1,19 +1,24 @@
 package api
 
 import (
+	"context"
 	"io/fs"
 	"log/slog"
-
-	"gorm.io/gorm"
 )
 
 // RequestIDKey is the Gin context key holding the request id, so handlers can
 // copy it into audit events.
 const RequestIDKey = "request_id"
 
+// ReadinessChecker reports whether the database answers. *sql.DB satisfies
+// it; tests pass a fake.
+type ReadinessChecker interface {
+	PingContext(ctx context.Context) error
+}
+
 // Dependencies are the collaborators NewRouter needs.
 type Dependencies struct {
-	DB             *gorm.DB
+	Database       ReadinessChecker
 	Logger         *slog.Logger
 	Web            fs.FS
 	TrustedProxies []string

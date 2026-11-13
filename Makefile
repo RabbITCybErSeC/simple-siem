@@ -14,6 +14,7 @@ NODE_MODULES_VOLUME := simple-siem-web-node-modules
 # volume between running containers, and make lint test must keep working
 # while make dev runs.
 DEV_NODE_MODULES_VOLUME := simple-siem-web-dev-node-modules
+DEV_PNPM_STORE_VOLUME := simple-siem-web-dev-pnpm-store
 DEV_GO_MOD_CACHE_VOLUME := simple-siem-dev-go-mod
 DEV_GO_BUILD_CACHE_VOLUME := simple-siem-dev-go-build
 
@@ -126,7 +127,7 @@ shadcn-mcp: network toolchain web/node_modules
 
 dev: postgres toolchain web/node_modules
 	@$(CONTAINER) rm -f $(WEB_CONTAINER) $(DEV_CONTAINER) >/dev/null 2>&1 || true
-	$(COMMON_RUN) -d --name $(WEB_CONTAINER) -v $(CURDIR):/src -w /src/web -v $(DEV_NODE_MODULES_VOLUME):/src/web/node_modules -p 127.0.0.1:$(WEB_PORT):$(WEB_PORT) --env API_HOST=$(API_HOST) --env API_PORT=$(API_PORT) --env WEB_PORT=$(WEB_PORT) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm dev'
+	$(COMMON_RUN) -d --name $(WEB_CONTAINER) -v $(CURDIR):/src -w /src/web -v $(DEV_NODE_MODULES_VOLUME):/src/web/node_modules -v $(DEV_PNPM_STORE_VOLUME):/pnpm-store --env PNPM_CONFIG_STORE_DIR=/pnpm-store -p 127.0.0.1:$(WEB_PORT):$(WEB_PORT) --env API_HOST=$(API_HOST) --env API_PORT=$(API_PORT) --env WEB_PORT=$(WEB_PORT) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm dev'
 	$(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(DEV_GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(DEV_GO_BUILD_CACHE_VOLUME):/root/.cache/go-build $(API_PUBLISH) --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
 
 db-shell: postgres
@@ -145,6 +146,6 @@ down:
 clean:
 	@$(CONTAINER) rm -f $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) 2>/dev/null || true
 	@$(CONTAINER) network rm $(NETWORK) 2>/dev/null || true
-	@$(CONTAINER) volume rm $(POSTGRES_VOLUME) $(GO_MOD_CACHE_VOLUME) $(GO_BUILD_CACHE_VOLUME) $(PNPM_STORE_VOLUME) $(NODE_MODULES_VOLUME) $(DEV_NODE_MODULES_VOLUME) $(DEV_GO_MOD_CACHE_VOLUME) $(DEV_GO_BUILD_CACHE_VOLUME) 2>/dev/null || true
+	@$(CONTAINER) volume rm $(POSTGRES_VOLUME) $(GO_MOD_CACHE_VOLUME) $(GO_BUILD_CACHE_VOLUME) $(PNPM_STORE_VOLUME) $(NODE_MODULES_VOLUME) $(DEV_NODE_MODULES_VOLUME) $(DEV_PNPM_STORE_VOLUME) $(DEV_GO_MOD_CACHE_VOLUME) $(DEV_GO_BUILD_CACHE_VOLUME) 2>/dev/null || true
 	@$(CONTAINER) image rm $(TOOLCHAIN_IMAGE) 2>/dev/null || true
 	rm -rf bin .make web/node_modules

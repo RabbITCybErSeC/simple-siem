@@ -3,7 +3,10 @@ package api_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -13,11 +16,11 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/api"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 const (
@@ -26,9 +29,7 @@ const (
 )
 
 func TestHealthzIgnoresDatabase(t *testing.T) {
-	db := databasetest.New(t)
-	closeDatabase(t, db)
-	router, _ := newTestRouter(t, db, nil, nil)
+	router, _ := newTestRouter(t, fakeReadiness{err: errors.New("database is down")}, nil, nil)
 
 	response := get(router, "/healthz", "", nil)
 	if response.Code != http.StatusOK {
@@ -43,9 +44,15 @@ func TestHealthzIgnoresDatabase(t *testing.T) {
 	}
 }
 
-func TestReadyz(t *testing.T) {
+// TestReadyzPingsPostgreSQL proves the real *sql.DB satisfies the readiness
+// check; the other readiness cases use a fake.
+func TestReadyzPingsPostgreSQL(t *testing.T) {
 	db := databasetest.New(t)
-	router, _ := newTestRouter(t, db, nil, nil)
+	sqlDatabase, err := db.DB()
+	if err != nil {
+		t.Fatalf("get database connection pool: %v", err)
+	}
+	router, _ := newTestRouter(t, sqlDatabase, nil, nil)
 
 	response := get(router, "/readyz", "", nil)
 	if response.Code != http.StatusOK {
@@ -63,7 +70,9 @@ func TestReadyz(t *testing.T) {
 		t.Errorf("GET /readyz checks = %v, want none", body.Checks)
 	}
 
-	closeDatabase(t, db)
+	if err := sqlDatabase.Close(); err != nil {
+		t.Fatalf("close database connection pool: %v", err)
+	}
 	response = get(router, "/readyz", "", nil)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("GET /readyz with the database down = %d, want 503: %s", response.Code, response.Body)
@@ -84,6 +93,44 @@ func TestReadyz(t *testing.T) {
 		if leaked != "" && strings.Contains(raw, leaked) {
 			t.Errorf("GET /readyz body leaks %q: %s", leaked, raw)
 		}
+	}
+}
+
+func TestReadyzWithReadinessChecker(t *testing.T) {
+	const checkError = "dial tcp db.internal:5432: password authentication failed for hunter2"
+	tests := []struct {
+		name       string
+		checker    fakeReadiness
+		wantStatus int
+	}{
+		{name: "database answers", checker: fakeReadiness{}, wantStatus: http.StatusOK},
+		{name: "database fails", checker: fakeReadiness{err: errors.New(checkError)}, wantStatus: http.StatusServiceUnavailable},
+		{name: "database hangs", checker: fakeReadiness{delay: time.Hour}, wantStatus: http.StatusServiceUnavailable},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router := api.NewRouter(api.Dependencies{
+				Database: test.checker,
+				Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+
+			started := time.Now()
+			response := get(router, "/readyz", "", nil)
+			elapsed := time.Since(started)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("GET /readyz = %d, want %d: %s", response.Code, test.wantStatus, response.Body)
+			}
+			if elapsed > 2*time.Second {
+				t.Errorf("GET /readyz took %s, want about 1 second at most", elapsed)
+			}
+			for _, leaked := range []string{"db.internal", "hunter2", "dial tcp"} {
+				if strings.Contains(response.Body.String(), leaked) {
+					t.Errorf("GET /readyz body leaks %q: %s", leaked, response.Body)
+				}
+			}
+		})
 	}
 }
 
@@ -342,12 +389,12 @@ func TestRequestLogLine(t *testing.T) {
 	}
 }
 
-func newTestRouter(t *testing.T, db *gorm.DB, trustedProxies []string, files fs.FS) (*gin.Engine, *bytes.Buffer) {
+func newTestRouter(t *testing.T, database api.ReadinessChecker, trustedProxies []string, files fs.FS) (*gin.Engine, *bytes.Buffer) {
 	t.Helper()
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	router := api.NewRouter(api.Dependencies{
-		DB:             db,
+		Database:       database,
 		Logger:         logger,
 		Web:            files,
 		TrustedProxies: trustedProxies,
@@ -409,13 +456,23 @@ func logRecord(t *testing.T, logs *bytes.Buffer, key string) map[string]any {
 	return nil
 }
 
-func closeDatabase(t *testing.T, db *gorm.DB) {
-	t.Helper()
-	sqlDatabase, err := db.DB()
-	if err != nil {
-		t.Fatalf("get database connection pool: %v", err)
+// fakeReadiness stands in for the database ping. A delay longer than the
+// request's deadline blocks until that deadline, as a real driver does.
+type fakeReadiness struct {
+	err   error
+	delay time.Duration
+}
+
+func (readiness fakeReadiness) PingContext(ctx context.Context) error {
+	if readiness.delay == 0 {
+		return readiness.err
 	}
-	if err := sqlDatabase.Close(); err != nil {
-		t.Fatalf("close database connection pool: %v", err)
+	timer := time.NewTimer(readiness.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return readiness.err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

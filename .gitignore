@@ -21,6 +21,7 @@ AGENTS.md
 web/node_modules/
 web/dist/*
 !web/dist/.gitkeep
+.pnpm-store/
 
 # Local agent configuration.
 .mcp.json

@@ -1,13 +1,13 @@
 package api_test
 
 import (
+	"errors"
 	"io/fs"
 	"net/http"
 	"strings"
 	"testing"
 	"testing/fstest"
 
-	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/gin-gonic/gin"
 )
 
@@ -87,9 +87,7 @@ func TestHealthRouteIsNotShadowedByWebUI(t *testing.T) {
 }
 
 func TestHeadOnHealthRoutesReachesHandlers(t *testing.T) {
-	db := databasetest.New(t)
-	closeDatabase(t, db)
-	router, _ := newTestRouter(t, db, nil, newTestWebFiles())
+	router, _ := newTestRouter(t, fakeReadiness{err: errors.New("database is down")}, nil, newTestWebFiles())
 
 	for target, wantStatus := range map[string]int{
 		"/healthz": http.StatusOK,
