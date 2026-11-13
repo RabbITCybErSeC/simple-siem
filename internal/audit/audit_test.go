@@ -582,9 +582,10 @@ func TestRecordKeepsReferenceKeys(t *testing.T) {
 
 func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	db := databasetest.New(t)
+	versions := appliedMigrationVersions(t, db)
 
-	if got := countEvents(t, db, ""); got != 3 {
-		t.Fatalf("fresh database has %d audit events, want exactly 3", got)
+	if got := countEvents(t, db, ""); got != int64(len(versions)) {
+		t.Fatalf("fresh database has %d audit events, want exactly %d", got, len(versions))
 	}
 	stored := storedEventByTarget(t, db, "1")
 	fields := []struct {
@@ -613,8 +614,8 @@ func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	if len(applied) != 0 {
 		t.Errorf("Migrate applied %v on an up-to-date database, want none", applied)
 	}
-	if got := countEvents(t, db, ""); got != 3 {
-		t.Errorf("second Migrate changed the audit event count to %d, want 3", got)
+	if got := countEvents(t, db, ""); got != int64(len(versions)) {
+		t.Errorf("second Migrate changed the audit event count to %d, want %d", got, len(versions))
 	}
 }
 
@@ -641,19 +642,20 @@ func TestMigrateRestoresMissingMigrationAuditEvent(t *testing.T) {
 
 func TestMigrateDoesNotDuplicateMigrationAuditEvents(t *testing.T) {
 	db := databasetest.New(t)
+	versions := appliedMigrationVersions(t, db)
 
 	for run := 1; run <= 2; run++ {
 		if _, err := database.Migrate(context.Background(), db); err != nil {
 			t.Fatalf("Migrate run %d: %v", run, err)
 		}
 	}
-	for _, version := range []string{"1", "2", "3"} {
+	for _, version := range versions {
 		if got := countEvents(t, db, "target_type = ? AND target_id = ?", "DATABASE_MIGRATION", version); got != 1 {
 			t.Errorf("migration %s has %d audit events after two Migrate runs, want 1", version, got)
 		}
 	}
-	if got := countEvents(t, db, ""); got != 3 {
-		t.Errorf("database has %d audit events after two Migrate runs, want 3", got)
+	if got := countEvents(t, db, ""); got != int64(len(versions)) {
+		t.Errorf("database has %d audit events after two Migrate runs, want %d", got, len(versions))
 	}
 }
 
@@ -704,6 +706,23 @@ func storedEventByTarget(t *testing.T, db *gorm.DB, targetID string) storedEvent
 		t.Fatalf("no audit event for target %q", targetID)
 	}
 	return stored
+}
+
+func appliedMigrationVersions(t *testing.T, db *gorm.DB) []string {
+	t.Helper()
+	var versions []string
+	err := db.Raw(`
+		SELECT version_id::text
+		FROM goose_db_version
+		WHERE version_id > 0 AND is_applied
+		ORDER BY version_id`).Scan(&versions).Error
+	if err != nil {
+		t.Fatalf("read applied migration versions: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Fatal("migrated database has no applied migration versions")
+	}
+	return versions
 }
 
 func countEvents(t *testing.T, db *gorm.DB, where string, args ...any) int64 {

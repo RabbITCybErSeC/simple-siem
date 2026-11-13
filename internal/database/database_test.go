@@ -3,6 +3,7 @@ package database_test
 import (
 	"context"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 func TestMigrateAppliesOnceConcurrently(t *testing.T) {
 	db := databasetest.New(t)
 	resetSchema(t, db)
+	expectedVersions := embeddedVersions(t)
 
 	versions := make([][]int64, 2)
 	errs := make([]error, 2)
@@ -36,10 +38,10 @@ func TestMigrateAppliesOnceConcurrently(t *testing.T) {
 		}
 		applied += len(versions[index])
 	}
-	if applied != 3 {
-		t.Errorf("applied %d versions across two runs, want 3: %v", applied, versions)
+	if applied != len(expectedVersions) {
+		t.Errorf("applied %d versions across two runs, want %d: %v", applied, len(expectedVersions), versions)
 	}
-	for _, version := range []int64{1, 2, 3} {
+	for _, version := range expectedVersions {
 		if got := countGooseVersion(t, db, version); got != 1 {
 			t.Errorf("migration %d recorded %d times, want 1", version, got)
 		}
@@ -48,14 +50,11 @@ func TestMigrateAppliesOnceConcurrently(t *testing.T) {
 
 func TestMigrateAlreadyApplied(t *testing.T) {
 	db := databasetest.New(t)
-	if got := countGooseVersion(t, db, 1); got != 1 {
-		t.Fatalf("migration 1 recorded %d times after databasetest.New, want 1", got)
-	}
-	if got := countGooseVersion(t, db, 2); got != 1 {
-		t.Fatalf("migration 2 recorded %d times after databasetest.New, want 1", got)
-	}
-	if got := countGooseVersion(t, db, 3); got != 1 {
-		t.Fatalf("migration 3 recorded %d times after databasetest.New, want 1", got)
+	versions := embeddedVersions(t)
+	for _, version := range versions {
+		if got := countGooseVersion(t, db, version); got != 1 {
+			t.Fatalf("migration %d recorded %d times after databasetest.New, want 1", version, got)
+		}
 	}
 
 	applied, err := database.Migrate(context.Background(), db)
@@ -65,7 +64,7 @@ func TestMigrateAlreadyApplied(t *testing.T) {
 	if len(applied) != 0 {
 		t.Errorf("Migrate applied %v on an up-to-date database, want none", applied)
 	}
-	for _, version := range []int64{1, 2, 3} {
+	for _, version := range versions {
 		if got := countGooseVersion(t, db, version); got != 1 {
 			t.Errorf("migration %d recorded %d times after a second run, want 1", version, got)
 		}
@@ -74,6 +73,8 @@ func TestMigrateAlreadyApplied(t *testing.T) {
 
 func TestMigrateRefusesNewerSchema(t *testing.T) {
 	db := databasetest.New(t)
+	versions := embeddedVersions(t)
+	latest := versions[len(versions)-1]
 	if err := db.Exec("INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, ?)", 9999, true).Error; err != nil {
 		t.Fatalf("record newer schema version: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestMigrateRefusesNewerSchema(t *testing.T) {
 	if err == nil {
 		t.Fatal("Migrate accepted a database newer than the embedded migrations")
 	}
-	for _, version := range []string{"9999", "3"} {
+	for _, version := range []string{"9999", strconv.FormatInt(latest, 10)} {
 		if !strings.Contains(err.Error(), version) {
 			t.Errorf("Migrate error %q does not name version %s", err, version)
 		}
@@ -110,6 +111,8 @@ func TestOpenErrorDoesNotLeakPassword(t *testing.T) {
 
 func TestCheckSchemaRejectsNewerSchema(t *testing.T) {
 	db := databasetest.New(t)
+	versions := embeddedVersions(t)
+	latest := versions[len(versions)-1]
 	if err := db.Exec("INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, ?)", 9999, true).Error; err != nil {
 		t.Fatalf("record newer schema version: %v", err)
 	}
@@ -118,7 +121,7 @@ func TestCheckSchemaRejectsNewerSchema(t *testing.T) {
 	if err == nil {
 		t.Fatal("CheckSchema accepted a database newer than the embedded migrations")
 	}
-	for _, version := range []string{"9999", "3"} {
+	for _, version := range []string{"9999", strconv.FormatInt(latest, 10)} {
 		if !strings.Contains(err.Error(), version) {
 			t.Errorf("CheckSchema error %q does not name version %s", err, version)
 		}
@@ -128,12 +131,14 @@ func TestCheckSchemaRejectsNewerSchema(t *testing.T) {
 func TestCheckSchemaRejectsPendingMigration(t *testing.T) {
 	db := databasetest.New(t)
 	resetSchema(t, db)
+	versions := embeddedVersions(t)
+	latest := versions[len(versions)-1]
 
 	err := database.CheckSchema(context.Background(), db)
 	if err == nil {
 		t.Fatal("CheckSchema accepted a database with a pending migration")
 	}
-	for _, version := range []string{"0", "3"} {
+	for _, version := range []string{"0", strconv.FormatInt(latest, 10)} {
 		if !strings.Contains(err.Error(), version) {
 			t.Errorf("CheckSchema error %q does not name version %s", err, version)
 		}
@@ -155,6 +160,18 @@ func resetSchema(t *testing.T, db *gorm.DB) {
 			t.Fatalf("%s: %v", statement, err)
 		}
 	}
+}
+
+func embeddedVersions(t *testing.T) []int64 {
+	t.Helper()
+	versions, err := database.EmbeddedMigrationVersionsForTest()
+	if err != nil {
+		t.Fatalf("read embedded migration versions: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Fatal("embedded migration versions list is empty")
+	}
+	return versions
 }
 
 func countGooseVersion(t *testing.T, db *gorm.DB, version int64) int {
