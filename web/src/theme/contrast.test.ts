@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import stylesheet from "../index.css?raw";
 
 type Theme = "light" | "dark";
 
@@ -17,11 +17,9 @@ interface Rgb {
   b: number;
 }
 
-const css = readFileSync("src/index.css", "utf8");
-
 const tokensByTheme: Record<Theme, Map<string, Oklch>> = {
-  light: parseThemeTokens(css, ":root"),
-  dark: parseThemeTokens(css, ".dark"),
+  light: parseThemeTokens(stylesheet, ":root"),
+  dark: parseThemeTokens(stylesheet, ".dark"),
 };
 
 const pairsAt45 = [
