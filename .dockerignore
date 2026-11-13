@@ -4,3 +4,5 @@
 .env
 bin
 .make
+web/node_modules
+web/dist
