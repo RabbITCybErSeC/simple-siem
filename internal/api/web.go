@@ -9,8 +9,6 @@ import (
 )
 
 const (
-	webRouteLabel = "web"
-
 	immutableCacheControl = "public, max-age=31536000, immutable"
 	noCacheControl        = "no-cache"
 

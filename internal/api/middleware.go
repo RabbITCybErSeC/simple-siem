@@ -15,7 +15,6 @@ const (
 	requestIDHeader = "X-Request-Id"
 	requestIDBytes  = 16
 	maxRequestID    = 64
-	unmatchedRoute  = "unmatched"
 
 	contentSecurityPolicy = "default-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
 
@@ -92,6 +91,14 @@ func recovery(logger *slog.Logger) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+const (
+	// routeLabelKey names a request on the context when it matched no Gin
+	// route, so the request log can still say what it was.
+	routeLabelKey  = "route_label"
+	webRouteLabel  = "web"
+	unmatchedRoute = "unmatched"
+)
 
 func requestLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
