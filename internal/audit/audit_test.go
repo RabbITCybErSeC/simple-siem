@@ -491,13 +491,14 @@ func TestRecordRedactsEverySensitiveKeyPart(t *testing.T) {
 	}
 }
 
-func TestRecordKeepsIdentifierKeys(t *testing.T) {
+func TestRecordRedactsIdentifierLookingCredentials(t *testing.T) {
 	db := databasetest.New(t)
-	event := validEvent("identifier-keys")
+	event := validEvent("identifier-looking-credentials")
 	event.Changes = map[string]any{
 		"after": map[string]any{
 			"sessionId":     "session_456",
-			"secretRefId":   "sr_1",
+			"secret_id":     "s-1",
+			"token_valid":   "t-2",
 			"sessionCookie": "c-789",
 		},
 	}
@@ -511,21 +512,65 @@ func TestRecordKeepsIdentifierKeys(t *testing.T) {
 	if !ok {
 		t.Fatalf("stored changes has no after object: %s", stored.Changes)
 	}
+	for _, key := range []string{"sessionId", "secret_id", "token_valid", "sessionCookie"} {
+		if got := after[key]; got != redactedValue {
+			t.Errorf("stored changes.after.%s = %v, want %s", key, got, redactedValue)
+		}
+	}
+
+	redactions := storedRedactions(t, stored)
+	want := []string{
+		"changes.after.secret_id",
+		"changes.after.sessionCookie",
+		"changes.after.sessionId",
+		"changes.after.token_valid",
+	}
+	if !slices.Equal(redactions, want) {
+		t.Errorf("stored redactions = %v, want %v", redactions, want)
+	}
+
+	var row string
+	if err := db.Raw("SELECT row_to_json(t)::text FROM audit_events t WHERE target_id = ?", event.TargetID).Scan(&row).Error; err != nil {
+		t.Fatalf("read audit event row for target %q: %v", event.TargetID, err)
+	}
+	for _, credential := range []string{"session_456", "s-1", "t-2", "c-789"} {
+		if strings.Contains(row, credential) {
+			t.Errorf("stored audit row contains the credential %q: %s", credential, row)
+		}
+	}
+}
+
+func TestRecordKeepsReferenceKeys(t *testing.T) {
+	db := databasetest.New(t)
+	event := validEvent("reference-keys")
+	event.Changes = map[string]any{
+		"after": map[string]any{
+			"secretRef":     "env:ES_KEY",
+			"secret_ref_id": "sr_1",
+			"password-ref":  "vault:db",
+		},
+	}
+
+	if err := audit.Record(db, event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	stored := storedEventByTarget(t, db, event.TargetID)
+	changes := storedChanges(t, stored)
+	after, ok := changes["after"].(map[string]any)
+	if !ok {
+		t.Fatalf("stored changes has no after object: %s", stored.Changes)
+	}
 	for key, want := range map[string]string{
-		"sessionId":   "session_456",
-		"secretRefId": "sr_1",
+		"secretRef":     "env:ES_KEY",
+		"secret_ref_id": "sr_1",
+		"password-ref":  "vault:db",
 	} {
 		if got := after[key]; got != want {
 			t.Errorf("stored changes.after.%s = %v, want %s", key, got, want)
 		}
 	}
-	if got := after["sessionCookie"]; got != redactedValue {
-		t.Errorf("stored changes.after.sessionCookie = %v, want %s", got, redactedValue)
-	}
-
-	redactions := storedRedactions(t, stored)
-	if want := []string{"changes.after.sessionCookie"}; !slices.Equal(redactions, want) {
-		t.Errorf("stored redactions = %v, want %v", redactions, want)
+	if redactions := storedRedactions(t, stored); len(redactions) != 0 {
+		t.Errorf("stored redactions = %v, want none", redactions)
 	}
 }
 
