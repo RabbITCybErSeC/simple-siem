@@ -41,6 +41,15 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	router.Match(readMethods, "/readyz", health.readyz)
 	router.Match(readMethods, "/version", health.version)
 	router.Match(readMethods, "/assets/*filepath", web.assets)
+
+	authentication := authHandler{service: dependencies.Auth, logger: dependencies.Logger}
+	v1 := router.Group("/api/v1")
+	v1.GET("/auth/providers", authentication.providers)
+	v1.POST("/auth/login", authentication.login)
+	authenticated := v1.Group("", requireSession(dependencies.Auth, dependencies.Logger))
+	authenticated.POST("/auth/logout", authentication.logout)
+	authenticated.GET("/me", authentication.me)
+
 	router.NoRoute(web.page)
 	return router
 }
