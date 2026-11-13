@@ -6,12 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const (
-	apiPathPrefix = "/api"
-	// routeLabelKey names a request on the context when it matched no Gin
-	// route, so the request log can still say what it was.
-	routeLabelKey = "route_label"
-)
+const apiPathPrefix = "/api"
 
 // NewRouter builds the HTTP engine: middleware first, then the health and web
 // routes, then the fallback for every other path.

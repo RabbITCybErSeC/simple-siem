@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -10,6 +11,8 @@ import (
 )
 
 const readinessTimeout = time.Second
+
+var errNoReadinessChecker = errors.New("no readiness checker")
 
 type healthHandler struct {
 	database     ReadinessChecker
@@ -26,7 +29,11 @@ func (health healthHandler) readyz(c *gin.Context) {
 	pingContext, cancel := context.WithTimeout(c.Request.Context(), readinessTimeout)
 	defer cancel()
 
-	if err := health.database.PingContext(pingContext); err != nil {
+	err := errNoReadinessChecker
+	if health.database != nil {
+		err = health.database.PingContext(pingContext)
+	}
+	if err != nil {
 		health.logger.Warn("readiness check failed",
 			"request_id", c.GetString(RequestIDKey),
 			"error", err,

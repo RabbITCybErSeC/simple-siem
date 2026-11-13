@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -77,60 +76,67 @@ func TestReadyzPingsPostgreSQL(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("GET /readyz with the database down = %d, want 503: %s", response.Code, response.Body)
 	}
-	body = struct {
-		Status string            `json:"status"`
-		Checks map[string]string `json:"checks"`
-	}{}
-	decodeJSON(t, response, &body)
-	if body.Status != "unavailable" {
-		t.Errorf("GET /readyz status = %q, want unavailable", body.Status)
-	}
-	if want := map[string]string{"database": "unreachable"}; !reflect.DeepEqual(body.Checks, want) {
-		t.Errorf("GET /readyz checks = %v, want %v", body.Checks, want)
-	}
+	assertReadinessUnavailable(t, response)
 	raw := response.Body.String()
-	for _, leaked := range []string{os.Getenv("POSTGRES_HOST"), os.Getenv("POSTGRES_PASSWORD"), "database is closed", "sql:"} {
-		if leaked != "" && strings.Contains(raw, leaked) {
-			t.Errorf("GET /readyz body leaks %q: %s", leaked, raw)
-		}
-	}
+	assertNoLeak(t, raw,
+		os.Getenv("POSTGRES_HOST"),
+		os.Getenv("POSTGRES_PASSWORD"),
+		"database is closed",
+		"sql:",
+	)
 }
 
 func TestReadyzWithReadinessChecker(t *testing.T) {
 	const checkError = "dial tcp db.internal:5432: password authentication failed for hunter2"
 	tests := []struct {
 		name       string
-		checker    fakeReadiness
+		checker    api.ReadinessChecker
 		wantStatus int
 	}{
 		{name: "database answers", checker: fakeReadiness{}, wantStatus: http.StatusOK},
 		{name: "database fails", checker: fakeReadiness{err: errors.New(checkError)}, wantStatus: http.StatusServiceUnavailable},
-		{name: "database hangs", checker: fakeReadiness{delay: time.Hour}, wantStatus: http.StatusServiceUnavailable},
+		{name: "database hangs", checker: hangingReadiness{}, wantStatus: http.StatusServiceUnavailable},
+		{name: "no checker", checker: nil, wantStatus: http.StatusServiceUnavailable},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			router := api.NewRouter(api.Dependencies{
-				Database: test.checker,
-				Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			})
+			router, _ := newTestRouter(t, test.checker, nil, nil)
 
-			started := time.Now()
 			response := get(router, "/readyz", "", nil)
-			elapsed := time.Since(started)
 
 			if response.Code != test.wantStatus {
 				t.Fatalf("GET /readyz = %d, want %d: %s", response.Code, test.wantStatus, response.Body)
 			}
-			if elapsed > 2*time.Second {
-				t.Errorf("GET /readyz took %s, want about 1 second at most", elapsed)
+			if test.wantStatus == http.StatusServiceUnavailable {
+				assertReadinessUnavailable(t, response)
 			}
-			for _, leaked := range []string{"db.internal", "hunter2", "dial tcp"} {
-				if strings.Contains(response.Body.String(), leaked) {
-					t.Errorf("GET /readyz body leaks %q: %s", leaked, response.Body)
-				}
-			}
+			assertNoLeak(t, response.Body.String(), "db.internal", "hunter2", "dial tcp")
 		})
+	}
+}
+
+// TestReadyzDeadline asserts the deadline the handler gives the ping instead of
+// waiting out a real one.
+func TestReadyzDeadline(t *testing.T) {
+	var deadline time.Time
+	router, _ := newTestRouter(t, deadlineReadiness{deadline: &deadline}, nil, nil)
+
+	started := time.Now()
+	response := get(router, "/readyz", "", nil)
+	finished := time.Now()
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz = %d, want 503: %s", response.Code, response.Body)
+	}
+	if deadline.IsZero() {
+		t.Fatal("readiness ping has no deadline")
+	}
+	if deadline.Before(started.Add(time.Second)) {
+		t.Errorf("deadline %s is before %s, want the handler's 1 second timeout", deadline, started.Add(time.Second))
+	}
+	if deadline.After(finished.Add(time.Second)) {
+		t.Errorf("deadline %s is after %s, want the handler's 1 second timeout", deadline, finished.Add(time.Second))
 	}
 }
 
@@ -267,11 +273,7 @@ func TestPanicRecovery(t *testing.T) {
 	if !strings.Contains(body, `"code":"INTERNAL_ERROR"`) {
 		t.Errorf("panic response body = %s, want code INTERNAL_ERROR", body)
 	}
-	for _, leaked := range []string{panicValue, "goroutine ", "runtime/debug"} {
-		if strings.Contains(body, leaked) {
-			t.Errorf("panic response body leaks %q: %s", leaked, body)
-		}
-	}
+	assertNoLeak(t, body, panicValue, "goroutine ", "runtime/debug")
 
 	requestID := response.Header().Get("X-Request-Id")
 	if requestID == "" {
@@ -428,6 +430,30 @@ func decodeJSON(t *testing.T, response *httptest.ResponseRecorder, value any) {
 	}
 }
 
+func assertNoLeak(t *testing.T, body string, secrets ...string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(body, secret) {
+			t.Errorf("body leaks %q: %s", secret, body)
+		}
+	}
+}
+
+func assertReadinessUnavailable(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
+	var body struct {
+		Status string            `json:"status"`
+		Checks map[string]string `json:"checks"`
+	}
+	decodeJSON(t, response, &body)
+	if body.Status != "unavailable" {
+		t.Errorf("GET /readyz status = %q, want unavailable", body.Status)
+	}
+	if want := map[string]string{"database": "unreachable"}; !reflect.DeepEqual(body.Checks, want) {
+		t.Errorf("GET /readyz checks = %v, want %v", body.Checks, want)
+	}
+}
+
 func logRecords(t *testing.T, logs *bytes.Buffer) []map[string]any {
 	t.Helper()
 	var records []map[string]any
@@ -456,23 +482,31 @@ func logRecord(t *testing.T, logs *bytes.Buffer, key string) map[string]any {
 	return nil
 }
 
-// fakeReadiness stands in for the database ping. A delay longer than the
-// request's deadline blocks until that deadline, as a real driver does.
+// fakeReadiness stands in for the database ping.
 type fakeReadiness struct {
-	err   error
-	delay time.Duration
+	err error
 }
 
-func (readiness fakeReadiness) PingContext(ctx context.Context) error {
-	if readiness.delay == 0 {
-		return readiness.err
+func (readiness fakeReadiness) PingContext(context.Context) error {
+	return readiness.err
+}
+
+// hangingReadiness blocks until the deadline, as a driver does when the
+// database hangs.
+type hangingReadiness struct{}
+
+func (hangingReadiness) PingContext(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// deadlineReadiness records the deadline it was given and answers as a
+// driver does once that deadline has passed.
+type deadlineReadiness struct{ deadline *time.Time }
+
+func (readiness deadlineReadiness) PingContext(ctx context.Context) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		*readiness.deadline = deadline
 	}
-	timer := time.NewTimer(readiness.delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return readiness.err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return context.DeadlineExceeded
 }

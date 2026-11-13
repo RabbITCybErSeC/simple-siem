@@ -13,7 +13,8 @@ NODE_MODULES_VOLUME := simple-siem-web-node-modules
 # make dev containers keep their own caches: Apple container will not share a
 # volume between running containers, and make lint test must keep working
 # while make dev runs.
-DEV_NODE_MODULES_VOLUME := simple-siem-web-dev-node-modules
+# Renamed so no volume installed against the old in-repository pnpm store is reused.
+DEV_NODE_MODULES_VOLUME := simple-siem-web-dev-modules
 DEV_PNPM_STORE_VOLUME := simple-siem-web-dev-pnpm-store
 DEV_GO_MOD_CACHE_VOLUME := simple-siem-dev-go-mod
 DEV_GO_BUILD_CACHE_VOLUME := simple-siem-dev-go-build
@@ -80,7 +81,10 @@ RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/
 # Frontend commands run in web/ with the pnpm store and node_modules kept out
 # of the Go build and the macOS bind mount. They do not mount the Go caches,
 # because Apple container will not share a volume between running containers.
-WEB_RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src/web -v $(PNPM_STORE_VOLUME):/pnpm-store -v $(NODE_MODULES_VOLUME):/src/web/node_modules --env PNPM_CONFIG_STORE_DIR=/pnpm-store
+# The store and node_modules are separate volumes, so pnpm cannot hard-link;
+# copy is set so that choice is deliberate, not a silent fallback.
+PNPM_ENV = --env PNPM_CONFIG_STORE_DIR=/pnpm-store --env PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy
+WEB_RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src/web -v $(PNPM_STORE_VOLUME):/pnpm-store -v $(NODE_MODULES_VOLUME):/src/web/node_modules $(PNPM_ENV)
 
 .PHONY: toolchain network postgres test lint build e2e e2e-image run dev db-shell image debug down clean pnpm shadcn-mcp
 
@@ -149,7 +153,7 @@ shadcn-mcp: network toolchain web/node_modules
 
 dev: postgres toolchain web/node_modules
 	@$(CONTAINER) rm -f $(WEB_CONTAINER) $(DEV_CONTAINER) >/dev/null 2>&1 || true
-	$(COMMON_RUN) -d --name $(WEB_CONTAINER) -v $(CURDIR):/src -w /src/web -v $(DEV_NODE_MODULES_VOLUME):/src/web/node_modules -v $(DEV_PNPM_STORE_VOLUME):/pnpm-store --env PNPM_CONFIG_STORE_DIR=/pnpm-store -p 127.0.0.1:$(WEB_PORT):$(WEB_PORT) --env API_HOST=$(API_HOST) --env API_PORT=$(API_PORT) --env WEB_PORT=$(WEB_PORT) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm dev'
+	$(COMMON_RUN) -d --name $(WEB_CONTAINER) -v $(CURDIR):/src -w /src/web -v $(DEV_NODE_MODULES_VOLUME):/src/web/node_modules -v $(DEV_PNPM_STORE_VOLUME):/pnpm-store $(PNPM_ENV) -p 127.0.0.1:$(WEB_PORT):$(WEB_PORT) --env API_HOST=$(API_HOST) --env API_PORT=$(API_PORT) --env WEB_PORT=$(WEB_PORT) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm dev'
 	$(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(DEV_GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(DEV_GO_BUILD_CACHE_VOLUME):/root/.cache/go-build $(API_PUBLISH) --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
 
 db-shell: postgres
