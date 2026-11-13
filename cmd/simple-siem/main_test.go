@@ -152,19 +152,18 @@ func TestRunMigrateAppliesPendingMigrations(t *testing.T) {
 }
 
 func TestNewHTTPServerSetsTimeouts(t *testing.T) {
-	db := databasetest.New(t)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, db, logger)
+	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, logger)
 
 	timeouts := []struct {
 		name string
 		got  time.Duration
 		want time.Duration
 	}{
-		{"ReadHeaderTimeout", server.ReadHeaderTimeout, 10 * time.Second},
-		{"ReadTimeout", server.ReadTimeout, 30 * time.Second},
-		{"WriteTimeout", server.WriteTimeout, 60 * time.Second},
-		{"IdleTimeout", server.IdleTimeout, 120 * time.Second},
+		{"ReadHeaderTimeout", server.ReadHeaderTimeout, readHeaderTimeout},
+		{"ReadTimeout", server.ReadTimeout, readTimeout},
+		{"WriteTimeout", server.WriteTimeout, writeTimeout},
+		{"IdleTimeout", server.IdleTimeout, idleTimeout},
 	}
 	for _, timeout := range timeouts {
 		if timeout.got != timeout.want {

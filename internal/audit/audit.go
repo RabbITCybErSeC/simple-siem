@@ -142,6 +142,10 @@ func redactValue(value any, path string, paths *[]string) any {
 
 func isSensitiveKey(key string) bool {
 	lowered := strings.ToLower(key)
+	identifier := strings.ReplaceAll(strings.ReplaceAll(lowered, "_", ""), "-", "")
+	if strings.HasSuffix(identifier, "id") || strings.HasSuffix(identifier, "ref") {
+		return false
+	}
 	for _, part := range sensitiveKeyParts {
 		if strings.Contains(lowered, part) {
 			return true

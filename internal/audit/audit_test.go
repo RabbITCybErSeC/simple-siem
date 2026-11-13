@@ -491,11 +491,49 @@ func TestRecordRedactsEverySensitiveKeyPart(t *testing.T) {
 	}
 }
 
+func TestRecordKeepsIdentifierKeys(t *testing.T) {
+	db := databasetest.New(t)
+	event := validEvent("identifier-keys")
+	event.Changes = map[string]any{
+		"after": map[string]any{
+			"sessionId":     "session_456",
+			"secretRefId":   "sr_1",
+			"sessionCookie": "c-789",
+		},
+	}
+
+	if err := audit.Record(db, event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	stored := storedEventByTarget(t, db, event.TargetID)
+	changes := storedChanges(t, stored)
+	after, ok := changes["after"].(map[string]any)
+	if !ok {
+		t.Fatalf("stored changes has no after object: %s", stored.Changes)
+	}
+	for key, want := range map[string]string{
+		"sessionId":   "session_456",
+		"secretRefId": "sr_1",
+	} {
+		if got := after[key]; got != want {
+			t.Errorf("stored changes.after.%s = %v, want %s", key, got, want)
+		}
+	}
+	if got := after["sessionCookie"]; got != redactedValue {
+		t.Errorf("stored changes.after.sessionCookie = %v, want %s", got, redactedValue)
+	}
+
+	redactions := storedRedactions(t, stored)
+	if want := []string{"changes.after.sessionCookie"}; !slices.Equal(redactions, want) {
+		t.Errorf("stored redactions = %v, want %v", redactions, want)
+	}
+}
+
 func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	db := databasetest.New(t)
 
-	if got := countEvents(t, db, ""); got != 1 {
-		t.Fatalf("fresh database has %d audit events, want exactly 1", got)
+	if got := countEvents(t, db, ""); got != 2 {
+		t.Fatalf("fresh database has %d audit events, want exactly 2", got)
 	}
 	stored := storedEventByTarget(t, db, "1")
 	fields := []struct {
@@ -524,8 +562,8 @@ func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	if len(applied) != 0 {
 		t.Errorf("Migrate applied %v on an up-to-date database, want none", applied)
 	}
-	if got := countEvents(t, db, ""); got != 1 {
-		t.Errorf("second Migrate changed the audit event count to %d, want 1", got)
+	if got := countEvents(t, db, ""); got != 2 {
+		t.Errorf("second Migrate changed the audit event count to %d, want 2", got)
 	}
 }
 
@@ -558,11 +596,32 @@ func TestMigrateDoesNotDuplicateMigrationAuditEvents(t *testing.T) {
 			t.Fatalf("Migrate run %d: %v", run, err)
 		}
 	}
-	if got := countEvents(t, db, "target_type = ? AND target_id = ?", "DATABASE_MIGRATION", "1"); got != 1 {
-		t.Errorf("migration 1 has %d audit events after two Migrate runs, want 1", got)
+	for _, version := range []string{"1", "2"} {
+		if got := countEvents(t, db, "target_type = ? AND target_id = ?", "DATABASE_MIGRATION", version); got != 1 {
+			t.Errorf("migration %s has %d audit events after two Migrate runs, want 1", version, got)
+		}
 	}
-	if got := countEvents(t, db, ""); got != 1 {
-		t.Errorf("database has %d audit events after two Migrate runs, want 1", got)
+	if got := countEvents(t, db, ""); got != 2 {
+		t.Errorf("database has %d audit events after two Migrate runs, want 2", got)
+	}
+}
+
+func TestRecordRejectsDuplicateMigrationAppliedEvent(t *testing.T) {
+	db := databasetest.New(t)
+	event := validEvent("999")
+	event.EventName = "simple_siem.database.migration_applied"
+	event.EventCategory = "DATABASE"
+	event.TargetType = "DATABASE_MIGRATION"
+	event.Action = "apply"
+
+	if err := audit.Record(db, event); err != nil {
+		t.Fatalf("first Record: %v", err)
+	}
+	if err := audit.Record(db, event); err == nil {
+		t.Fatal("Record accepted a second migration_applied event for the same version")
+	}
+	if got := countEvents(t, db, "event_name = ? AND target_id = ?", event.EventName, event.TargetID); got != 1 {
+		t.Errorf("stored %d migration_applied events for version %s, want 1", got, event.TargetID)
 	}
 }
 
