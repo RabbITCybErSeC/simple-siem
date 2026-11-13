@@ -19,6 +19,16 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 
 WORKDIR /src
 
+FROM toolchain AS web
+
+WORKDIR /web
+
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY web/ ./
+RUN pnpm build
+
 FROM toolchain AS build
 
 ARG TARGETOS
@@ -29,6 +39,8 @@ ARG COMMIT=unknown
 COPY go.* ./
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
+COPY web/embed.go ./web/embed.go
+COPY --from=web /web/dist ./web/dist
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \

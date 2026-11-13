@@ -13,4 +13,4 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # shortcut: no image layer cache in CI, add buildx cache when the job exceeds five minutes.
-      - run: CONTAINER=docker make lint test
+      - run: CONTAINER=docker make lint build test

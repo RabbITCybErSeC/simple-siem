@@ -17,19 +17,26 @@ POSTGRES_VOLUME := simple-siem-postgres
 # .env overrides the documented development defaults.
 POSTGRES_ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 DEV_CONTAINER := simple-siem-api
+WEB_CONTAINER := simple-siem-web
+WEB_PORT ?= 5173
 
 # Read the same values the containers receive, so RUN assembles one database
 # URL from them instead of duplicating the defaults.
 include $(POSTGRES_ENV_FILE)
 
-# Apple container has no name resolution on user networks, so PostgreSQL is
-# published and reached through the gateway. Docker keeps using its name.
+# Apple container has no name resolution on user networks, so PostgreSQL and
+# the API are published and reached through the gateway. Docker keeps using
+# container names.
 ifeq ($(CONTAINER),container)
 POSTGRES_HOST ?= $(NETWORK_GATEWAY)
 POSTGRES_PUBLISH ?= -p $(NETWORK_GATEWAY):5432:5432
+API_HOST ?= $(NETWORK_GATEWAY)
+API_PUBLISH ?= -p $(NETWORK_GATEWAY):8080:8080
 else
 POSTGRES_HOST ?= $(POSTGRES_CONTAINER)
 POSTGRES_PUBLISH ?=
+API_HOST ?= $(DEV_CONTAINER)
+API_PUBLISH ?= -p 127.0.0.1:8080:8080
 endif
 
 DATABASE_URL := postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)?sslmode=disable
@@ -48,13 +55,15 @@ DB_SHELL_TTY := $(shell test -t 0 && echo -t)
 # Apple container gives a container 1 GiB by default; cold Go builds of the
 # dependencies need more.
 TOOLCHAIN_MEMORY := 4g
-RUN = $(CONTAINER) run --rm --memory $(TOOLCHAIN_MEMORY) --network $(NETWORK) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(GO_BUILD_CACHE_VOLUME):/root/.cache/go-build --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) --env SIMPLE_SIEM_DATABASE_URL=$(DATABASE_URL) --env SIMPLE_SIEM_ENV=development
+COMMON_RUN = $(CONTAINER) run --rm --memory $(TOOLCHAIN_MEMORY) --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) --env SIMPLE_SIEM_DATABASE_URL=$(DATABASE_URL) --env SIMPLE_SIEM_ENV=development
+RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(GO_BUILD_CACHE_VOLUME):/root/.cache/go-build
 
 # Frontend commands run in web/ with the pnpm store and node_modules kept out
-# of the Go build and the macOS bind mount.
-WEB_RUN = $(RUN) -w /src/web -v $(PNPM_STORE_VOLUME):/pnpm-store -v $(NODE_MODULES_VOLUME):/src/web/node_modules --env PNPM_CONFIG_STORE_DIR=/pnpm-store
+# of the Go build and the macOS bind mount. They do not mount the Go caches,
+# because Apple container will not share a volume between running containers.
+WEB_RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src/web -v $(PNPM_STORE_VOLUME):/pnpm-store -v $(NODE_MODULES_VOLUME):/src/web/node_modules --env PNPM_CONFIG_STORE_DIR=/pnpm-store
 
-.PHONY: toolchain network postgres test lint build run dev db-shell image debug down clean pnpm
+.PHONY: toolchain network postgres test lint build run dev db-shell image debug down clean pnpm shadcn-mcp
 
 # The stamp alone misses an image deleted outside make, so check the image first.
 toolchain:
@@ -102,9 +111,13 @@ web/node_modules:
 pnpm: network toolchain web/node_modules
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) pnpm $(ARGS)
 
-dev: postgres toolchain
-	@$(CONTAINER) rm -f $(DEV_CONTAINER) >/dev/null 2>&1 || true
-	$(RUN) -p 127.0.0.1:8080:8080 --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
+shadcn-mcp: network toolchain web/node_modules
+	@$(WEB_RUN) -i $(TOOLCHAIN_IMAGE) pnpm --silent dlx shadcn@$(SHADCN_VERSION) mcp
+
+dev: postgres toolchain web/node_modules
+	@$(CONTAINER) rm -f $(WEB_CONTAINER) $(DEV_CONTAINER) >/dev/null 2>&1 || true
+	$(WEB_RUN) -d --name $(WEB_CONTAINER) -p 127.0.0.1:$(WEB_PORT):$(WEB_PORT) --env API_HOST=$(API_HOST) --env WEB_PORT=$(WEB_PORT) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm dev'
+	$(RUN) $(API_PUBLISH) --name $(DEV_CONTAINER) $(TOOLCHAIN_IMAGE) air -c .air.toml
 
 db-shell: postgres
 	$(CONTAINER) run --rm -i $(DB_SHELL_TTY) --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) $(POSTGRES_IMAGE) sh -c 'PGPASSWORD="$$POSTGRES_PASSWORD" exec psql -h $(POSTGRES_HOST) -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
@@ -117,10 +130,10 @@ debug: postgres toolchain
 	$(CONTAINER) run --rm -it --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) $(DEBUG_IMAGE) bash
 
 down:
-	@$(CONTAINER) stop $(POSTGRES_CONTAINER) $(DEV_CONTAINER) 2>/dev/null || true
+	@$(CONTAINER) stop $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) 2>/dev/null || true
 
 clean:
-	@$(CONTAINER) rm -f $(POSTGRES_CONTAINER) $(DEV_CONTAINER) 2>/dev/null || true
+	@$(CONTAINER) rm -f $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) 2>/dev/null || true
 	@$(CONTAINER) network rm $(NETWORK) 2>/dev/null || true
 	@$(CONTAINER) volume rm $(POSTGRES_VOLUME) $(GO_MOD_CACHE_VOLUME) $(GO_BUILD_CACHE_VOLUME) $(PNPM_STORE_VOLUME) $(NODE_MODULES_VOLUME) 2>/dev/null || true
 	@$(CONTAINER) image rm $(TOOLCHAIN_IMAGE) 2>/dev/null || true
