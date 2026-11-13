@@ -1,6 +1,7 @@
 package api
 
 import (
+	"io/fs"
 	"log/slog"
 
 	"gorm.io/gorm"
@@ -14,6 +15,7 @@ const RequestIDKey = "request_id"
 type Dependencies struct {
 	DB             *gorm.DB
 	Logger         *slog.Logger
+	Web            fs.FS
 	TrustedProxies []string
 	Version        string
 	Commit         string

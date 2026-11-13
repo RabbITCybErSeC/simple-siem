@@ -17,6 +17,7 @@ import (
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/version"
+	"github.com/RabbITCybErSeC/simple-siem/web"
 	"gorm.io/gorm"
 )
 
@@ -107,6 +108,7 @@ func newHTTPServer(settings config.Config, db *gorm.DB, logger *slog.Logger) *ht
 		Handler: api.NewRouter(api.Dependencies{
 			DB:             db,
 			Logger:         logger,
+			Web:            web.Files(),
 			TrustedProxies: settings.TrustedProxies,
 			Version:        version.Version,
 			Commit:         version.Commit,

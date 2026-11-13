@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,7 @@ const (
 func TestHealthzIgnoresDatabase(t *testing.T) {
 	db := databasetest.New(t)
 	closeDatabase(t, db)
-	router, _ := newTestRouter(t, db, nil)
+	router, _ := newTestRouter(t, db, nil, nil)
 
 	response := get(router, "/healthz", "", nil)
 	if response.Code != http.StatusOK {
@@ -44,7 +45,7 @@ func TestHealthzIgnoresDatabase(t *testing.T) {
 
 func TestReadyz(t *testing.T) {
 	db := databasetest.New(t)
-	router, _ := newTestRouter(t, db, nil)
+	router, _ := newTestRouter(t, db, nil, nil)
 
 	response := get(router, "/readyz", "", nil)
 	if response.Code != http.StatusOK {
@@ -87,7 +88,7 @@ func TestReadyz(t *testing.T) {
 }
 
 func TestVersion(t *testing.T) {
-	router, _ := newTestRouter(t, nil, nil)
+	router, _ := newTestRouter(t, nil, nil, nil)
 
 	response := get(router, "/version", "", nil)
 	if response.Code != http.StatusOK {
@@ -122,7 +123,7 @@ func TestRequestIDs(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			router, logs := newTestRouter(t, nil, nil)
+			router, logs := newTestRouter(t, nil, nil, nil)
 			response := get(router, "/healthz", "", map[string]string{"X-Request-Id": test.incoming})
 
 			requestID := response.Header().Get("X-Request-Id")
@@ -154,7 +155,7 @@ func TestRequestIDs(t *testing.T) {
 }
 
 func TestRequestIDIsAvailableToHandlers(t *testing.T) {
-	router, _ := newTestRouter(t, nil, nil)
+	router, _ := newTestRouter(t, nil, nil, nil)
 	router.GET("/request-id", func(c *gin.Context) {
 		requestID, exists := c.Get(api.RequestIDKey)
 		if !exists {
@@ -177,7 +178,7 @@ func TestRequestIDIsAvailableToHandlers(t *testing.T) {
 }
 
 func TestUnknownAPIRoute(t *testing.T) {
-	router, _ := newTestRouter(t, nil, nil)
+	router, _ := newTestRouter(t, nil, nil, nil)
 
 	for _, target := range []string{"/api/v1/nope", "/api/v1"} {
 		response := get(router, target, "", nil)
@@ -204,28 +205,32 @@ func TestUnknownAPIRoute(t *testing.T) {
 	}
 }
 
-func TestPlainUnknownRoute(t *testing.T) {
-	router, logs := newTestRouter(t, nil, nil)
+func TestUnknownNonAPIRouteReturnsWebUI(t *testing.T) {
+	router, logs := newTestRouter(t, nil, nil, nil)
 
 	response := get(router, "/not-an-api-route", "", nil)
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("GET /not-an-api-route = %d, want 404: %s", response.Code, response.Body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /not-an-api-route = %d, want 200: %s", response.Code, response.Body)
 	}
-	if contentType := response.Header().Get("Content-Type"); strings.Contains(contentType, "application/json") {
-		t.Errorf("plain 404 Content-Type = %q, want non-JSON", contentType)
+	if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+		t.Errorf("non-API path Content-Type = %q, want HTML", contentType)
 	}
-	if strings.Contains(response.Body.String(), "NOT_FOUND") {
-		t.Errorf("plain 404 body uses the API error format: %s", response.Body)
+	body := response.Body.String()
+	if !strings.Contains(body, "frontend is not built") {
+		t.Errorf("non-API path body = %s, want the frontend-not-built page", body)
+	}
+	if strings.Contains(body, "NOT_FOUND") {
+		t.Errorf("non-API path uses the API error format: %s", body)
 	}
 
 	record := logRecord(t, logs, "route")
-	if record["route"] != "unmatched" {
-		t.Errorf("unmatched request log route = %v, want \"unmatched\"", record["route"])
+	if record["route"] != "web" {
+		t.Errorf("non-API request log route = %v, want \"web\"", record["route"])
 	}
 }
 
 func TestPanicRecovery(t *testing.T) {
-	router, logs := newTestRouter(t, nil, nil)
+	router, logs := newTestRouter(t, nil, nil, nil)
 	const panicValue = "secret panic value"
 	router.GET("/panic", func(*gin.Context) {
 		panic(panicValue)
@@ -296,7 +301,7 @@ func TestTrustedProxies(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			router, logs := newTestRouter(t, nil, test.trustedProxies)
+			router, logs := newTestRouter(t, nil, test.trustedProxies, nil)
 			response := get(router, "/healthz", peer, map[string]string{"X-Forwarded-For": forwardedAddress})
 			if response.Code != http.StatusOK {
 				t.Fatalf("GET /healthz = %d, want 200: %s", response.Code, response.Body)
@@ -310,7 +315,7 @@ func TestTrustedProxies(t *testing.T) {
 }
 
 func TestRequestLogLine(t *testing.T) {
-	router, logs := newTestRouter(t, nil, nil)
+	router, logs := newTestRouter(t, nil, nil, nil)
 
 	response := get(router, "/healthz?token=query-secret-9f3a", "", map[string]string{
 		"X-Request-Id":  "fixed-id-1",
@@ -361,13 +366,14 @@ func TestRequestLogLine(t *testing.T) {
 	}
 }
 
-func newTestRouter(t *testing.T, db *gorm.DB, trustedProxies []string) (*gin.Engine, *bytes.Buffer) {
+func newTestRouter(t *testing.T, db *gorm.DB, trustedProxies []string, files fs.FS) (*gin.Engine, *bytes.Buffer) {
 	t.Helper()
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	router := api.NewRouter(api.Dependencies{
 		DB:             db,
 		Logger:         logger,
+		Web:            files,
 		TrustedProxies: trustedProxies,
 		Version:        testVersion,
 		Commit:         testCommit,

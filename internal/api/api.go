@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -16,8 +18,25 @@ import (
 
 const (
 	requestIDHeader = "X-Request-Id"
-	apiPathPrefix   = "/api/v1"
+	apiPathPrefix   = "/api"
 	unmatchedRoute  = "unmatched"
+
+	webRouteLabel    = "web"
+	assetsRouteLabel = "assets"
+	routeLabelKey    = "route_label"
+	assetsPathPrefix = "/assets/"
+
+	immutableCacheControl = "public, max-age=31536000, immutable"
+	noCacheControl        = "no-cache"
+
+	contentSecurityPolicy = "default-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+
+	frontendNotBuiltPage = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Simple SIEM</title></head>
+<body><h1>Simple SIEM</h1><p>The frontend is not built. Run <code>make build</code>.</p></body>
+</html>
+`
 
 	requestIDBytes   = 16
 	maxRequestID     = 64
@@ -39,6 +58,7 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	}
 
 	router.Use(
+		securityHeaders(),
 		requestID(),
 		requestLog(dependencies.Logger),
 		recovery(dependencies.Logger),
@@ -46,8 +66,24 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	router.GET("/healthz", healthz)
 	router.GET("/readyz", readyz(dependencies.DB, dependencies.Logger))
 	router.GET("/version", version(dependencies.Version, dependencies.Commit))
-	router.NoRoute(noRoute)
+
+	indexHTML := []byte(frontendNotBuiltPage)
+	if dependencies.Web != nil {
+		if content, err := fs.ReadFile(dependencies.Web, "index.html"); err == nil {
+			indexHTML = content
+		}
+	}
+	router.NoRoute(noRoute(dependencies.Web, indexHTML))
 	return router
+}
+
+func securityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Content-Security-Policy", contentSecurityPolicy)
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Referrer-Policy", "same-origin")
+		c.Next()
+	}
 }
 
 func requestID() gin.HandlerFunc {
@@ -119,6 +155,9 @@ func requestLog(logger *slog.Logger) gin.HandlerFunc {
 
 		route := c.FullPath()
 		if route == "" {
+			route = c.GetString(routeLabelKey)
+		}
+		if route == "" {
 			route = unmatchedRoute
 		}
 		logger.Info("request",
@@ -166,13 +205,38 @@ func version(version, commit string) gin.HandlerFunc {
 	}
 }
 
-func noRoute(c *gin.Context) {
-	requestPath := c.Request.URL.Path
-	if requestPath == apiPathPrefix || strings.HasPrefix(requestPath, apiPathPrefix+"/") {
-		c.JSON(http.StatusNotFound, errorResponse{
-			Error: errorDetail{Code: codeNotFound, Message: "route not found"},
-		})
-		return
+func noRoute(files fs.FS, indexHTML []byte) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		requestPath := c.Request.URL.Path
+		if requestPath == apiPathPrefix || strings.HasPrefix(requestPath, apiPathPrefix+"/") {
+			c.JSON(http.StatusNotFound, errorResponse{
+				Error: errorDetail{Code: codeNotFound, Message: "route not found"},
+			})
+			return
+		}
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			c.String(http.StatusNotFound, "not found")
+			return
+		}
+		if strings.HasPrefix(requestPath, assetsPathPrefix) {
+			c.Set(routeLabelKey, assetsRouteLabel)
+			cleanedPath := path.Clean(requestPath)
+			if files == nil || !strings.HasPrefix(cleanedPath, assetsPathPrefix) {
+				c.String(http.StatusNotFound, "not found")
+				return
+			}
+			assetPath := strings.TrimPrefix(cleanedPath, "/")
+			info, err := fs.Stat(files, assetPath)
+			if err != nil || info.IsDir() {
+				c.String(http.StatusNotFound, "not found")
+				return
+			}
+			c.Header("Cache-Control", immutableCacheControl)
+			http.ServeFileFS(c.Writer, c.Request, files, assetPath)
+			return
+		}
+		c.Set(routeLabelKey, webRouteLabel)
+		c.Header("Cache-Control", noCacheControl)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 	}
-	c.String(http.StatusNotFound, "not found")
 }
