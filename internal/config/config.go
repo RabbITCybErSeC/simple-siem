@@ -13,36 +13,41 @@ const (
 	EnvironmentDevelopment Environment = "development"
 	EnvironmentProduction  Environment = "production"
 
-	defaultListen          = ":8080"
-	defaultPublicURL       = "http://localhost:8080"
-	defaultShutdownTimeout = 30 * time.Second
+	defaultListen                  = ":8080"
+	defaultPublicURL               = "http://localhost:8080"
+	defaultShutdownTimeout         = 30 * time.Second
+	defaultSessionIdleTimeout      = 30 * time.Minute
+	defaultSessionAbsoluteLifetime = 12 * time.Hour
 
-	environmentVariable     = "SIMPLE_SIEM_ENV"
-	databaseURLVariable     = "SIMPLE_SIEM_DATABASE_URL"
-	listenVariable          = "SIMPLE_SIEM_LISTEN"
-	publicURLVariable       = "SIMPLE_SIEM_PUBLIC_URL"
-	trustedProxiesVariable  = "SIMPLE_SIEM_TRUSTED_PROXIES"
-	shutdownTimeoutVariable = "SIMPLE_SIEM_SHUTDOWN_TIMEOUT"
+	environmentVariable             = "SIMPLE_SIEM_ENV"
+	databaseURLVariable             = "SIMPLE_SIEM_DATABASE_URL"
+	listenVariable                  = "SIMPLE_SIEM_LISTEN"
+	publicURLVariable               = "SIMPLE_SIEM_PUBLIC_URL"
+	trustedProxiesVariable          = "SIMPLE_SIEM_TRUSTED_PROXIES"
+	shutdownTimeoutVariable         = "SIMPLE_SIEM_SHUTDOWN_TIMEOUT"
+	sessionIdleTimeoutVariable      = "SIMPLE_SIEM_SESSION_IDLE_TIMEOUT"
+	sessionAbsoluteLifetimeVariable = "SIMPLE_SIEM_SESSION_ABSOLUTE_LIFETIME"
 )
 
 type Environment string
 
 type Config struct {
-	Environment     Environment
-	DatabaseURL     string
-	Listen          string
-	PublicURL       string
-	TrustedProxies  []string
-	ShutdownTimeout time.Duration
+	Environment             Environment
+	DatabaseURL             string
+	Listen                  string
+	PublicURL               string
+	TrustedProxies          []string
+	ShutdownTimeout         time.Duration
+	SessionIdleTimeout      time.Duration
+	SessionAbsoluteLifetime time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
 	settings := Config{
-		Environment:     EnvironmentProduction,
-		DatabaseURL:     getenv(databaseURLVariable),
-		Listen:          getenv(listenVariable),
-		PublicURL:       getenv(publicURLVariable),
-		ShutdownTimeout: defaultShutdownTimeout,
+		Environment: EnvironmentProduction,
+		DatabaseURL: getenv(databaseURLVariable),
+		Listen:      getenv(listenVariable),
+		PublicURL:   getenv(publicURLVariable),
 	}
 	if settings.Listen == "" {
 		settings.Listen = defaultListen
@@ -93,17 +98,40 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 
-	if value := getenv(shutdownTimeoutVariable); value != "" {
-		timeout, err := time.ParseDuration(value)
-		if err != nil || timeout <= 0 {
-			problems = append(problems, fmt.Errorf("%s must be a positive duration", shutdownTimeoutVariable))
-		} else {
-			settings.ShutdownTimeout = timeout
-		}
+	if timeout, err := parsePositiveDuration(getenv, shutdownTimeoutVariable, defaultShutdownTimeout); err != nil {
+		problems = append(problems, err)
+	} else {
+		settings.ShutdownTimeout = timeout
 	}
+
+	idleTimeout, idleError := parsePositiveDuration(getenv, sessionIdleTimeoutVariable, defaultSessionIdleTimeout)
+	absoluteLifetime, absoluteError := parsePositiveDuration(getenv, sessionAbsoluteLifetimeVariable, defaultSessionAbsoluteLifetime)
+	if idleError != nil {
+		problems = append(problems, idleError)
+	}
+	if absoluteError != nil {
+		problems = append(problems, absoluteError)
+	}
+	if idleError == nil && absoluteError == nil && idleTimeout > absoluteLifetime {
+		problems = append(problems, fmt.Errorf("%s must not exceed %s", sessionIdleTimeoutVariable, sessionAbsoluteLifetimeVariable))
+	}
+	settings.SessionIdleTimeout = idleTimeout
+	settings.SessionAbsoluteLifetime = absoluteLifetime
 
 	if err := errors.Join(problems...); err != nil {
 		return Config{}, err
 	}
 	return settings, nil
+}
+
+func parsePositiveDuration(getenv func(string) string, variable string, fallback time.Duration) (time.Duration, error) {
+	value := getenv(variable)
+	if value == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", variable)
+	}
+	return duration, nil
 }

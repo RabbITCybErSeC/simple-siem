@@ -20,21 +20,22 @@ import (
 const redactedValue = "[REDACTED]"
 
 type storedEvent struct {
-	ID            string    `gorm:"column:id"`
-	CreatedAt     time.Time `gorm:"column:created_at"`
-	EventName     string    `gorm:"column:event_name"`
-	EventCategory string    `gorm:"column:event_category"`
-	EventOutcome  string    `gorm:"column:event_outcome"`
-	ActorType     string    `gorm:"column:actor_type"`
-	ActorID       *string   `gorm:"column:actor_id"`
-	RequestID     string    `gorm:"column:request_id"`
-	TraceID       string    `gorm:"column:trace_id"`
-	SourceIP      *string   `gorm:"column:source_ip"`
-	TargetType    string    `gorm:"column:target_type"`
-	TargetID      string    `gorm:"column:target_id"`
-	Action        string    `gorm:"column:action"`
-	Changes       []byte    `gorm:"column:changes"`
-	Redactions    []byte    `gorm:"column:redactions"`
+	ID             string    `gorm:"column:id"`
+	CreatedAt      time.Time `gorm:"column:created_at"`
+	EventName      string    `gorm:"column:event_name"`
+	EventCategory  string    `gorm:"column:event_category"`
+	EventOutcome   string    `gorm:"column:event_outcome"`
+	ActorType      string    `gorm:"column:actor_type"`
+	ActorID        *string   `gorm:"column:actor_id"`
+	ActorSessionID *string   `gorm:"column:actor_session_id"`
+	RequestID      string    `gorm:"column:request_id"`
+	TraceID        string    `gorm:"column:trace_id"`
+	SourceIP       *string   `gorm:"column:source_ip"`
+	TargetType     string    `gorm:"column:target_type"`
+	TargetID       string    `gorm:"column:target_id"`
+	Action         string    `gorm:"column:action"`
+	Changes        []byte    `gorm:"column:changes"`
+	Redactions     []byte    `gorm:"column:redactions"`
 }
 
 func TestRecordUsesDatabaseDefaults(t *testing.T) {
@@ -66,8 +67,10 @@ func TestRecordUsesDatabaseDefaults(t *testing.T) {
 func TestRecordWritesEventFields(t *testing.T) {
 	db := databasetest.New(t)
 	actorID := "actor-1"
+	actorSessionID := "0190f8dc-6f43-7f0a-8b2f-9c8c0a2d3e4f"
 	event := validEvent("all-fields")
 	event.ActorID = &actorID
+	event.ActorSessionID = &actorSessionID
 	event.RequestID = "request-1"
 	event.TraceID = "trace-1"
 	event.SourceIP = net.IP{192, 0, 2, 10}
@@ -103,6 +106,9 @@ func TestRecordWritesEventFields(t *testing.T) {
 	}
 	if stored.ActorID == nil || *stored.ActorID != actorID {
 		t.Errorf("stored actor_id = %v, want %q", stored.ActorID, actorID)
+	}
+	if stored.ActorSessionID == nil || *stored.ActorSessionID != actorSessionID {
+		t.Errorf("stored actor_session_id = %v, want %q", stored.ActorSessionID, actorSessionID)
 	}
 	if stored.SourceIP == nil {
 		t.Error("stored source_ip is NULL, want 192.0.2.10")
@@ -577,8 +583,8 @@ func TestRecordKeepsReferenceKeys(t *testing.T) {
 func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	db := databasetest.New(t)
 
-	if got := countEvents(t, db, ""); got != 2 {
-		t.Fatalf("fresh database has %d audit events, want exactly 2", got)
+	if got := countEvents(t, db, ""); got != 3 {
+		t.Fatalf("fresh database has %d audit events, want exactly 3", got)
 	}
 	stored := storedEventByTarget(t, db, "1")
 	fields := []struct {
@@ -607,8 +613,8 @@ func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	if len(applied) != 0 {
 		t.Errorf("Migrate applied %v on an up-to-date database, want none", applied)
 	}
-	if got := countEvents(t, db, ""); got != 2 {
-		t.Errorf("second Migrate changed the audit event count to %d, want 2", got)
+	if got := countEvents(t, db, ""); got != 3 {
+		t.Errorf("second Migrate changed the audit event count to %d, want 3", got)
 	}
 }
 
@@ -641,13 +647,13 @@ func TestMigrateDoesNotDuplicateMigrationAuditEvents(t *testing.T) {
 			t.Fatalf("Migrate run %d: %v", run, err)
 		}
 	}
-	for _, version := range []string{"1", "2"} {
+	for _, version := range []string{"1", "2", "3"} {
 		if got := countEvents(t, db, "target_type = ? AND target_id = ?", "DATABASE_MIGRATION", version); got != 1 {
 			t.Errorf("migration %s has %d audit events after two Migrate runs, want 1", version, got)
 		}
 	}
-	if got := countEvents(t, db, ""); got != 2 {
-		t.Errorf("database has %d audit events after two Migrate runs, want 2", got)
+	if got := countEvents(t, db, ""); got != 3 {
+		t.Errorf("database has %d audit events after two Migrate runs, want 3", got)
 	}
 }
 
@@ -687,7 +693,7 @@ func storedEventByTarget(t *testing.T, db *gorm.DB, targetID string) storedEvent
 	var stored storedEvent
 	err := db.Raw(`
 		SELECT id::text AS id, created_at, event_name, event_category, event_outcome,
-		       actor_type, actor_id, request_id, trace_id, host(source_ip) AS source_ip,
+		       actor_type, actor_id, actor_session_id, request_id, trace_id, host(source_ip) AS source_ip,
 		       target_type, target_id, action, changes, redactions
 		FROM audit_events
 		WHERE target_id = ?`, targetID).Scan(&stored).Error

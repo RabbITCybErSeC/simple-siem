@@ -36,10 +36,10 @@ func TestMigrateAppliesOnceConcurrently(t *testing.T) {
 		}
 		applied += len(versions[index])
 	}
-	if applied != 2 {
-		t.Errorf("applied %d versions across two runs, want 2: %v", applied, versions)
+	if applied != 3 {
+		t.Errorf("applied %d versions across two runs, want 3: %v", applied, versions)
 	}
-	for _, version := range []int64{1, 2} {
+	for _, version := range []int64{1, 2, 3} {
 		if got := countGooseVersion(t, db, version); got != 1 {
 			t.Errorf("migration %d recorded %d times, want 1", version, got)
 		}
@@ -54,6 +54,9 @@ func TestMigrateAlreadyApplied(t *testing.T) {
 	if got := countGooseVersion(t, db, 2); got != 1 {
 		t.Fatalf("migration 2 recorded %d times after databasetest.New, want 1", got)
 	}
+	if got := countGooseVersion(t, db, 3); got != 1 {
+		t.Fatalf("migration 3 recorded %d times after databasetest.New, want 1", got)
+	}
 
 	applied, err := database.Migrate(context.Background(), db)
 	if err != nil {
@@ -62,7 +65,7 @@ func TestMigrateAlreadyApplied(t *testing.T) {
 	if len(applied) != 0 {
 		t.Errorf("Migrate applied %v on an up-to-date database, want none", applied)
 	}
-	for _, version := range []int64{1, 2} {
+	for _, version := range []int64{1, 2, 3} {
 		if got := countGooseVersion(t, db, version); got != 1 {
 			t.Errorf("migration %d recorded %d times after a second run, want 1", version, got)
 		}
@@ -79,7 +82,7 @@ func TestMigrateRefusesNewerSchema(t *testing.T) {
 	if err == nil {
 		t.Fatal("Migrate accepted a database newer than the embedded migrations")
 	}
-	for _, version := range []string{"9999", "2"} {
+	for _, version := range []string{"9999", "3"} {
 		if !strings.Contains(err.Error(), version) {
 			t.Errorf("Migrate error %q does not name version %s", err, version)
 		}
@@ -115,7 +118,7 @@ func TestCheckSchemaRejectsNewerSchema(t *testing.T) {
 	if err == nil {
 		t.Fatal("CheckSchema accepted a database newer than the embedded migrations")
 	}
-	for _, version := range []string{"9999", "2"} {
+	for _, version := range []string{"9999", "3"} {
 		if !strings.Contains(err.Error(), version) {
 			t.Errorf("CheckSchema error %q does not name version %s", err, version)
 		}
@@ -130,7 +133,7 @@ func TestCheckSchemaRejectsPendingMigration(t *testing.T) {
 	if err == nil {
 		t.Fatal("CheckSchema accepted a database with a pending migration")
 	}
-	for _, version := range []string{"0", "2"} {
+	for _, version := range []string{"0", "3"} {
 		if !strings.Contains(err.Error(), version) {
 			t.Errorf("CheckSchema error %q does not name version %s", err, version)
 		}
