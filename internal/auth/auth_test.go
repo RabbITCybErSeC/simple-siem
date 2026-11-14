@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -1044,6 +1045,52 @@ func TestLogout(t *testing.T) {
 		if strings.Contains(string(event.Changes), secret) {
 			t.Errorf("logout audit changes contain the secret %q: %s", secret, event.Changes)
 		}
+	}
+}
+
+func TestRecordPermissionDenied(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	required := []string{"user:read", "role:assign"}
+	err = test.service.RecordPermissionDenied(
+		context.Background(), actor, testClient(), "/api/v1/users", http.MethodGet, required,
+	)
+	if err != nil {
+		t.Fatalf("RecordPermissionDenied: %v", err)
+	}
+
+	events := auditEventsForTarget(t, test.database, "/api/v1/users")
+	if len(events) != 1 {
+		t.Fatalf("permission denial wrote %d audit events, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventName != "simple_siem.auth.permission_denied" || event.EventCategory != "AUTHORIZATION" ||
+		event.EventOutcome != "DENIED" {
+		t.Errorf("denial audit = %q/%q/%q, want simple_siem.auth.permission_denied/AUTHORIZATION/DENIED",
+			event.EventName, event.EventCategory, event.EventOutcome)
+	}
+	if event.ActorType != "USER" || event.ActorID == nil || *event.ActorID != user.ID {
+		t.Errorf("denial audit actor = %s/%v, want USER/%q", event.ActorType, event.ActorID, user.ID)
+	}
+	if event.ActorSessionID == nil || *event.ActorSessionID != actor.SessionID {
+		t.Errorf("denial audit actor session id = %v, want %q", event.ActorSessionID, actor.SessionID)
+	}
+	if event.TargetType != "ROUTE" || event.TargetID != "/api/v1/users" || event.Action != http.MethodGet {
+		t.Errorf("denial audit target = %q/%q action %q, want ROUTE//api/v1/users GET",
+			event.TargetType, event.TargetID, event.Action)
+	}
+	if event.RequestID != "request-1" || event.SourceIP == nil || *event.SourceIP != "192.0.2.7" {
+		t.Errorf("denial audit request/source = %q/%v, want request-1/192.0.2.7", event.RequestID, event.SourceIP)
+	}
+	storedRequired, ok := storedChanges(t, event)["required"].([]any)
+	if !ok || !slices.Equal(storedRequired, []any{"user:read", "role:assign"}) {
+		t.Errorf("denial audit required = %v, want [user:read role:assign]", storedRequired)
 	}
 }
 

@@ -492,6 +492,29 @@ func (service *Service) Logout(ctx context.Context, actor Actor, client ClientIn
 	})
 }
 
+// RecordPermissionDenied audits a request the actor's roles do not allow.
+func (service *Service) RecordPermissionDenied(ctx context.Context, actor Actor, client ClientInfo, route, method string, required []string) error {
+	client.IP = normalizedIP(client.IP)
+	return service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		actorID := actor.UserID
+		sessionID := actor.SessionID
+		return audit.Record(tx, audit.Event{
+			EventName:      "simple_siem.auth.permission_denied",
+			EventCategory:  "AUTHORIZATION",
+			EventOutcome:   "DENIED",
+			ActorType:      "USER",
+			ActorID:        &actorID,
+			ActorSessionID: &sessionID,
+			RequestID:      client.RequestID,
+			SourceIP:       client.IP,
+			TargetType:     "ROUTE",
+			TargetID:       route,
+			Action:         method,
+			Changes:        map[string]any{"required": required},
+		})
+	})
+}
+
 func (provider *LocalProvider) Name() string {
 	return ProviderLocal
 }

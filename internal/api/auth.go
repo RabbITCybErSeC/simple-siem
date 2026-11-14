@@ -238,6 +238,35 @@ func requireSession(service *auth.Service, logger *slog.Logger, policy originPol
 	}
 }
 
+// requirePermission rejects the request when the actor's roles lack one of the
+// permissions the route declares. The denial is audited on a best-effort
+// basis: an audit failure is logged and the request still gets its 403.
+func requirePermission(service *auth.Service, logger *slog.Logger, permissions ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		actor := c.MustGet(ActorKey).(auth.Actor)
+		for _, permission := range permissions {
+			if actor.Can(permission) {
+				continue
+			}
+			err := service.RecordPermissionDenied(
+				c.Request.Context(), actor, clientInfo(c), c.FullPath(), c.Request.Method, permissions,
+			)
+			if err != nil {
+				logger.Error("record permission denial failed",
+					"request_id", c.GetString(RequestIDKey),
+					"error", err,
+				)
+			}
+			c.Header("Cache-Control", "no-store")
+			c.AbortWithStatusJSON(http.StatusForbidden, errorResponse{
+				Error: errorDetail{Code: codeForbidden, Message: "permission denied"},
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 // internalError keeps database and configuration details out of responses while
 // attaching the request id to the log line.
 func internalError(c *gin.Context, logger *slog.Logger, err error) {
