@@ -222,7 +222,7 @@ test("announces a new case without moving the visible rows", async ({
   await expect(table.locator("tbody tr")).toHaveCount(50);
 
   const rows = table.locator("tbody tr");
-  const firstNumber = (await rows.first().locator("td").first().textContent())
+  const firstNumber = (await rows.first().locator("td:nth-child(2)").textContent())
     ?.trim();
   await rows.first().focus();
 
@@ -242,7 +242,7 @@ test("announces a new case without moving the visible rows", async ({
   await expect(rows).toHaveCount(50);
   const focusedRow = page.locator("tbody tr:focus");
   await expect(focusedRow).toHaveCount(1);
-  expect((await focusedRow.locator("td").first().textContent())?.trim()).toBe(
+  expect((await focusedRow.locator("td:nth-child(2)").textContent())?.trim()).toBe(
     firstNumber,
   );
 });

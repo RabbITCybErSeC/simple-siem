@@ -27,6 +27,7 @@ import {
   describeAssignFailure,
 } from "./detail/CaseDetail";
 import type { CaseActionFailure } from "./detail/CaseDetail";
+import { BulkCloseDialog } from "./detail/BulkCloseDialog";
 import { useAssignCase } from "./detail/queries";
 import { TimeRangePicker } from "./TimeRangePicker";
 import { TrendChart } from "./TrendChart";
@@ -94,6 +95,14 @@ const REFRESH_OPTIONS: { value: RefreshInterval; label: string }[] = [
   { value: "5m", label: "5 minutes" },
 ];
 
+interface CaseSelection {
+  filterKey: string;
+  ids: ReadonlySet<string>;
+  bulkCloseOpen: boolean;
+}
+
+const EMPTY_SELECTION: ReadonlySet<string> = new Set();
+
 /**
  * The route wrapper: an invalid case number is a page that does not exist,
  * before the queue starts loading anything.
@@ -128,6 +137,21 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const [pendingChanges, setPendingChanges] = useState(0);
   const [rowAssignFailure, setRowAssignFailure] =
     useState<CaseActionFailure | null>(null);
+  const filterKey = [
+    state.tab,
+    state.scope,
+    state.range.from,
+    state.range.to,
+    state.field,
+    state.sort,
+  ].join("|");
+  const [selection, setSelection] = useState<CaseSelection>({
+    filterKey,
+    ids: new Set(),
+    bulkCloseOpen: false,
+  });
+  const [closeRequested, setCloseRequested] = useState(false);
+  const [bulkCloseKey, setBulkCloseKey] = useState(0);
   const stateRef = useRef(state);
   const firstPageRef = useRef<CaseSummary[] | undefined>(undefined);
   const restoreFocus = useRef(false);
@@ -244,6 +268,86 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
 
   const cases = listQuery.data?.pages.flatMap((page) => page.data) ?? [];
   const listError = listQuery.isError ? listQuery.error : null;
+  const listedIds = new Set(cases.map((item) => item.id));
+  const currentSelection = selection.filterKey === filterKey ? selection : null;
+  const selectedIds = currentSelection
+    ? new Set([...currentSelection.ids].filter((id) => listedIds.has(id)))
+    : EMPTY_SELECTION;
+  const selectedCases = cases.filter((item) => selectedIds.has(item.id));
+  const bulkCloseOpen =
+    currentSelection !== null && currentSelection.bulkCloseOpen;
+
+  const changeSelection = (change: (ids: Set<string>) => Set<string>) => {
+    setSelection((current) => {
+      const ids =
+        current.filterKey === filterKey
+          ? new Set([...current.ids].filter((id) => listedIds.has(id)))
+          : new Set<string>();
+      return {
+        filterKey,
+        ids: change(ids),
+        bulkCloseOpen:
+          current.filterKey === filterKey ? current.bulkCloseOpen : false,
+      };
+    });
+  };
+
+  const selectCase = (item: CaseSummary, selected: boolean) => {
+    changeSelection((ids) => {
+      const next = new Set(ids);
+      if (selected) {
+        next.add(item.id);
+      } else {
+        next.delete(item.id);
+      }
+      return next;
+    });
+  };
+
+  const selectPage = (selected: boolean) => {
+    changeSelection((ids) => {
+      const next = new Set(ids);
+      for (const item of cases) {
+        if (selected) {
+          next.add(item.id);
+        } else {
+          next.delete(item.id);
+        }
+      }
+      return next;
+    });
+  };
+
+  const clearSelection = () => {
+    setSelection({ filterKey, ids: new Set(), bulkCloseOpen: false });
+  };
+
+  const openBulkClose = () => {
+    setBulkCloseKey((key) => key + 1);
+    setSelection((current) => ({
+      filterKey,
+      ids: current.filterKey === filterKey ? current.ids : new Set(),
+      bulkCloseOpen: true,
+    }));
+  };
+
+  const setBulkCloseOpen = (open: boolean) => {
+    setSelection((current) =>
+      current.filterKey === filterKey
+        ? { ...current, bulkCloseOpen: open }
+        : current,
+    );
+  };
+
+  const requestClose = (item: CaseSummary) => {
+    if (item.status === "CLOSED") {
+      return;
+    }
+    if (caseNumber !== item.caseNumber) {
+      openCase(item);
+    }
+    setCloseRequested(true);
+  };
 
   const assignRow = (item: CaseSummary) => {
     if (me === undefined) {
@@ -271,6 +375,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const closeDetail = () => {
     const listed = cases.find((item) => item.caseNumber === caseNumber);
     pendingRowFocus.current = listed?.id;
+    setCloseRequested(false);
     navigate(caseQueuePath(state));
   };
 
@@ -448,6 +553,33 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
               ))}
             </TabsList>
             <TabsContent value={state.tab}>
+              {selectedIds.size > 0 ? (
+                <div
+                  role="toolbar"
+                  aria-label="Selected cases"
+                  className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-muted px-3 py-2 text-sm"
+                >
+                  <span>{`${selectedIds.size} selected`}</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={selectedIds.size > 100}
+                    onClick={openBulkClose}
+                  >
+                    {selectedIds.size > 100
+                      ? "Close selected (max 100)"
+                      : "Close selected"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={clearSelection}
+                  >
+                    Clear selection
+                  </Button>
+                </div>
+              ) : null}
               {pendingChanges > 0 && (
                 <div
                   role="status"
@@ -472,9 +604,13 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
                 timeZone={timeZone}
                 loading={listQuery.isPending}
                 error={listError}
+                selectedIds={selectedIds}
                 onRetry={() => void listQuery.refetch()}
+                onSelectCase={selectCase}
+                onSelectAll={selectPage}
                 onOpen={openCase}
                 onAssign={assignRow}
+                onClose={requestClose}
               />
               {listQuery.hasNextPage && listError === null && (
                 <Button
@@ -508,6 +644,8 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
               layout={detailState.layout}
               queueState={state}
               timeZone={timeZone}
+              closeRequested={closeRequested}
+              onCloseRequestHandled={() => setCloseRequested(false)}
               onViewChange={changeView}
               onLayoutChange={changeLayout}
               onClose={closeDetail}
@@ -515,6 +653,18 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
           </div>
         )}
       </div>
+
+      <BulkCloseDialog
+        key={bulkCloseKey}
+        cases={selectedCases}
+        open={bulkCloseOpen}
+        onOpenChange={setBulkCloseOpen}
+        onClosed={(closedIds) => {
+          changeSelection((ids) =>
+            new Set([...ids].filter((id) => !closedIds.includes(id))),
+          );
+        }}
+      />
     </>
   );
 }

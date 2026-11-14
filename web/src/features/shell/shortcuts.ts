@@ -8,6 +8,8 @@ export const shellShortcuts: Shortcut[] = [
   { keys: ["k"], description: "Previous case", scope: "Cases list" },
   { keys: ["Enter"], description: "Open case", scope: "Cases list" },
   { keys: ["a"], description: "Assign to me", scope: "Cases list" },
+  { keys: ["x"], description: "Select case", scope: "Cases list" },
+  { keys: ["e"], description: "Close case", scope: "Cases list" },
   { keys: ["Escape"], description: "Close case detail", scope: "Cases list" },
 ];
 

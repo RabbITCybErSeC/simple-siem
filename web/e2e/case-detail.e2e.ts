@@ -24,7 +24,7 @@ function numberFromCell(text: string | null): number {
 
 async function firstRowNumber(table: Locator): Promise<number> {
   return numberFromCell(
-    await table.locator("tbody tr").first().locator("td").first().textContent(),
+    await table.locator("tbody tr").first().locator("td:nth-child(2)").textContent(),
   );
 }
 
@@ -38,7 +38,7 @@ function unassignedOpenRow(page: Page, table: Locator): Locator {
   return table
     .locator("tbody tr")
     .filter({ has: page.getByRole("cell", { name: "Unassigned", exact: true }) })
-    .filter({ has: page.locator("td:nth-child(6) time") })
+    .filter({ has: page.locator("td:nth-child(7) time") })
     .first();
 }
 
@@ -156,7 +156,7 @@ test("assigns to me with a and shows the analyst after Show", async ({
   const row = unassignedOpenRow(page, table);
   await expect(row).toBeVisible();
   const number = numberFromCell(
-    await row.locator("td").first().textContent(),
+    await row.locator("td:nth-child(2)").textContent(),
   );
 
   await row.focus();
@@ -197,7 +197,7 @@ test("reports a conflict when another analyst changed the case", async ({
   const row = unassignedOpenRow(page, table);
   await expect(row).toBeVisible();
   const number = numberFromCell(
-    await row.locator("td").first().textContent(),
+    await row.locator("td:nth-child(2)").textContent(),
   );
 
   api.bumpVersion(`case_${number}`);
@@ -268,4 +268,243 @@ test("renders case #7's markup value as text", async ({ page }) => {
   await row.getByRole("button", { name: /^Show fields for / }).click();
   await expect(detail.getByText("principal.user.userid")).toBeVisible();
   await expect(detail.locator("img")).toHaveCount(0);
+});
+
+function focusedRowNumber(page: Page): Promise<number> {
+  return page
+    .locator("tbody tr:focus")
+    .locator("td:nth-child(2)")
+    .textContent()
+    .then(numberFromCell);
+}
+
+test("closes a case by keyboard and shows the closed row after Show", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto("/cases?refresh=10s");
+  const table = openTable(page);
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+
+  await table.locator("tbody tr").first().focus();
+  await page.keyboard.press("j");
+  const number = await focusedRowNumber(page);
+
+  await page.keyboard.press("e");
+  const dialog = page.getByRole("dialog", {
+    name: `Close case #${number}`,
+    exact: true,
+  });
+  await expect(dialog).toBeVisible();
+
+  await expect(dialog.locator(":focus")).toHaveAttribute(
+    "id",
+    "close-outcome-MALICIOUS",
+  );
+  await dialog.getByRole("radio", { name: "Accepted" }).click();
+  await expect(
+    dialog.getByRole("radio", { name: "Accepted" }),
+  ).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Tab");
+  const reason = dialog.getByRole("combobox", {
+    name: "Closure reason",
+    exact: true,
+  });
+  await expect(reason).toBeFocused();
+  await page.keyboard.press("a");
+  await expect(reason).toHaveValue("AUTHORIZED_ACTIVITY");
+
+  const conclusion = dialog.getByLabel("Conclusion");
+  let conclusionFocused = false;
+  for (let index = 0; index < 14 && !conclusionFocused; index++) {
+    if (
+      (await dialog.locator(":focus").getAttribute("id")) ===
+      "close-conclusion"
+    ) {
+      conclusionFocused = true;
+      break;
+    }
+    await page.keyboard.press("Tab");
+  }
+  expect(conclusionFocused).toBe(true);
+  await conclusion.pressSequentially("Authorized pentest by RedTeam.");
+
+  let submitFocused = false;
+  for (let index = 0; index < 12 && !submitFocused; index++) {
+    await page.keyboard.press("Tab");
+    submitFocused =
+      (await dialog.locator(":focus").textContent())?.trim() === "Close case";
+  }
+  expect(submitFocused).toBe(true);
+  await dialog
+    .getByRole("button", { name: "Close case", exact: true })
+    .click();
+
+  await expect(dialog).toBeHidden();
+  const detail = page.getByRole("region", { name: `Case #${number}` });
+  await expect(detail.getByText("Authorized pentest by RedTeam.")).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({ hasText: `Case #${number} closed` }),
+  ).toHaveText(`Case #${number} closed`);
+
+  await page.keyboard.press("Escape");
+  await expect(page).toHaveURL(/\/cases(\?|$)/);
+
+  await page.clock.runFor(10_000);
+  const banner = page
+    .getByRole("status")
+    .filter({ hasText: "new or updated case" });
+  await expect(banner).toBeVisible();
+  await banner.getByRole("button", { name: "Show" }).click();
+
+  await expect(
+    table.getByRole("cell", { name: `#${number}`, exact: true }),
+  ).toHaveCount(0);
+
+  await page.getByRole("tab", { name: /^Closed/ }).click();
+  const closedTable = tableWith(page, "Closed", "Mine");
+  await expect(closedTable).toBeVisible();
+  await expect(rowForNumber(page, number)).toBeVisible();
+});
+
+test("keeps the typed conclusion when the case changed", async ({
+  page,
+  api,
+}) => {
+  const added = api.addCase({ title: "Conflict case" });
+  await signIn(page);
+  await page.goto("/cases");
+  const table = openTable(page);
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+  const row = rowForNumber(page, added.caseNumber);
+  await row.focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("region", { name: `Case #${added.caseNumber}` }),
+  ).toBeVisible();
+
+  const dialog = page.getByRole("dialog", {
+    name: `Close case #${added.caseNumber}`,
+    exact: true,
+  });
+  await page.getByRole("button", { name: "Close case", exact: true }).click();
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("radio", { name: "Accepted" }).click();
+  await dialog
+    .getByRole("combobox", { name: "Closure reason", exact: true })
+    .selectOption({ label: "Authorized activity" });
+  await dialog.getByLabel("Conclusion").fill("Keep this conclusion.");
+
+  api.bumpVersion(added.id);
+  await dialog.getByRole("button", { name: "Close case", exact: true }).click();
+
+  await expect(dialog.getByRole("alert")).toContainText(
+    "This case changed since you opened it. Reload it and close again.",
+  );
+  await expect(dialog.getByLabel("Conclusion")).toHaveValue(
+    "Keep this conclusion.",
+  );
+
+  await dialog.getByRole("button", { name: "Reload case" }).click();
+  await expect
+    .poll(
+      () =>
+        api
+          .caseRequests()
+          .filter(
+            (request) =>
+              request === `/api/v1/cases/${added.caseNumber}`,
+          ).length,
+    )
+    .toBeGreaterThan(1);
+  await expect(dialog.getByLabel("Conclusion")).toHaveValue(
+    "Keep this conclusion.",
+  );
+
+  await dialog.getByRole("button", { name: "Close case", exact: true }).click();
+  await expect(dialog).toBeHidden();
+});
+
+test("traps focus in the close dialog and returns it on Escape", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto("/cases");
+  const table = openTable(page);
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+  await table.locator("tbody tr").first().focus();
+  await page.keyboard.press("Enter");
+
+  const opener = page.getByRole("button", { name: "Close case", exact: true });
+  await opener.click();
+  const dialog = page.getByRole("dialog", { name: /^Close case #/ });
+  await expect(dialog).toBeVisible();
+
+  for (let index = 0; index < 20; index++) {
+    await page.keyboard.press("Tab");
+    await expect(dialog.locator(":focus")).toHaveCount(1);
+  }
+  await page.keyboard.press("Shift+Tab");
+  await expect(dialog.locator(":focus")).toHaveCount(1);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+});
+
+test("bulk closes selected rows and reports the changed one", async ({
+  page,
+  api,
+}) => {
+  await signIn(page);
+  await page.goto("/cases");
+  const table = openTable(page);
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+  const rows = table.locator("tbody tr");
+  const numbers: number[] = [];
+  for (let index = 0; index < 3; index++) {
+    numbers.push(
+      numberFromCell(
+        await rows.nth(index).locator("td:nth-child(2)").textContent(),
+      ),
+    );
+  }
+
+  await rows.first().focus();
+  await page.keyboard.press("x");
+  await page.keyboard.press("j");
+  await page.keyboard.press("x");
+  await page.keyboard.press("j");
+  await page.keyboard.press("x");
+  await expect(
+    page.getByRole("toolbar", { name: "Selected cases" }),
+  ).toContainText("3 selected");
+
+  api.bumpVersion(`case_${numbers[1]}`);
+  await page.getByRole("button", { name: "Close selected", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Close selected cases" });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("radio", { name: "Accepted" }).click();
+  await dialog
+    .getByRole("combobox", { name: "Closure reason", exact: true })
+    .selectOption({ label: "Authorized activity" });
+  await dialog.getByLabel("Conclusion").fill("Pentest, SEC-41.");
+  await dialog.getByRole("button", { name: "Close selected cases" }).click();
+
+  await expect(
+    dialog.getByText("2 closed, 1 not closed"),
+  ).toBeVisible();
+  const results = dialog.getByRole("list", { name: "Bulk close results" });
+  await expect(results).toContainText("Changed since loaded");
+
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(
+    page.getByRole("toolbar", { name: "Selected cases" }),
+  ).toContainText("1 selected");
+  await expect(
+    rowForNumber(page, numbers[1]).getByRole("checkbox"),
+  ).toBeChecked();
 });

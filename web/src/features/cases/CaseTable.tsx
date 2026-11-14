@@ -10,6 +10,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError } from "../../api/client";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { Checkbox } from "../../components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -36,9 +37,13 @@ export interface CaseTableProps {
   timeZone: TimeZoneSetting;
   loading: boolean;
   error: Error | null;
+  selectedIds: ReadonlySet<string>;
   onRetry: () => void;
+  onSelectCase: (item: CaseSummary, selected: boolean) => void;
+  onSelectAll: (selected: boolean) => void;
   onOpen?: (item: CaseSummary) => void;
   onAssign?: (item: CaseSummary) => void;
+  onClose?: (item: CaseSummary) => void;
 }
 
 export interface CaseTableHandle {
@@ -96,9 +101,13 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
       timeZone,
       loading,
       error,
+      selectedIds,
       onRetry,
+      onSelectCase,
+      onSelectAll,
       onOpen,
       onAssign,
+      onClose,
     },
     ref,
   ) {
@@ -108,6 +117,8 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
     const activeIndex = cases.findIndex((item) => item.id === activeId);
     // A filter or Show can remove the active row; the first row then takes over.
     const currentIndex = activeIndex === -1 ? 0 : activeIndex;
+    const selectedCount = selectedIds.size;
+    const allSelected = cases.length > 0 && selectedCount === cases.length;
 
     const focusRow = useCallback(
       (index: number) => {
@@ -139,7 +150,11 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
     function handleRowKeyDown(
       event: ReactKeyboardEvent<HTMLTableSectionElement>,
     ) {
-      if (cases.length === 0 || isTextEntryTarget(event.target)) {
+      if (
+        cases.length === 0 ||
+        isTextEntryTarget(event.target) ||
+        dialogOpen()
+      ) {
         return;
       }
 
@@ -178,6 +193,20 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
           event.preventDefault();
           onAssign?.(target);
           return;
+        case "x":
+          if (target === undefined) {
+            return;
+          }
+          event.preventDefault();
+          onSelectCase(target, !selectedIds.has(target.id));
+          return;
+        case "e":
+          if (target === undefined || onClose === undefined) {
+            return;
+          }
+          event.preventDefault();
+          onClose(target);
+          return;
         default:
           return;
       }
@@ -212,6 +241,17 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
           <TableCaption>{caption(tab, scope)}</TableCaption>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-10">
+                <Checkbox
+                  aria-label="Select all on this page"
+                  checked={
+                    allSelected ? true : selectedCount > 0 ? "indeterminate" : false
+                  }
+                  onCheckedChange={(checked) =>
+                    onSelectAll(checked === true)
+                  }
+                />
+              </TableHead>
               <TableHead>Number</TableHead>
               <TableHead>Title</TableHead>
               <TableHead>Severity</TableHead>
@@ -225,7 +265,7 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
               <SkeletonRows />
             ) : cases.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="py-8 text-muted-foreground">
+                <TableCell colSpan={7} className="py-8 text-muted-foreground">
                   {emptyMessage(tab, scope)}
                 </TableCell>
               </TableRow>
@@ -237,7 +277,9 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
                   timeZone={timeZone}
                   now={now}
                   active={index === currentIndex}
+                  selected={selectedIds.has(item.id)}
                   onFocus={() => setActiveId(item.id)}
+                  onSelect={onSelectCase}
                   onOpen={onOpen}
                 />
               ))
@@ -254,7 +296,9 @@ interface CaseRowProps {
   timeZone: TimeZoneSetting;
   now: Date;
   active: boolean;
+  selected: boolean;
   onFocus: () => void;
+  onSelect: (item: CaseSummary, selected: boolean) => void;
   onOpen: ((item: CaseSummary) => void) | undefined;
 }
 
@@ -263,7 +307,9 @@ function CaseRow({
   timeZone,
   now,
   active,
+  selected,
   onFocus,
+  onSelect,
   onOpen,
 }: CaseRowProps) {
   const severity = SEVERITY_STYLES[item.severity];
@@ -274,6 +320,13 @@ function CaseRow({
       tabIndex={active ? 0 : -1}
       onFocus={onFocus}
     >
+      <TableCell>
+        <Checkbox
+          aria-label={`Select case #${item.caseNumber}`}
+          checked={selected}
+          onCheckedChange={(checked) => onSelect(item, checked === true)}
+        />
+      </TableCell>
       <TableCell className="font-mono">#{item.caseNumber}</TableCell>
       <TableCell
         className={
@@ -325,7 +378,7 @@ function SkeletonRows() {
     <>
       {Array.from({ length: SKELETON_ROWS }, (_, index) => (
         <TableRow key={index}>
-          {Array.from({ length: 6 }, (_cell, cellIndex) => (
+          {Array.from({ length: 7 }, (_cell, cellIndex) => (
             <TableCell key={cellIndex}>
               <div className="h-4 w-full animate-pulse rounded bg-muted" />
             </TableCell>
@@ -379,6 +432,10 @@ export function isTextEntryTarget(target: EventTarget | null): boolean {
     tagName === "select" ||
     target.isContentEditable
   );
+}
+
+function dialogOpen(): boolean {
+  return document.querySelector('[role="dialog"]') !== null;
 }
 
 function caseErrorMessage(error: Error): string {

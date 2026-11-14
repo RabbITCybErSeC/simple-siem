@@ -30,7 +30,14 @@ type Responder = (url: URL) => Response | Promise<Response>;
 
 interface ApiStub {
   requests: string[];
+  recorded: RecordedRequest[];
   listRequests: () => string[];
+}
+
+interface RecordedRequest {
+  method: string;
+  path: string;
+  body: unknown;
 }
 
 const USER = {
@@ -147,18 +154,26 @@ function stubApi(
     detail?: Responder;
     alerts?: Responder;
     timeline?: Responder;
+    bulkClose?: Responder;
   } = {},
 ): ApiStub {
   const requests: string[] = [];
+  const recorded: RecordedRequest[] = [];
 
   vi.stubGlobal(
     "fetch",
-    vi.fn<FetchFunction>(async (input) => {
+    vi.fn<FetchFunction>(async (input, init) => {
       const url = new URL(input.toString(), "http://localhost");
       if (url.pathname === "/api/v1/me") {
         return jsonResponse(USER);
       }
       requests.push(`${url.pathname}${url.search}`);
+      recorded.push({
+        method: init?.method ?? "GET",
+        path: `${url.pathname}${url.search}`,
+        body:
+          init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
 
       switch (url.pathname) {
         case "/api/v1/cases":
@@ -171,6 +186,10 @@ function stubApi(
         case "/api/v1/cases/histogram":
           return (
             responders.histogram ?? (() => jsonResponse(HISTOGRAM))
+          )(url);
+        case "/api/v1/cases/bulk-close":
+          return (
+            responders.bulkClose ?? (() => jsonResponse({ results: [] }))
           )(url);
       }
 
@@ -201,6 +220,7 @@ function stubApi(
 
   return {
     requests,
+    recorded,
     listRequests: () =>
       requests.filter((request) => request.startsWith("/api/v1/cases?")),
   };
@@ -304,6 +324,7 @@ describe("Cases page", () => {
         .getAllByRole("columnheader")
         .map((header) => header.textContent),
     ).toEqual([
+      "",
       "Number",
       "Title",
       "Severity",
@@ -355,7 +376,7 @@ describe("Cases page", () => {
       name: "Cases: Closed, All",
     });
     await within(table).findByText("#290");
-    const ageCell = caseRow(table, 290).querySelectorAll("td")[5];
+    const ageCell = caseRow(table, 290).querySelectorAll("td")[6];
 
     expect(ageCell).toHaveTextContent("Malicious");
     expect(ageCell.querySelector("time")).toBeNull();
@@ -1415,5 +1436,319 @@ describe("case detail route and layout", () => {
     expect(
       new URLSearchParams(router.state.location.search).get("scope"),
     ).toBe("all");
+  });
+});
+
+function rowCheckbox(table: HTMLElement, caseNumber: number): HTMLElement {
+  return within(caseRow(table, caseNumber)).getByRole("checkbox", {
+    name: `Select case #${caseNumber}`,
+  });
+}
+
+function selectionToolbar(): HTMLElement | null {
+  return screen.queryByRole("toolbar", { name: "Selected cases" });
+}
+
+describe("case selection", () => {
+  it("toggles a row with x and shows the selected count", async () => {
+    renderCases();
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    const row = caseRow(table, 312);
+    row.focus();
+
+    fireEvent.keyDown(row, { key: "x" });
+
+    expect(rowCheckbox(table, 312)).toHaveAttribute("aria-checked", "true");
+    expect(selectionToolbar()).toHaveTextContent("1 selected");
+    expect(
+      within(selectionToolbar() as HTMLElement).getByRole("button", {
+        name: "Close selected",
+      }),
+    ).toBeEnabled();
+
+    fireEvent.keyDown(row, { key: "x" });
+
+    expect(rowCheckbox(table, 312)).toHaveAttribute("aria-checked", "false");
+    expect(selectionToolbar()).not.toBeInTheDocument();
+  });
+
+  it("selects the page from the header and shows the mixed state", async () => {
+    renderCases();
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    const header = within(table).getByRole("checkbox", {
+      name: "Select all on this page",
+    });
+
+    fireEvent.click(header);
+
+    expect(header).toHaveAttribute("aria-checked", "true");
+    expect(rowCheckbox(table, 312)).toHaveAttribute("aria-checked", "true");
+    expect(rowCheckbox(table, 311)).toHaveAttribute("aria-checked", "true");
+    expect(selectionToolbar()).toHaveTextContent("2 selected");
+
+    fireEvent.click(rowCheckbox(table, 311));
+
+    expect(header).toHaveAttribute("aria-checked", "mixed");
+    expect(selectionToolbar()).toHaveTextContent("1 selected");
+
+    fireEvent.click(header);
+
+    expect(header).toHaveAttribute("aria-checked", "true");
+    expect(selectionToolbar()).toHaveTextContent("2 selected");
+  });
+
+  it("clears the selection when the tab changes", async () => {
+    renderCases();
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    expect(selectionToolbar()).toHaveTextContent("1 selected");
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^Closed/ }));
+
+    const closedTable = await screen.findByRole("table", {
+      name: "Cases: Closed, Mine",
+    });
+    await within(closedTable).findByText("Brute force → success");
+    expect(selectionToolbar()).not.toBeInTheDocument();
+    expect(rowCheckbox(closedTable, 312)).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+  });
+
+  it("keeps listed ids across Show and drops the ids that left", async () => {
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      now: new Date("2026-11-09T12:00:00Z"),
+    });
+    let latest = OPEN_CASES;
+    renderCases("/cases?refresh=30s", {
+      list: () => jsonResponse(listResponse(latest)),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    fireEvent.click(rowCheckbox(table, 311));
+    expect(selectionToolbar()).toHaveTextContent("2 selected");
+
+    latest = [{ ...OPEN_CASES[0], version: 2 }];
+    await vi.advanceTimersByTimeAsync(30_000);
+    const banner = await screen.findByRole("status");
+    fireEvent.click(within(banner).getByRole("button", { name: "Show" }));
+
+    await waitFor(() => {
+      expect(within(table).queryByText("#311")).not.toBeInTheDocument();
+    });
+    expect(selectionToolbar()).toHaveTextContent("1 selected");
+    expect(rowCheckbox(table, 312)).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("disables Close selected above 100 cases", async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      caseSummary({
+        id: `case_${1000 + index}`,
+        caseNumber: 1000 + index,
+        title: `Case ${index}`,
+      }),
+    );
+    renderCases("/cases", {
+      list: () => jsonResponse(listResponse(many)),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Case 0");
+
+    fireEvent.click(
+      within(table).getByRole("checkbox", {
+        name: "Select all on this page",
+      }),
+    );
+
+    expect(selectionToolbar()).toHaveTextContent("101 selected");
+    expect(
+      within(selectionToolbar() as HTMLElement).getByRole("button", {
+        name: "Close selected (max 100)",
+      }),
+    ).toBeDisabled();
+  });
+});
+
+async function openBulkCloseDialog(): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole("button", { name: "Close selected" }));
+  return screen.findByRole("dialog", { name: "Close selected cases" });
+}
+
+async function fillBulkClosureFields(dialog: HTMLElement): Promise<void> {
+  fireEvent.click(within(dialog).getByRole("radio", { name: "Accepted" }));
+  fireEvent.change(
+    within(dialog).getByRole("combobox", { name: "Closure reason" }),
+    { target: { value: "AUTHORIZED_ACTIVITY" } },
+  );
+  fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
+    target: { value: "Pentest, SEC-41." },
+  });
+}
+
+function bulkCloseRequests(recorded: RecordedRequest[]): RecordedRequest[] {
+  return recorded.filter(
+    (request) => request.path === "/api/v1/cases/bulk-close",
+  );
+}
+
+describe("bulk close", () => {
+  it("sends each loaded version and reports the summary", async () => {
+    const { recorded } = renderCases("/cases", {
+      bulkClose: () =>
+        jsonResponse({
+          results: [
+            { caseId: "case_312", status: "CLOSED" },
+            { caseId: "case_311", status: "CLOSED" },
+          ],
+        }),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    fireEvent.click(rowCheckbox(table, 311));
+
+    const dialog = await openBulkCloseDialog();
+    const countsBefore = recorded.filter(
+      (request) => request.path.startsWith("/api/v1/cases/counts"),
+    ).length;
+    const histogramBefore = recorded.filter(
+      (request) => request.path.startsWith("/api/v1/cases/histogram"),
+    ).length;
+
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    expect(
+      await within(dialog).findByRole("status"),
+    ).toHaveTextContent("2 closed, 0 not closed");
+    expect(bulkCloseRequests(recorded)).toHaveLength(1);
+    expect(bulkCloseRequests(recorded)[0].body).toEqual({
+      cases: [
+        { id: "case_312", version: 1 },
+        { id: "case_311", version: 1 },
+      ],
+      outcome: "ACCEPTED",
+      closureReason: "AUTHORIZED_ACTIVITY",
+      conclusion: "Pentest, SEC-41.",
+    });
+
+    await waitFor(() => {
+      expect(
+        recorded.filter((request) =>
+          request.path.startsWith("/api/v1/cases/counts"),
+        ).length,
+      ).toBeGreaterThan(countsBefore);
+      expect(
+        recorded.filter((request) =>
+          request.path.startsWith("/api/v1/cases/histogram"),
+        ).length,
+      ).toBeGreaterThan(histogramBefore);
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Close selected cases" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(selectionToolbar()).not.toBeInTheDocument();
+  });
+
+  it("keeps the cases that did not close selected for a retry", async () => {
+    renderCases("/cases", {
+      bulkClose: () =>
+        jsonResponse({
+          results: [
+            { caseId: "case_312", status: "CLOSED" },
+            { caseId: "case_311", status: "VERSION_CONFLICT" },
+          ],
+        }),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    fireEvent.click(rowCheckbox(table, 311));
+
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    expect(
+      await within(dialog).findByRole("status"),
+    ).toHaveTextContent("1 closed, 1 not closed");
+    const resultList = within(dialog).getByRole("list", {
+      name: "Bulk close results",
+    });
+    expect(resultList).toHaveTextContent("#312");
+    expect(resultList).toHaveTextContent("Closed");
+    expect(resultList).toHaveTextContent("#311");
+    expect(resultList).toHaveTextContent("Changed since loaded");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+
+    await waitFor(() => {
+      expect(selectionToolbar()).toHaveTextContent("1 selected");
+    });
+    expect(rowCheckbox(table, 312)).toHaveAttribute("aria-checked", "false");
+    expect(rowCheckbox(table, 311)).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("keeps the form open with a message when the request fails", async () => {
+    renderCases("/cases", {
+      bulkClose: () =>
+        jsonResponse(
+          {
+            error: {
+              code: "INTERNAL_ERROR",
+              message: "boom",
+              details: {},
+            },
+          },
+          500,
+        ),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Something went wrong. Try again.",
+    );
+    expect(within(dialog).getByLabelText("Conclusion")).toHaveValue(
+      "Pentest, SEC-41.",
+    );
   });
 });

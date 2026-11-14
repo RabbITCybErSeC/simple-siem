@@ -41,6 +41,7 @@ import type {
   CaseStatus,
 } from "../types";
 import { absoluteLink, copyText } from "./clipboard";
+import { CloseCaseDialog, closureReasonLabel } from "./CloseCaseDialog";
 import { EventViewer } from "./EventViewer";
 import {
   useAssignCase,
@@ -51,7 +52,6 @@ import {
 import type {
   AlertSummary,
   CaseDetail as CaseDetailData,
-  StoredClosureReason,
   TimelineActivityEntry,
   TimelineEntry,
   TimelineEvidenceEntry,
@@ -63,8 +63,9 @@ export interface CaseDetailProps {
   layout: CaseDetailLayout;
   queueState: CaseQueueState;
   timeZone: TimeZoneSetting;
-  /** Group 5 renders its Close case button here, after Assign. */
-  actions?: ReactNode;
+  /** A row's `e` asks for the close dialog once this detail has loaded. */
+  closeRequested?: boolean;
+  onCloseRequestHandled?: () => void;
   onViewChange: (view: CaseDetailView) => void;
   onLayoutChange: (layout: CaseDetailLayout) => void;
   onClose: () => void;
@@ -98,17 +99,6 @@ const STATUS_LABELS: Record<CaseStatus, string> = {
   OPEN: "Open",
   IN_PROGRESS: "In progress",
   CLOSED: "Closed",
-};
-
-const CLOSURE_REASON_LABELS: Record<StoredClosureReason, string> = {
-  FALSE_POSITIVE: "False positive",
-  BENIGN_TRUE_POSITIVE: "Benign true positive",
-  AUTHORIZED_ACTIVITY: "Authorized activity",
-  DUPLICATE: "Duplicate",
-  INSUFFICIENT_EVIDENCE: "Insufficient evidence",
-  CONFIRMED_THREAT: "Confirmed threat",
-  OTHER: "Other",
-  MERGED: "Merged",
 };
 
 const COPY_STATUS_MILLISECONDS = 2_000;
@@ -168,7 +158,8 @@ export function CaseDetail({
   layout,
   queueState,
   timeZone,
-  actions,
+  closeRequested = false,
+  onCloseRequestHandled,
   onViewChange,
   onLayoutChange,
   onClose,
@@ -183,11 +174,21 @@ export function CaseDetail({
   const [assignFailed, setAssignFailed] = useState<CaseActionFailure | null>(
     null,
   );
+  const [closeOpen, setCloseOpen] = useState(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const fallbackInputRef = useRef<HTMLInputElement>(null);
   const copyTimer = useRef<number | undefined>(undefined);
-  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState<string | null>(null);
   const [fallbackLink, setFallbackLink] = useState<string | null>(null);
+
+  const announce = useCallback((message: string) => {
+    setAnnouncement(message);
+    window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(
+      () => setAnnouncement(null),
+      COPY_STATUS_MILLISECONDS,
+    );
+  }, []);
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -209,18 +210,34 @@ export function CaseDetail({
     const copied = await copyText(link);
     if (!copied) {
       setFallbackLink(link);
-      setCopyStatus(null);
+      setAnnouncement(null);
       return;
     }
 
     setFallbackLink(null);
-    setCopyStatus("Link copied");
-    window.clearTimeout(copyTimer.current);
-    copyTimer.current = window.setTimeout(
-      () => setCopyStatus(null),
-      COPY_STATUS_MILLISECONDS,
-    );
-  }, []);
+    announce("Link copied");
+  }, [announce]);
+
+  const closeCase = useCallback(
+    (closed: CaseDetailData) => {
+      setCloseOpen(false);
+      onCloseRequestHandled?.();
+      headingRef.current?.focus();
+      announce(`Case #${closed.caseNumber} closed`);
+    },
+    [announce, onCloseRequestHandled],
+  );
+
+  const changeCloseOpen = (open: boolean) => {
+    if (!open && closeRequested) {
+      onCloseRequestHandled?.();
+    }
+    setCloseOpen(open);
+  };
+
+  const closeDialogOpen =
+    closeOpen ||
+    (closeRequested && detail !== undefined && detail.status !== "CLOSED");
 
   const assignCase = useCallback(() => {
     if (detail === undefined || me === undefined) {
@@ -241,7 +258,7 @@ export function CaseDetail({
   }, [assignCaseMutation, caseNumber, detail, me]);
 
   // The palette runs the same actions as the pane, so the detail stays the
-  // single owner of assign, copy link, close, and the layout toggle.
+  // single owner of assign, close, copy link, and the layout toggle.
   useEffect(() => {
     if (detail === undefined) {
       return;
@@ -251,6 +268,8 @@ export function CaseDetail({
       assignLabel:
         detail.assignee?.id === me?.id ? "Unassign" : "Assign to me",
       assign: assignCase,
+      canClose: detail.status !== "CLOSED",
+      close: () => setCloseOpen(true),
       copyLink: () => void copyLink(),
       closeDetail: onClose,
       toggleFullPage: () =>
@@ -318,7 +337,16 @@ export function CaseDetail({
               {detail.assignee?.id === me?.id ? "Unassign" : "Assign to me"}
             </Button>
           )}
-          {actions}
+          {detail === undefined || detail.status === "CLOSED" ? null : (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setCloseOpen(true)}
+            >
+              Close case
+            </Button>
+          )}
           <Button
             type="button"
             variant="outline"
@@ -352,7 +380,7 @@ export function CaseDetail({
       </div>
 
       <p role="status" className="sr-only">
-        {copyStatus}
+        {announcement}
       </p>
       {assignFailed === null ? null : (
         <div className="mt-3">
@@ -442,6 +470,16 @@ export function CaseDetail({
             />
           </TabsContent>
         </Tabs>
+      )}
+
+      {detail === undefined ? null : (
+        <CloseCaseDialog
+          detail={detail}
+          open={closeDialogOpen}
+          onOpenChange={changeCloseOpen}
+          onReload={() => void detailQuery.refetch()}
+          onClosed={closeCase}
+        />
       )}
     </section>
   );
@@ -840,13 +878,6 @@ function statusLabel(value: unknown): string {
 function outcomeLabel(value: unknown): string {
   if (typeof value === "string" && value in OUTCOME_LABELS) {
     return OUTCOME_LABELS[value as CaseOutcome];
-  }
-  return typeof value === "string" ? value : "unknown";
-}
-
-function closureReasonLabel(value: unknown): string {
-  if (typeof value === "string" && value in CLOSURE_REASON_LABELS) {
-    return CLOSURE_REASON_LABELS[value as StoredClosureReason];
   }
   return typeof value === "string" ? value : "unknown";
 }

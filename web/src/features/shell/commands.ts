@@ -8,6 +8,8 @@ export interface CaseCommands {
   caseNumber: number;
   assignLabel: "Assign to me" | "Unassign";
   assign: () => void;
+  canClose: boolean;
+  close: () => void;
   copyLink: () => void;
   closeDetail: () => void;
   toggleFullPage: () => void;
@@ -167,6 +169,18 @@ function caseDetailCommands(
       movesFocus: false,
       run: commands.assign,
     },
+    ...(commands.canClose
+      ? [
+          {
+            id: "case-close",
+            label: "Close case…",
+            group: "Case" as const,
+            keywords: ["case", String(commands.caseNumber), "close", "resolve"],
+            movesFocus: true,
+            run: commands.close,
+          },
+        ]
+      : []),
     {
       id: "case-copy-link",
       label: "Copy link with absolute times",

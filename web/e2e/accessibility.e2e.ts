@@ -128,7 +128,7 @@ test("the case detail is accessible in every section and both themes", async ({
   const table = page.getByRole("table", { name: "Cases: Open, Mine" });
   await expect(table.locator("tbody tr")).toHaveCount(50);
   const number = numberFromCell(
-    await table.locator("tbody tr").first().locator("td").first().textContent(),
+    await table.locator("tbody tr").first().locator("td:nth-child(2)").textContent(),
   );
 
   await page.goto(`/cases/${number}`);
@@ -150,4 +150,86 @@ test("the case detail is accessible in every section and both themes", async ({
   await page.getByRole("tab", { name: "Activity" }).click();
   await expect(page.getByRole("list", { name: "Activity" })).toBeVisible();
   await expectAccessibleInBothThemes(page);
+});
+
+test("the close and bulk close dialogs are accessible in both themes", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto("/cases?tab=all&scope=all");
+  const allTable = page.getByRole("table", { name: "Cases: All, All" });
+  await expect(allTable.locator("tbody tr")).toHaveCount(50);
+
+  let number: number | undefined;
+  for (let index = 0; index < 30 && number === undefined; index++) {
+    const row = allTable.locator("tbody tr").nth(index);
+    if ((await row.locator("td:nth-child(7) time").count()) === 0) {
+      continue;
+    }
+    await row.focus();
+    await page.keyboard.press("Enter");
+    const region = page.getByRole("region", { name: /^Case #/ });
+    await expect(region).toBeVisible();
+    const heading = await region
+      .getByRole("heading", { level: 2 })
+      .textContent();
+    const alertsTab = await page
+      .getByRole("tab", { name: /^Alerts/ })
+      .textContent();
+    if (Number((alertsTab ?? "").replace(/\D/g, "")) > 1) {
+      number = numberFromCell(heading?.split(" ")[0] ?? null);
+      break;
+    }
+    await page.keyboard.press("Escape");
+  }
+  expect(number).toBeDefined();
+
+  await page.getByRole("button", { name: "Close case", exact: true }).click();
+  const closeDialog = page.getByRole("dialog", {
+    name: `Close case #${number}`,
+    exact: true,
+  });
+  await expect(
+    closeDialog.getByRole("table", { name: "Alert dispositions" }),
+  ).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+  await page.keyboard.press("Escape");
+  await expect(closeDialog).toBeHidden();
+
+  await page.goto("/cases");
+  const table = page.getByRole("table", { name: "Cases: Open, Mine" });
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+  await table
+    .locator("tbody tr")
+    .nth(0)
+    .getByRole("checkbox", { name: /^Select case/ })
+    .click();
+  await table
+    .locator("tbody tr")
+    .nth(1)
+    .getByRole("checkbox", { name: /^Select case/ })
+    .click();
+
+  await page.getByRole("button", { name: "Close selected", exact: true }).click();
+  const bulkDialog = page.getByRole("dialog", {
+    name: "Close selected cases",
+  });
+  await expect(bulkDialog).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+
+  await bulkDialog.getByRole("radio", { name: "Accepted" }).click();
+  await bulkDialog
+    .getByRole("combobox", { name: "Closure reason", exact: true })
+    .selectOption({ label: "Authorized activity" });
+  await bulkDialog.getByLabel("Conclusion").fill("Pentest, SEC-41.");
+  await bulkDialog
+    .getByRole("button", { name: "Close selected cases" })
+    .click();
+  await expect(
+    bulkDialog.getByText("2 closed, 0 not closed"),
+  ).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+
+  await bulkDialog.getByRole("button", { name: "Done" }).click();
+  await expect(bulkDialog).toBeHidden();
 });

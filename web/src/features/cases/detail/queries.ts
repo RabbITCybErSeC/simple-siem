@@ -6,18 +6,29 @@ import {
 } from "@tanstack/react-query";
 import { apiRequest, get } from "../../../api/client";
 import type {
+  AlertSummary,
   AssignRequest,
+  BulkCloseRequest,
+  BulkCloseResponse,
   CaseAlertsResponse,
   CaseDetail,
   CaseTimelineResponse,
+  CloseRequest,
 } from "./types";
 
 const PAGE_LIMIT = 50;
+const ALL_ALERTS_LIMIT = 100;
 
 export interface AssignCaseVariables {
   caseId: string;
   caseNumber: number;
   request: AssignRequest;
+}
+
+export interface CloseCaseVariables {
+  caseId: string;
+  caseNumber: number;
+  request: CloseRequest;
 }
 
 /** One cache key per case number for the detail and the actions on it. */
@@ -60,6 +71,48 @@ export function useCaseAlerts(caseId: string) {
   });
 }
 
+/**
+ * Every alert of a case for the close dialog's per-alert overrides. The
+ * dialog needs the whole set, so pages are followed until the end, capped at
+ * the contract's 100-case override limit.
+ */
+export function useAllCaseAlerts(caseId: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: caseAllAlertsQueryKey(caseId),
+    queryFn: () => fetchAllAlerts(caseId as string),
+    enabled: enabled && caseId !== undefined,
+  });
+}
+
+export function useCloseCase() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ caseId, request }: CloseCaseVariables) =>
+      apiRequest<CaseDetail>("POST", `/cases/${caseId}/close`, request),
+    onSuccess: (detail, variables) => {
+      queryClient.setQueryData(caseQueryKey(variables.caseNumber), detail);
+      // The queue's snapshot rule keeps the visible rows: only the counts and
+      // the chart refresh here, and the next refresh tick finds row changes.
+      void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
+      void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
+    },
+  });
+}
+
+export function useBulkCloseCases() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (request: BulkCloseRequest) =>
+      apiRequest<BulkCloseResponse>("POST", "/cases/bulk-close", request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
+      void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
+    },
+  });
+}
+
 export function useCaseTimeline(caseId: string, kind?: "ACTIVITY") {
   return useInfiniteQuery({
     queryKey: caseTimelineQueryKey(caseId, kind),
@@ -82,6 +135,28 @@ export function useCaseTimeline(caseId: string, kind?: "ACTIVITY") {
 
 function caseAlertsQueryKey(caseId: string) {
   return ["case", caseId, "alerts"] as const;
+}
+
+function caseAllAlertsQueryKey(caseId: string | undefined) {
+  return ["case", caseId, "alerts", "all"] as const;
+}
+
+async function fetchAllAlerts(caseId: string): Promise<AlertSummary[]> {
+  const alerts: AlertSummary[] = [];
+  let cursor: string | null = null;
+
+  while (alerts.length < ALL_ALERTS_LIMIT) {
+    const page: CaseAlertsResponse = await get<CaseAlertsResponse>(
+      pagePath(`/cases/${caseId}/alerts`, cursor),
+    );
+    alerts.push(...page.data);
+    cursor = page.pagination.nextCursor;
+    if (cursor === null) {
+      break;
+    }
+  }
+
+  return alerts.slice(0, ALL_ALERTS_LIMIT);
 }
 
 function caseTimelineQueryKey(caseId: string, kind: "ACTIVITY" | undefined) {
