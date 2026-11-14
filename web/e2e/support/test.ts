@@ -2,18 +2,26 @@ import { expect, test as base } from "@playwright/test";
 import type { ConsoleMessage, Page } from "@playwright/test";
 import { FixtureApi } from "./api.ts";
 
-const TEST_PASSWORD = "correct horse battery staple";
+// Must match SIMPLE_SIEM_PUBLIC_URL=http://127.0.0.1:8090 in the Makefile
+// e2e target; make cannot import this file.
+export const APP_ORIGIN = "http://127.0.0.1:8090";
 
 export const BROWSER_HEADERS = {
   "X-Requested-With": "simple-siem",
-  Origin: "http://127.0.0.1:8090",
+  Origin: APP_ORIGIN,
 };
 
+const TEST_PASSWORD = "correct horse battery staple";
+
 export const TEST_USERS = {
-  admin: { email: "analyst@example.test", password: TEST_PASSWORD },
+  admin: {
+    email: "admin@example.test",
+    displayName: "Ada Admin",
+    password: TEST_PASSWORD,
+  },
   analyst: {
-    email: "analyst2@example.test",
-    displayName: "Avery Analyst",
+    email: "analyst@example.test",
+    displayName: "Alice Analyst",
     password: TEST_PASSWORD,
   },
 } as const;
@@ -24,7 +32,7 @@ export type TestRole = keyof typeof TEST_USERS;
 // jar, so the browser keeps the HttpOnly session cookie.
 export async function signIn(
   page: Page,
-  role: TestRole = "admin",
+  role: TestRole = "analyst",
 ): Promise<void> {
   const user = TEST_USERS[role];
   const response = await page.request.post("/api/v1/auth/login", {
@@ -97,18 +105,22 @@ export const test = base.extend<Fixtures>({
 
       await use();
 
-      const firstDocumentPolicy = documentPolicies[0] ?? "";
-      const policyRemainder = firstDocumentPolicy.slice(
-        BASE_CONTENT_SECURITY_POLICY.length,
-      );
-      expect(
-        firstDocumentPolicy.startsWith(BASE_CONTENT_SECURITY_POLICY),
-        `first document Content-Security-Policy: ${firstDocumentPolicy}`,
-      ).toBe(true);
-      expect(
-        STYLE_NONCE_SUFFIX.test(policyRemainder),
-        `first document Content-Security-Policy style suffix: ${policyRemainder}`,
-      ).toBe(true);
+      // A test that only uses page.request loads no document, so there is no
+      // policy to check.
+      if (documentPolicies.length > 0) {
+        const firstDocumentPolicy = documentPolicies[0] ?? "";
+        const policyRemainder = firstDocumentPolicy.slice(
+          BASE_CONTENT_SECURITY_POLICY.length,
+        );
+        expect(
+          firstDocumentPolicy.startsWith(BASE_CONTENT_SECURITY_POLICY),
+          `first document Content-Security-Policy: ${firstDocumentPolicy}`,
+        ).toBe(true);
+        expect(
+          STYLE_NONCE_SUFFIX.test(policyRemainder),
+          `first document Content-Security-Policy style suffix: ${policyRemainder}`,
+        ).toBe(true);
+      }
       expect(browserMessages, "browser console").toEqual([]);
     },
     { auto: true },

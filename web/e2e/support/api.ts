@@ -5,7 +5,7 @@ import type { CaseSummary } from "../../src/features/cases/types.ts";
 import { CaseFixtureRoutes } from "./cases.ts";
 
 function errorEnvelope(code: string, message: string): ErrorEnvelope {
-  return { error: { code, message, details: {} } };
+  return { error: { code, message } };
 }
 
 // Every /api/v1 request passes through here so the client's half of the
@@ -51,6 +51,15 @@ export class FixtureApi {
       return;
     }
     if (path === "/api/v1/cases" || path.startsWith("/api/v1/cases/")) {
+      const cookieHeader = (await request.headerValue("cookie")) ?? "";
+      if (!cookieHeader.includes("simple_siem_session=")) {
+        await this.respondJson(
+          route,
+          401,
+          errorEnvelope("AUTHENTICATION_REQUIRED", "Authentication required"),
+        );
+        return;
+      }
       const url = new URL(request.url());
       await this.cases.handle(route, path, url.searchParams);
       return;

@@ -102,7 +102,7 @@ const ALLOWED_PARAMETERS: Record<string, string[]> = {
 class InvalidQueryError extends Error {}
 
 function errorEnvelope(code: string, message: string): ErrorEnvelope {
-  return { error: { code, message, details: {} } };
+  return { error: { code, message } };
 }
 
 const VALIDATION_ERROR = errorEnvelope("VALIDATION_ERROR", "Invalid request");
