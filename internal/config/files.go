@@ -36,6 +36,13 @@ const (
 	maxBatchSize              = 50000
 	defaultMaxQuarantineRatio = 0.10
 
+	defaultIngestDelay = time.Minute
+	maxIngestDelay     = time.Hour
+	defaultOverlap     = time.Minute
+	maxOverlap         = time.Hour
+	defaultMaxCatchUp  = 6 * time.Hour
+	minMaxCatchUp      = time.Minute
+
 	defaultFetcherTimeout    = 30 * time.Second
 	maxFetcherTimeout        = 10 * time.Minute
 	defaultFetcherMaxResults = 10000
@@ -339,14 +346,18 @@ func loadPipelines(directory string) ([]Pipeline, []error) {
 		}
 
 		pipeline := Pipeline{
-			File:       name,
-			ID:         file.ID,
-			Version:    file.Version,
-			Variables:  file.Variables,
-			Fetchers:   file.Fetchers,
+			File:      name,
+			ID:        file.ID,
+			Version:   file.Version,
+			Variables: file.Variables,
+			Fetchers:  file.Fetchers,
+			Schedule: Schedule{
+				IngestDelay:   Duration(defaultIngestDelay),
+				Overlap:       Duration(defaultOverlap),
+				OverlapPolicy: file.Schedule.OverlapPolicy,
+			},
 			Processors: file.Processors,
 			Outputs:    file.Outputs,
-			Schedule:   Schedule{OverlapPolicy: file.Schedule.OverlapPolicy},
 		}
 		if file.Schedule.Every != nil {
 			// Pipeline.Schedule cannot tell an absent every from an explicit
@@ -358,6 +369,21 @@ func loadPipelines(directory string) ([]Pipeline, []error) {
 		}
 		if file.Schedule.Timeout != nil {
 			pipeline.Schedule.Timeout = *file.Schedule.Timeout
+		}
+		if file.Schedule.IngestDelay != nil {
+			pipeline.Schedule.IngestDelay = *file.Schedule.IngestDelay
+		}
+		if file.Schedule.Overlap != nil {
+			pipeline.Schedule.Overlap = *file.Schedule.Overlap
+		}
+		if file.Schedule.MaxCatchUp != nil {
+			pipeline.Schedule.MaxCatchUp = *file.Schedule.MaxCatchUp
+			// Zero means absent (the default is applied with the outputs), so
+			// the minimum is checked while presence is still known.
+			if *file.Schedule.MaxCatchUp < Duration(minMaxCatchUp) {
+				problems = append(problems, fileError(name, "schedule.max_catch_up",
+					fmt.Sprintf("must be at least %s", minMaxCatchUp)))
+			}
 		}
 		pipelines = append(pipelines, pipeline)
 	}
@@ -713,6 +739,14 @@ func validatePipelineSchedule(pipeline *Pipeline) []error {
 	if pipeline.Schedule.Timeout <= 0 || pipeline.Schedule.Timeout > Duration(time.Hour) {
 		problems = append(problems, fileError(pipeline.File, "schedule.timeout", "must be positive and at most 1h"))
 	}
+	if pipeline.Schedule.IngestDelay < 0 || pipeline.Schedule.IngestDelay > Duration(maxIngestDelay) {
+		problems = append(problems, fileError(pipeline.File, "schedule.ingest_delay",
+			fmt.Sprintf("must be between 0s and %s", maxIngestDelay)))
+	}
+	if pipeline.Schedule.Overlap < 0 || pipeline.Schedule.Overlap > Duration(maxOverlap) {
+		problems = append(problems, fileError(pipeline.File, "schedule.overlap",
+			fmt.Sprintf("must be between 0s and %s", maxOverlap)))
+	}
 	if pipeline.Schedule.OverlapPolicy == "" {
 		pipeline.Schedule.OverlapPolicy = "skip"
 	} else if !slices.Contains([]string{"skip", "queue", "parallel"}, pipeline.Schedule.OverlapPolicy) {
@@ -932,6 +966,10 @@ func validatePipelineOutputs(pipeline *Pipeline, system System, processorOutputs
 		problems = append(problems, fileError(pipeline.File, "outputs", "at least one output is required"))
 	}
 
+	// Catch-up may not read beyond what the shortest-lived output retains.
+	var maxCatchUpRetention Duration
+	var maxCatchUpOutput string
+
 	for _, name := range slices.Sorted(maps.Keys(pipeline.Outputs)) {
 		output := pipeline.Outputs[name]
 		path := "outputs." + name
@@ -963,6 +1001,12 @@ func validatePipelineOutputs(pipeline *Pipeline, system System, processorOutputs
 				problems = append(problems, fileError(pipeline.File, path+".allowed_lateness", "must be at least 0 and less than retention"))
 			}
 
+			if retention >= Duration(minRetention) && retention <= Duration(maxRetention) &&
+				(maxCatchUpOutput == "" || retention < maxCatchUpRetention) {
+				maxCatchUpRetention = retention
+				maxCatchUpOutput = name
+			}
+
 			if output.Retention == nil {
 				output.Retention = &retention
 			}
@@ -979,6 +1023,19 @@ func validatePipelineOutputs(pipeline *Pipeline, system System, processorOutputs
 			datasetWriters[name] = pipeline.File
 		}
 	}
+
+	maxCatchUp := pipeline.Schedule.MaxCatchUp
+	if maxCatchUp == 0 {
+		maxCatchUp = Duration(defaultMaxCatchUp)
+		if maxCatchUpOutput != "" && maxCatchUp > maxCatchUpRetention {
+			maxCatchUp = maxCatchUpRetention
+		}
+	} else if maxCatchUpOutput != "" && maxCatchUp > maxCatchUpRetention {
+		problems = append(problems, fileError(pipeline.File, "schedule.max_catch_up",
+			fmt.Sprintf("must be at most the retention of output %q (%s)", maxCatchUpOutput, time.Duration(maxCatchUpRetention))))
+	}
+	pipeline.Schedule.MaxCatchUp = maxCatchUp
+
 	return problems
 }
 

@@ -274,7 +274,7 @@ func TestFetchMapsResponseStatus(t *testing.T) {
 			status:      http.StatusBadRequest,
 			body:        `{"error":{"type":"parsing_exception","reason":"bad query"}}`,
 			code:        fetcher.ErrorCodeQueryRejected,
-			wantMessage: []string{"parsing_exception", "bad query"},
+			wantMessage: []string{"backend rejected the query (400)", "parsing_exception"},
 		},
 		{
 			name:        "malformed success body",
@@ -311,6 +311,26 @@ func TestFetchMapsResponseStatus(t *testing.T) {
 				t.Errorf("Fetch() error %q contains the API key", err)
 			}
 		})
+	}
+}
+
+func TestFetchErrorOmitsReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":{"type":"parsing_exception","reason":"failed to parse [user.name] with value [secret-value-xyz]"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	fetcherClient := newTestFetcher(t, testInstance(server.URL), apiKeyEnvironment())
+	status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), discardPage)
+	requireFailure(t, status, err, fetcher.ErrorCodeQueryRejected, false)
+
+	const want = "QUERY_REJECTED: backend rejected the query (400): parsing_exception"
+	if err.Error() != want {
+		t.Errorf("Fetch() error = %q, want %q", err, want)
+	}
+	if strings.Contains(err.Error(), "secret-value-xyz") {
+		t.Errorf("Fetch() error %q exposes the backend's reason text", err)
 	}
 }
 
@@ -1028,6 +1048,78 @@ func TestFetchPITExpired(t *testing.T) {
 	}
 }
 
+func TestFetchIncompleteSearch(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    map[string]any
+		message string
+	}{
+		{
+			name: "one shard failed",
+			body: map[string]any{
+				"timed_out": false,
+				"_shards":   map[string]any{"total": 2, "failed": 1},
+				"hits":      map[string]any{"hits": []any{fakeHit("a", 1)}},
+			},
+			message: "search incomplete: 1 of 2 shards failed",
+		},
+		{
+			name: "timed out",
+			body: map[string]any{
+				"timed_out": true,
+				"_shards":   map[string]any{"total": 2, "failed": 0},
+				"hits":      map[string]any{"hits": []any{fakeHit("a", 1)}},
+			},
+			message: "search timed out",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(test.body)
+			if err != nil {
+				t.Fatalf("encode response: %v", err)
+			}
+			backend := newFakeBackend(t, nil)
+			backend.searchOverride = func(*http.Request, int) (int, []byte, bool) {
+				return http.StatusOK, body, true
+			}
+			fetcherClient := newBackendFetcher(t, backend, nil)
+
+			emitted := 0
+			status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), func(page []fetcher.SourceRecord) error {
+				emitted += len(page)
+				return nil
+			})
+			requireFailure(t, status, err, fetcher.ErrorCodeBackendUnavailable, true)
+			if got := status.Errors[0].Message; got != test.message {
+				t.Errorf("message = %q, want %q", got, test.message)
+			}
+			if emitted != 0 {
+				t.Errorf("emitted %d records, want 0 from an incomplete page", emitted)
+			}
+			if _, _, _, closeCount := backend.requests(); closeCount != 1 {
+				t.Errorf("PIT close count = %d, want 1", closeCount)
+			}
+		})
+	}
+}
+
+func TestFetchIncompletePIT(t *testing.T) {
+	backend := newFakeBackend(t, nil)
+	backend.openResponse = []byte(`{"id":"pit-open","_shards":{"total":2,"failed":1}}`)
+	fetcherClient := newBackendFetcher(t, backend, nil)
+
+	status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), discardPage)
+	requireFailure(t, status, err, fetcher.ErrorCodeBackendUnavailable, true)
+	if got := status.Errors[0].Message; got != "search incomplete: 1 of 2 shards failed" {
+		t.Errorf("message = %q, want the shard failure", got)
+	}
+	requests, _, opens, closes := backend.requests()
+	if opens != 1 || closes != 1 || len(requests) != 0 {
+		t.Errorf("PIT opens/closes/searches = %d/%d/%d, want 1/1/0", opens, closes, len(requests))
+	}
+}
+
 func TestFetchEmitError(t *testing.T) {
 	backend := newFakeBackend(t, [][]map[string]any{{fakeHit("a", 1)}})
 	fetcherClient := newBackendFetcher(t, backend, nil)
@@ -1118,6 +1210,7 @@ type fakeBackend struct {
 	server         *httptest.Server
 	pages          [][]map[string]any
 	searchOverride func(request *http.Request, index int) (int, []byte, bool)
+	openResponse   []byte
 	closeStatus    int
 
 	mu           sync.Mutex
@@ -1140,7 +1233,12 @@ func (backend *fakeBackend) ServeHTTP(writer http.ResponseWriter, request *http.
 	case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/_pit"):
 		backend.mu.Lock()
 		backend.openCount++
+		openResponse := backend.openResponse
 		backend.mu.Unlock()
+		if len(openResponse) > 0 {
+			_, _ = writer.Write(openResponse)
+			return
+		}
 		writeJSON(writer, map[string]any{"id": "pit-open"})
 
 	case request.Method == http.MethodDelete && request.URL.Path == "/_pit":

@@ -1737,6 +1737,15 @@ func TestPipelines(t *testing.T) {
 				if pipeline.Schedule.OverlapPolicy != "skip" {
 					t.Errorf("OverlapPolicy = %q, want skip", pipeline.Schedule.OverlapPolicy)
 				}
+				if pipeline.Schedule.IngestDelay != Duration(time.Minute) {
+					t.Errorf("IngestDelay = %s, want 1m", time.Duration(pipeline.Schedule.IngestDelay))
+				}
+				if pipeline.Schedule.Overlap != Duration(time.Minute) {
+					t.Errorf("Overlap = %s, want 1m", time.Duration(pipeline.Schedule.Overlap))
+				}
+				if pipeline.Schedule.MaxCatchUp != Duration(6*time.Hour) {
+					t.Errorf("MaxCatchUp = %s, want 6h", time.Duration(pipeline.Schedule.MaxCatchUp))
+				}
 				output := pipeline.Outputs["auth_events"]
 				if output.Retention == nil || *output.Retention != Duration(72*time.Hour) {
 					t.Errorf("Retention = %v, want the 72h system default", output.Retention)
@@ -1775,6 +1784,72 @@ func TestPipelines(t *testing.T) {
 				}
 				if files.Pipelines[0].ID != "auth-events" || files.Pipelines[1].ID != "z-events" {
 					t.Fatalf("pipeline ids = %q, %q, want auth-events, z-events", files.Pipelines[0].ID, files.Pipelines[1].ID)
+				}
+			},
+		},
+		{
+			name: "explicit schedule window settings",
+			pipeline: strings.ReplaceAll(validPipeline, "  timeout: 2m",
+				"  timeout: 2m\n  ingest_delay: 30s\n  overlap: 0s\n  max_catch_up: 2h"),
+			check: func(t *testing.T, files Files) {
+				t.Helper()
+				schedule := files.Pipelines[0].Schedule
+				if schedule.IngestDelay != Duration(30*time.Second) {
+					t.Errorf("IngestDelay = %s, want 30s", time.Duration(schedule.IngestDelay))
+				}
+				if schedule.Overlap != 0 {
+					t.Errorf("Overlap = %s, want 0s", time.Duration(schedule.Overlap))
+				}
+				if schedule.MaxCatchUp != Duration(2*time.Hour) {
+					t.Errorf("MaxCatchUp = %s, want 2h", time.Duration(schedule.MaxCatchUp))
+				}
+			},
+		},
+		{
+			name: "ingest delay above one hour",
+			pipeline: strings.ReplaceAll(validPipeline, "  timeout: 2m",
+				"  timeout: 2m\n  ingest_delay: 2h"),
+			wantErrors: []string{"pipelines/auth.yaml", "schedule.ingest_delay", "1h"},
+		},
+		{
+			name: "negative overlap",
+			pipeline: strings.ReplaceAll(validPipeline, "  timeout: 2m",
+				"  timeout: 2m\n  overlap: -1s"),
+			wantErrors: []string{"schedule.overlap", "0s"},
+		},
+		{
+			name: "max catch up below one minute",
+			pipeline: strings.ReplaceAll(validPipeline, "  timeout: 2m",
+				"  timeout: 2m\n  max_catch_up: 30s"),
+			wantErrors: []string{"schedule.max_catch_up", "at least 1m"},
+		},
+		{
+			name: "max catch up beyond the output retention",
+			pipeline: strings.ReplaceAll(strings.ReplaceAll(validPipeline,
+				"  timeout: 2m", "  timeout: 2m\n  max_catch_up: 48h"),
+				"from: udm.auth_events", "from: udm.auth_events\n    retention: 24h"),
+			wantErrors: []string{"schedule.max_catch_up", "retention", "24h"},
+		},
+		{
+			name: "max catch up equal to the output retention",
+			pipeline: strings.ReplaceAll(strings.ReplaceAll(validPipeline,
+				"  timeout: 2m", "  timeout: 2m\n  max_catch_up: 24h"),
+				"from: udm.auth_events", "from: udm.auth_events\n    retention: 24h"),
+			check: func(t *testing.T, files Files) {
+				t.Helper()
+				if got := files.Pipelines[0].Schedule.MaxCatchUp; got != Duration(24*time.Hour) {
+					t.Errorf("MaxCatchUp = %s, want 24h", time.Duration(got))
+				}
+			},
+		},
+		{
+			name: "default max catch up capped at the output retention",
+			pipeline: strings.ReplaceAll(validPipeline,
+				"from: udm.auth_events", "from: udm.auth_events\n    retention: 1h"),
+			check: func(t *testing.T, files Files) {
+				t.Helper()
+				if got := files.Pipelines[0].Schedule.MaxCatchUp; got != Duration(time.Hour) {
+					t.Errorf("MaxCatchUp = %s, want the 1h output retention", time.Duration(got))
 				}
 			},
 		},

@@ -1,0 +1,8 @@
+id: auth-events
+fetcherType: elasticsearch
+version: 0.1.0
+description: Authentication events from the development Elasticsearch.
+rawQuery:
+  query:
+    term:
+      event.category: authentication

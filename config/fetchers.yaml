@@ -1,0 +1,11 @@
+# The development Elasticsearch. Apple `container` publishes it on the network
+# gateway, so the toolchain container reaches it at 192.168.100.1. Docker users
+# should change the address to http://simple-siem-elasticsearch:9200.
+fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [http://192.168.100.1:9200]
+    auth:
+      username: ${secret:ELASTICSEARCH_USERNAME}
+      password: ${secret:ELASTICSEARCH_PASSWORD}
+    allowed_indexes: [auth-*]
