@@ -1,0 +1,277 @@
+import { describe, expect, it } from "vitest";
+import {
+  caseQueueSearch,
+  countsParams,
+  defaultCaseQueueState,
+  histogramParams,
+  listParams,
+  parseCaseQueueState,
+  refreshMilliseconds,
+  type CaseQueueState,
+} from "./urlState";
+
+function parseState(
+  values: string | Record<string, string>,
+): CaseQueueState {
+  return parseCaseQueueState(new URLSearchParams(values));
+}
+
+describe("parseCaseQueueState", () => {
+  it("returns the defaults for an empty query", () => {
+    expect(parseState("")).toEqual({
+      tab: "open",
+      scope: "mine",
+      range: { from: "now-24h", to: "now" },
+      field: "lastEventAt",
+      sort: "lastEventAt:desc",
+      refresh: "off",
+    });
+  });
+
+  it("round-trips every parameter", () => {
+    const search =
+      "?tab=closed&scope=all&from=now-7d&to=2026-11-07T10:00:00Z&field=closedAt&sort=createdAt:asc&refresh=30s";
+
+    const state = parseState(search);
+
+    expect(state).toEqual({
+      tab: "closed",
+      scope: "all",
+      range: { from: "now-7d", to: "2026-11-07T10:00:00Z" },
+      field: "closedAt",
+      sort: "createdAt:asc",
+      refresh: "30s",
+    });
+    expect(caseQueueSearch(state)).toBe(search);
+  });
+
+  it.each([
+    ["tab", "bogus"],
+    ["scope", "bogus"],
+    ["from", "yesterday"],
+    ["to", "now+1h"],
+    ["field", "bogus"],
+    ["sort", "bogus"],
+    ["refresh", "bogus"],
+  ])("falls back alone when %s is invalid", (name, value) => {
+    expect(parseState({ [name]: value })).toEqual(defaultCaseQueueState);
+  });
+
+  it("keeps valid values around an invalid one", () => {
+    expect(
+      parseState({
+        tab: "bogus",
+        scope: "unassigned",
+        from: "now-7d",
+        to: "now",
+        field: "closedAt",
+      }),
+    ).toEqual({
+      ...defaultCaseQueueState,
+      scope: "unassigned",
+      range: { from: "now-7d", to: "now" },
+      field: "closedAt",
+    });
+  });
+
+  it("falls back for an ISO value with an offset", () => {
+    expect(
+      parseState({ from: "2026-11-07T10:00:00+02:00" }).range.from,
+    ).toBe("now-24h");
+  });
+
+  it("falls back for empty values", () => {
+    expect(parseState({ tab: "", scope: "" })).toEqual(
+      defaultCaseQueueState,
+    );
+  });
+});
+
+describe("caseQueueSearch", () => {
+  it("is empty for the default view", () => {
+    expect(caseQueueSearch(defaultCaseQueueState)).toBe("");
+    expect(caseQueueSearch(parseState(""))).toBe("");
+  });
+
+  it("omits defaults that are present in the query", () => {
+    expect(
+      caseQueueSearch(
+        parseState(
+          "?tab=open&scope=mine&from=now-24h&to=now&field=lastEventAt&sort=lastEventAt:desc&refresh=off",
+        ),
+      ),
+    ).toBe("");
+  });
+
+  it("keeps only non-default values in a fixed order", () => {
+    expect(
+      caseQueueSearch({
+        tab: "closed",
+        scope: "all",
+        range: { from: "now-7d", to: "2026-11-07T10:00:00Z" },
+        field: "closedAt",
+        sort: "createdAt:asc",
+        refresh: "30s",
+      }),
+    ).toBe(
+      "?tab=closed&scope=all&from=now-7d&to=2026-11-07T10:00:00Z&field=closedAt&sort=createdAt:asc&refresh=30s",
+    );
+  });
+
+  it("serialises a single non-default value", () => {
+    expect(
+      caseQueueSearch({ ...defaultCaseQueueState, tab: "closed" }),
+    ).toBe("?tab=closed");
+    expect(
+      caseQueueSearch({ ...defaultCaseQueueState, sort: "createdAt:asc" }),
+    ).toBe("?sort=createdAt:asc");
+  });
+});
+
+describe("API parameter builders", () => {
+  it("maps each tab to its status and omits it for all", () => {
+    expect(listParams(parseState({ tab: "open" })).get("status")).toBe(
+      "OPEN",
+    );
+    expect(
+      listParams(parseState({ tab: "in_progress" })).get("status"),
+    ).toBe("IN_PROGRESS");
+    expect(listParams(parseState({ tab: "closed" })).get("status")).toBe(
+      "CLOSED",
+    );
+    expect(listParams(parseState({ tab: "all" })).has("status")).toBe(
+      false,
+    );
+  });
+
+  it("sends no range to the open list", () => {
+    const params = listParams(parseState({}));
+
+    expect(Object.fromEntries(params)).toEqual({
+      status: "OPEN",
+      scope: "mine",
+      sort: "lastEventAt:desc",
+      limit: "50",
+    });
+    expect(params.has("from")).toBe(false);
+    expect(params.has("to")).toBe(false);
+    expect(params.has("timeField")).toBe(false);
+    expect(params.has("cursor")).toBe(false);
+  });
+
+  it("sends no range to the in progress list", () => {
+    const params = listParams(parseState({ tab: "in_progress" }));
+
+    expect(params.get("status")).toBe("IN_PROGRESS");
+    expect(params.has("from")).toBe(false);
+  });
+
+  it("sends the range to the closed list", () => {
+    const params = listParams(
+      parseState({
+        tab: "closed",
+        from: "now-7d",
+        to: "now",
+        field: "closedAt",
+        sort: "createdAt:asc",
+      }),
+    );
+
+    expect(Object.fromEntries(params)).toEqual({
+      status: "CLOSED",
+      scope: "mine",
+      sort: "createdAt:asc",
+      limit: "50",
+      from: "now-7d",
+      to: "now",
+      timeField: "closedAt",
+    });
+  });
+
+  it("sends the range to the all list without a status", () => {
+    const params = listParams(parseState({ tab: "all" }));
+
+    expect(params.has("status")).toBe(false);
+    expect(params.get("from")).toBe("now-24h");
+    expect(params.get("to")).toBe("now");
+    expect(params.get("timeField")).toBe("lastEventAt");
+  });
+
+  it("sends the status and range to counts, never scope, sort, or limit", () => {
+    const params = countsParams(
+      parseState({ tab: "closed", from: "now-7d", field: "closedAt" }),
+    );
+
+    expect(Object.fromEntries(params)).toEqual({
+      status: "CLOSED",
+      from: "now-7d",
+      to: "now",
+      timeField: "closedAt",
+    });
+  });
+
+  it("sends the range to counts on the open tab too", () => {
+    const params = countsParams(parseState({}));
+
+    expect(Object.fromEntries(params)).toEqual({
+      status: "OPEN",
+      from: "now-24h",
+      to: "now",
+      timeField: "lastEventAt",
+    });
+    expect(params.has("scope")).toBe(false);
+  });
+
+  it("sends no status to counts on the all tab", () => {
+    expect(countsParams(parseState({ tab: "all" })).has("status")).toBe(
+      false,
+    );
+  });
+
+  it("sends the full filter set to the histogram", () => {
+    expect(
+      Object.fromEntries(
+        histogramParams(
+          parseState({
+            tab: "closed",
+            scope: "all",
+            from: "now-7d",
+            to: "now",
+            field: "closedAt",
+          }),
+        ),
+      ),
+    ).toEqual({
+      status: "CLOSED",
+      scope: "all",
+      from: "now-7d",
+      to: "now",
+      timeField: "closedAt",
+      interval: "auto",
+      splitBy: "severity",
+    });
+  });
+
+  it("sends the range and scope, but no status, to the all histogram", () => {
+    const params = histogramParams(parseState({ tab: "all" }));
+
+    expect(params.has("status")).toBe(false);
+    expect(params.get("scope")).toBe("mine");
+    expect(params.get("from")).toBe("now-24h");
+    expect(params.get("to")).toBe("now");
+    expect(params.get("timeField")).toBe("lastEventAt");
+    expect(params.get("interval")).toBe("auto");
+    expect(params.get("splitBy")).toBe("severity");
+  });
+});
+
+describe("refreshMilliseconds", () => {
+  it("maps every interval to milliseconds", () => {
+    expect(refreshMilliseconds).toEqual({
+      "10s": 10_000,
+      "30s": 30_000,
+      "1m": 60_000,
+      "5m": 300_000,
+    });
+  });
+});
