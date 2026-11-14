@@ -180,6 +180,203 @@ func TestListUsersRoles(t *testing.T) {
 	}
 }
 
+// setUserStatus moves a user to another status without the service, so tests
+// of reads and single writes do not depend on the other transitions.
+func setUserStatus(t *testing.T, db *gorm.DB, userID, status string) {
+	t.Helper()
+	if err := db.Exec("UPDATE users SET status = ? WHERE id = ?", status, userID).Error; err != nil {
+		t.Fatalf("set user %q status to %s: %v", userID, status, err)
+	}
+}
+
+func TestDirectoryByPrefix(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+	alice := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "alice@example.com", DisplayName: "Alice Analyst", Roles: []string{"ANALYST"},
+	})
+	alan := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "alan@example.com", DisplayName: "Alan Admin", Roles: []string{"ANALYST"},
+	})
+	alfred := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "alfred@example.com", DisplayName: "Alfred Gone", Roles: []string{"ANALYST"},
+	})
+	setUserStatus(t, test.database, alice.User.ID, StatusActive)
+	setUserStatus(t, test.database, alan.User.ID, StatusActive)
+	setUserStatus(t, test.database, alfred.User.ID, StatusDisabled)
+
+	entries, err := test.service.Directory(context.Background(), DirectoryFilter{Query: "al"})
+	if err != nil {
+		t.Fatalf("Directory: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Directory returned %d entries, want only Alan and Alice", len(entries))
+	}
+	if entries[0].ID != alan.User.ID || entries[0].DisplayName != "Alan Admin" || entries[0].Status != StatusActive {
+		t.Errorf("Directory entry 0 = %+v, want Alan Admin ACTIVE", entries[0])
+	}
+	if entries[1].ID != alice.User.ID || entries[1].DisplayName != "Alice Analyst" || entries[1].Status != StatusActive {
+		t.Errorf("Directory entry 1 = %+v, want Alice Analyst ACTIVE", entries[1])
+	}
+
+	for _, query := range []string{"AL", " al "} {
+		matches, err := test.service.Directory(context.Background(), DirectoryFilter{Query: query})
+		if err != nil {
+			t.Fatalf("Directory(%q): %v", query, err)
+		}
+		if len(matches) != 2 || matches[0].ID != alan.User.ID || matches[1].ID != alice.User.ID {
+			t.Errorf("Directory(%q) = %+v, want the same two active users", query, matches)
+		}
+	}
+
+	none, err := test.service.Directory(context.Background(), DirectoryFilter{Query: "zz"})
+	if err != nil {
+		t.Fatalf("Directory with no matches: %v", err)
+	}
+	if none == nil || len(none) != 0 {
+		t.Errorf("Directory with no matches = %v, want an empty list", none)
+	}
+}
+
+func TestDirectoryWildcardsAreLiteral(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+	percent := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "percent@example.com", DisplayName: "%Percent",
+	})
+	under := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "under@example.com", DisplayName: "_Under",
+	})
+	createUser(t, test.service, actor, CreateUserRequest{
+		Email: "alice@example.com", DisplayName: "Alice",
+	})
+	setUserStatus(t, test.database, percent.User.ID, StatusActive)
+	setUserStatus(t, test.database, under.User.ID, StatusActive)
+
+	matches, err := test.service.Directory(context.Background(), DirectoryFilter{Query: "%"})
+	if err != nil {
+		t.Fatalf("Directory(%%): %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != percent.User.ID {
+		t.Errorf("Directory(%%) = %+v, want only %%Percent", matches)
+	}
+
+	matches, err = test.service.Directory(context.Background(), DirectoryFilter{Query: "_"})
+	if err != nil {
+		t.Fatalf("Directory(_): %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != under.User.ID {
+		t.Errorf("Directory(_) = %+v, want only _Under", matches)
+	}
+}
+
+func TestDirectoryLimit(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+	for index := 0; index < 25; index++ {
+		created := createUser(t, test.service, actor, CreateUserRequest{
+			Email:       fmt.Sprintf("user%02d@example.com", index),
+			DisplayName: fmt.Sprintf("User %02d", index),
+		})
+		setUserStatus(t, test.database, created.User.ID, StatusActive)
+	}
+
+	entries, err := test.service.Directory(context.Background(), DirectoryFilter{Query: "User"})
+	if err != nil {
+		t.Fatalf("Directory: %v", err)
+	}
+	if len(entries) != 20 {
+		t.Fatalf("Directory returned %d entries, want the default 20", len(entries))
+	}
+	if entries[0].DisplayName != "User 00" || entries[19].DisplayName != "User 19" {
+		t.Errorf("Directory entries = %q..%q, want User 00..User 19", entries[0].DisplayName, entries[19].DisplayName)
+	}
+
+	limited, err := test.service.Directory(context.Background(), DirectoryFilter{Query: "User", Limit: 3})
+	if err != nil {
+		t.Fatalf("Directory with limit 3: %v", err)
+	}
+	if len(limited) != 3 {
+		t.Fatalf("Directory with limit 3 returned %d entries, want 3", len(limited))
+	}
+	if limited[0].DisplayName != "User 00" || limited[2].DisplayName != "User 02" {
+		t.Errorf("Directory entries = %q..%q, want User 00..User 02", limited[0].DisplayName, limited[2].DisplayName)
+	}
+}
+
+func TestDirectoryByIDsIncludesAnyStatus(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+	invited := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "bob@example.com", DisplayName: "Bob Invited",
+	})
+	disabled := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "ada@example.com", DisplayName: "Ada Disabled",
+	})
+	setUserStatus(t, test.database, disabled.User.ID, StatusDisabled)
+	createUser(t, test.service, actor, CreateUserRequest{
+		Email: "carol@example.com", DisplayName: "Carol Not Asked",
+	})
+
+	entries, err := test.service.Directory(context.Background(), DirectoryFilter{
+		IDs:   []string{invited.User.ID, disabled.User.ID},
+		Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("Directory by ids: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Directory by ids returned %d entries, want both statuses and no limit", len(entries))
+	}
+	if entries[0].ID != disabled.User.ID || entries[0].Status != StatusDisabled {
+		t.Errorf("Directory entry 0 = %+v, want Ada DISABLED", entries[0])
+	}
+	if entries[1].ID != invited.User.ID || entries[1].Status != StatusInvited {
+		t.Errorf("Directory entry 1 = %+v, want Bob INVITED", entries[1])
+	}
+}
+
+func TestDirectoryRejectsInvalidFilters(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	tooManyIDs := make([]string, 51)
+	for index := range tooManyIDs {
+		tooManyIDs[index] = fmt.Sprintf("0190f8dc-6f43-7f0a-8b2f-%012x", index)
+	}
+
+	tests := []struct {
+		name      string
+		filter    DirectoryFilter
+		parameter string
+	}{
+		{"query and ids", DirectoryFilter{Query: "al", IDs: []string{admin.ID}}, "q and ids"},
+		{"invalid id", DirectoryFilter{IDs: []string{"not-a-uuid"}}, "ids"},
+		{"too many ids", DirectoryFilter{IDs: tooManyIDs}, "ids"},
+		{"101-rune query", DirectoryFilter{Query: strings.Repeat("a", 101)}, "q"},
+		{"blank query", DirectoryFilter{Query: "   "}, "q"},
+		{"limit 51", DirectoryFilter{Limit: 51}, "limit"},
+		{"negative limit", DirectoryFilter{Limit: -1}, "limit"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			entries, err := test.service.Directory(context.Background(), testCase.filter)
+			if !errors.Is(err, ErrInvalidDirectoryFilter) {
+				t.Fatalf("Directory error = %v, want ErrInvalidDirectoryFilter", err)
+			}
+			if !strings.Contains(err.Error(), testCase.parameter) {
+				t.Errorf("Directory error = %q, want it to name %q", err.Error(), testCase.parameter)
+			}
+			if entries != nil {
+				t.Errorf("Directory returned %v with an invalid filter, want nil", entries)
+			}
+		})
+	}
+}
+
 func TestListRoles(t *testing.T) {
 	test := newTestService(t)
 	roles, err := test.service.ListRoles(context.Background())
@@ -751,6 +948,9 @@ func TestDisableUser(t *testing.T) {
 	if changes["revokedCount"] != float64(3) {
 		t.Errorf("disable audit revokedCount = %v, want 3", changes["revokedCount"])
 	}
+	if onCall, ok := changes["onCall"]; ok {
+		t.Errorf("disable audit of an off-call user has onCall = %v, want no key", onCall)
+	}
 }
 
 func TestDisableUserRejectsOwnAccount(t *testing.T) {
@@ -919,6 +1119,46 @@ func TestEnableUserRejectsOtherStates(t *testing.T) {
 	}
 }
 
+func TestDisableUserTakesUserOffCall(t *testing.T) {
+	test := newTestService(t)
+	actorUser := test.createAdmin(t, testEmail)
+	analyst := createUser(t, test.service, testActorFor(actorUser), CreateUserRequest{
+		Email: "analyst@example.com", DisplayName: "Analyst", Roles: []string{"ANALYST"},
+	})
+	setUserStatus(t, test.database, analyst.User.ID, StatusActive)
+	if err := test.database.Exec(
+		"UPDATE users SET on_call = true WHERE id = ?", analyst.User.ID,
+	).Error; err != nil {
+		t.Fatalf("put the analyst on call: %v", err)
+	}
+
+	disabled, err := test.service.DisableUser(
+		context.Background(), testActorFor(actorUser), testClient(), analyst.User.ID, analyst.User.Version,
+	)
+	if err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+	if disabled.User.OnCall {
+		t.Error("disabled user is still on call")
+	}
+	if stored := storedUser(t, test.database, analyst.User.ID); stored.OnCall {
+		t.Error("stored disabled user is still on call")
+	}
+
+	events := eventsNamed(t, test.database, analyst.User.ID, "simple_siem.user.disabled")
+	if len(events) != 1 {
+		t.Fatalf("DisableUser wrote %d audit events, want 1", len(events))
+	}
+	changes := storedChanges(t, events[0])
+	onCall, ok := changes["onCall"].(map[string]any)
+	if !ok {
+		t.Fatalf("disable audit onCall = %v, want a before/after object", changes["onCall"])
+	}
+	if onCall["before"] != true || onCall["after"] != false {
+		t.Errorf("disable audit onCall = %v, want before true and after false", onCall)
+	}
+}
+
 func TestEnableUserRejectsStaleVersion(t *testing.T) {
 	test := newTestService(t)
 	actorUser := test.createAdmin(t, testEmail)
@@ -938,6 +1178,173 @@ func TestEnableUserRejectsStaleVersion(t *testing.T) {
 	}
 	if stored := storedUser(t, test.database, target.ID); stored.Status != "DISABLED" {
 		t.Errorf("target status after a stale enable = %q, want DISABLED", stored.Status)
+	}
+}
+
+func TestSetOnCall(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+	analyst := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "analyst@example.com", DisplayName: "Analyst", Roles: []string{"ANALYST"},
+	})
+	setUserStatus(t, test.database, analyst.User.ID, StatusActive)
+
+	updated, err := test.service.SetOnCall(
+		context.Background(), actor, testClient(), analyst.User.ID, true,
+	)
+	if err != nil {
+		t.Fatalf("SetOnCall: %v", err)
+	}
+	if !updated.User.OnCall {
+		t.Error("SetOnCall returned a user who is not on call")
+	}
+	if updated.User.Version != analyst.User.Version+1 {
+		t.Errorf("version after SetOnCall = %d, want %d", updated.User.Version, analyst.User.Version+1)
+	}
+	if len(updated.Roles) != 1 || updated.Roles[0] != "ANALYST" {
+		t.Errorf("roles after SetOnCall = %v, want [ANALYST]", updated.Roles)
+	}
+
+	events := eventsNamed(t, test.database, analyst.User.ID, "simple_siem.user.on_call_changed")
+	if len(events) != 1 {
+		t.Fatalf("SetOnCall wrote %d audit events, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventCategory != "USER" || event.EventOutcome != "SUCCESS" || event.ActorType != "USER" {
+		t.Errorf("on-call audit = %s/%s/%s, want USER/SUCCESS/USER", event.EventCategory, event.EventOutcome, event.ActorType)
+	}
+	if event.ActorID == nil || *event.ActorID != admin.ID {
+		t.Errorf("on-call audit actor = %v, want %q", event.ActorID, admin.ID)
+	}
+	if event.ActorSessionID == nil || *event.ActorSessionID != testActorSessionID {
+		t.Errorf("on-call audit actor session = %v, want %q", event.ActorSessionID, testActorSessionID)
+	}
+	if event.RequestID != "request-1" || event.SourceIP == nil || *event.SourceIP != "192.0.2.7" {
+		t.Errorf("on-call audit request/source = %q/%v, want request-1/192.0.2.7", event.RequestID, event.SourceIP)
+	}
+	if event.TargetType != "USER" || event.TargetID != analyst.User.ID || event.Action != "set_on_call" {
+		t.Errorf("on-call audit target = %q/%q action %q, want USER/%q set_on_call", event.TargetType, event.TargetID, event.Action, analyst.User.ID)
+	}
+	changes := storedChanges(t, event)
+	before, ok := changes["before"].(map[string]any)
+	if !ok || before["onCall"] != false {
+		t.Errorf("on-call audit before = %v, want onCall false", changes["before"])
+	}
+	after, ok := changes["after"].(map[string]any)
+	if !ok || after["onCall"] != true {
+		t.Errorf("on-call audit after = %v, want onCall true", changes["after"])
+	}
+
+	unchanged, err := test.service.SetOnCall(
+		context.Background(), actor, testClient(), analyst.User.ID, true,
+	)
+	if err != nil {
+		t.Fatalf("SetOnCall with the same value: %v", err)
+	}
+	if !unchanged.User.OnCall || unchanged.User.Version != updated.User.Version {
+		t.Errorf("SetOnCall with the same value = %+v, want on call at version %d", unchanged.User, updated.User.Version)
+	}
+	if got := len(eventsNamed(t, test.database, analyst.User.ID, "simple_siem.user.on_call_changed")); got != 1 {
+		t.Errorf("SetOnCall with the same value wrote another audit event (%d total, want 1)", got)
+	}
+
+	off, err := test.service.SetOnCall(
+		context.Background(), actor, testClient(), analyst.User.ID, false,
+	)
+	if err != nil {
+		t.Fatalf("SetOnCall(false): %v", err)
+	}
+	if off.User.OnCall || off.User.Version != updated.User.Version+1 {
+		t.Errorf("SetOnCall(false) = %+v, want off call at version %d", off.User, updated.User.Version+1)
+	}
+	events = eventsNamed(t, test.database, analyst.User.ID, "simple_siem.user.on_call_changed")
+	if len(events) != 2 {
+		t.Fatalf("SetOnCall(false) left %d audit events, want 2", len(events))
+	}
+	changes = storedChanges(t, events[1])
+	before = changes["before"].(map[string]any)
+	after = changes["after"].(map[string]any)
+	if before["onCall"] != true || after["onCall"] != false {
+		t.Errorf("Second on-call audit = %v, want before true and after false", changes)
+	}
+}
+
+func TestSetOnCallRejectsInvitedUser(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	invited := createUser(t, test.service, testActorFor(admin), CreateUserRequest{
+		Email: "invited@example.com", DisplayName: "Invited", Roles: []string{"ANALYST"},
+	})
+	eventsBefore := countRows(t, test.database, "audit_events")
+
+	_, err := test.service.SetOnCall(
+		context.Background(), testActorFor(admin), testClient(), invited.User.ID, true,
+	)
+	assertStateConflict(t, err, "only an active user can be on call")
+	stored := storedUser(t, test.database, invited.User.ID)
+	if stored.OnCall || stored.Version != invited.User.Version {
+		t.Errorf("invited user after the refused on-call = %+v, want off call at version %d", stored, invited.User.Version)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after the refusal, want %d", got, eventsBefore)
+	}
+}
+
+func TestSetOnCallOffForInvitedUserIsNoOp(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	invited := createUser(t, test.service, testActorFor(admin), CreateUserRequest{
+		Email: "invited@example.com", DisplayName: "Invited", Roles: []string{"ANALYST"},
+	})
+
+	unchanged, err := test.service.SetOnCall(
+		context.Background(), testActorFor(admin), testClient(), invited.User.ID, false,
+	)
+	if err != nil {
+		t.Fatalf("SetOnCall(false) for an invited user: %v", err)
+	}
+	if unchanged.User.OnCall || unchanged.User.Version != invited.User.Version {
+		t.Errorf("invited user after SetOnCall(false) = %+v, want off call at version %d", unchanged.User, invited.User.Version)
+	}
+	if events := eventsNamed(t, test.database, invited.User.ID, "simple_siem.user.on_call_changed"); len(events) != 0 {
+		t.Errorf("SetOnCall(false) for an invited user wrote %d audit events, want 0", len(events))
+	}
+}
+
+func TestSetOnCallRejectsAdminTargetForNonAdmin(t *testing.T) {
+	test := newTestService(t)
+	if err := test.database.Exec(
+		"INSERT INTO roles (name, description) VALUES ('ON_CALL_MANAGER', 'On-call manager')",
+	).Error; err != nil {
+		t.Fatalf("insert ON_CALL_MANAGER role: %v", err)
+	}
+	if err := test.database.Exec(
+		"INSERT INTO role_permissions (role_name, permission) VALUES ('ON_CALL_MANAGER', 'user:on_call')",
+	).Error; err != nil {
+		t.Fatalf("grant ON_CALL_MANAGER user:on_call: %v", err)
+	}
+	admin := test.createAdmin(t, testEmail)
+	manager := createUser(t, test.service, testActorFor(admin), CreateUserRequest{
+		Email: "manager@example.com", DisplayName: "Manager", Roles: []string{"ON_CALL_MANAGER"},
+	})
+	setUserStatus(t, test.database, manager.User.ID, StatusActive)
+	actor := testActorFor(manager.User)
+	actor.Roles = []string{"ON_CALL_MANAGER"}
+	eventsBefore := countRows(t, test.database, "audit_events")
+
+	_, err := test.service.SetOnCall(
+		context.Background(), actor, testClient(), admin.ID, true,
+	)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("SetOnCall on an admin by a non-admin = %v, want ErrForbidden", err)
+	}
+	stored := storedUser(t, test.database, admin.ID)
+	if stored.OnCall || stored.Version != admin.Version {
+		t.Errorf("admin after the refused on-call = %+v, want off call at version %d", stored, admin.Version)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after the refusal, want %d", got, eventsBefore)
 	}
 }
 

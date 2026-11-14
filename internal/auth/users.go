@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"gorm.io/gorm"
@@ -17,10 +18,14 @@ import (
 )
 
 const (
-	defaultUserPageSize = 50
-	lastAdminLockName   = "simple-siem:last-admin"
-	resetTokenLifetime  = 24 * time.Hour
-	resetTokenLength    = 32
+	defaultUserPageSize    = 50
+	defaultDirectoryLimit  = 20
+	maxDirectoryLimit      = 50
+	maxDirectoryIDs        = 50
+	maxDirectoryQueryRunes = 100
+	lastAdminLockName      = "simple-siem:last-admin"
+	resetTokenLifetime     = 24 * time.Hour
+	resetTokenLength       = 32
 )
 
 // hashPasswordFunction is the hasher UseResetToken calls. It is a test seam:
@@ -108,6 +113,59 @@ func (service *Service) ListUsers(ctx context.Context, filter UserFilter) ([]Use
 		users = append(users, UserWithRoles{User: row.User, Roles: splitNames(row.RoleNames)})
 	}
 	return users, total, nil
+}
+
+func (service *Service) Directory(ctx context.Context, filter DirectoryFilter) ([]DirectoryEntry, error) {
+	query := strings.TrimSpace(filter.Query)
+	if query != "" && len(filter.IDs) > 0 {
+		return nil, fmt.Errorf("%w: q and ids cannot be combined", ErrInvalidDirectoryFilter)
+	}
+	if filter.Query != "" && (query == "" || utf8.RuneCountInString(query) > maxDirectoryQueryRunes) {
+		return nil, fmt.Errorf("%w: q must be 1 to 100 characters", ErrInvalidDirectoryFilter)
+	}
+	if len(filter.IDs) > maxDirectoryIDs {
+		return nil, fmt.Errorf("%w: ids accepts at most 50 ids", ErrInvalidDirectoryFilter)
+	}
+	for _, id := range filter.IDs {
+		if !audit.ValidID(id) {
+			return nil, fmt.Errorf("%w: ids contains an invalid user id", ErrInvalidDirectoryFilter)
+		}
+	}
+	limit := filter.Limit
+	if limit == 0 {
+		limit = defaultDirectoryLimit
+	}
+	if limit < 1 || limit > maxDirectoryLimit {
+		return nil, fmt.Errorf("%w: limit must be 1 to 50", ErrInvalidDirectoryFilter)
+	}
+
+	database := service.database.WithContext(ctx)
+	entries := make([]DirectoryEntry, 0)
+	var err error
+	if len(filter.IDs) > 0 {
+		err = database.Raw(`
+			SELECT id::text AS id, display_name, status
+			FROM users
+			WHERE id IN ?
+			ORDER BY lower(display_name), id`, filter.IDs).Scan(&entries).Error
+	} else {
+		condition := " WHERE status = ?"
+		arguments := []any{StatusActive}
+		if query != "" {
+			condition += ` AND lower(display_name) LIKE ? ESCAPE '\'`
+			arguments = append(arguments, escapeLike(strings.ToLower(query))+"%")
+		}
+		arguments = append(arguments, limit)
+		err = database.Raw(`
+			SELECT id::text AS id, display_name, status
+			FROM users`+condition+`
+			ORDER BY lower(display_name), id
+			LIMIT ?`, arguments...).Scan(&entries).Error
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list directory: %w", err)
+	}
+	return entries, nil
 }
 
 func (service *Service) GetUser(ctx context.Context, userID string) (UserWithRoles, error) {
@@ -309,6 +367,7 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 			Where("id = ? AND version = ?", user.ID, version).
 			Updates(map[string]any{
 				"status":     StatusDisabled,
+				"on_call":    false,
 				"updated_at": gorm.Expr("now()"),
 				"version":    gorm.Expr("version + 1"),
 			})
@@ -334,6 +393,9 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 		event.TargetID = user.ID
 		event.Action = "disable"
 		event.Changes = map[string]any{"revokedCount": sessions.RowsAffected}
+		if user.OnCall {
+			event.Changes["onCall"] = map[string]any{"before": true, "after": false}
+		}
 		if err := audit.Record(tx, event); err != nil {
 			return err
 		}
@@ -401,6 +463,56 @@ func (service *Service) EnableUser(ctx context.Context, actor Actor, client Clie
 		return UserWithRoles{}, err
 	}
 	return enabled, nil
+}
+
+func (service *Service) SetOnCall(ctx context.Context, actor Actor, client ClientInfo, userID string, onCall bool) (UserWithRoles, error) {
+	var updated UserWithRoles
+	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		user, err := lockTargetForMutation(tx, actor, userID)
+		if err != nil {
+			return err
+		}
+		if onCall && user.Status != StatusActive {
+			return fmt.Errorf("%w: only an active user can be on call", ErrStateConflict)
+		}
+		if user.OnCall == onCall {
+			updated, err = loadUserWithRoles(tx, user.ID)
+			return err
+		}
+
+		result := tx.Model(&User{}).
+			Where("id = ?", user.ID).
+			Updates(map[string]any{
+				"on_call":    onCall,
+				"updated_at": gorm.Expr("now()"),
+				"version":    gorm.Expr("version + 1"),
+			})
+		if result.Error != nil {
+			return fmt.Errorf("set on call: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return userMutationConflict(tx, user.ID)
+		}
+
+		event := userAuditEvent(actor, client, "USER")
+		event.EventName = "simple_siem.user.on_call_changed"
+		event.TargetID = user.ID
+		event.Action = "set_on_call"
+		event.Changes = map[string]any{
+			"before": map[string]any{"onCall": user.OnCall},
+			"after":  map[string]any{"onCall": onCall},
+		}
+		if err := audit.Record(tx, event); err != nil {
+			return err
+		}
+
+		updated, err = loadUserWithRoles(tx, user.ID)
+		return err
+	})
+	if err != nil {
+		return UserWithRoles{}, err
+	}
+	return updated, nil
 }
 
 func (service *Service) AssignRole(ctx context.Context, actor Actor, client ClientInfo, userID, role string) (UserWithRoles, error) {
@@ -725,6 +837,14 @@ func splitNames(names string) []string {
 		return []string{}
 	}
 	return strings.Split(names, ",")
+}
+
+// escapeLike makes the three LIKE metacharacters match literally under
+// ESCAPE '\'.
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	return strings.ReplaceAll(value, `_`, `\_`)
 }
 
 // uniqueRoles collapses duplicates and sorts the result, so stored and audited

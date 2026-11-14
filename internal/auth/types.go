@@ -155,6 +155,22 @@ type UserFilter struct {
 	PageSize int
 }
 
+// DirectoryFilter narrows the user directory. Query and IDs are mutually
+// exclusive; a zero Limit means the default page size.
+type DirectoryFilter struct {
+	Query string
+	IDs   []string
+	Limit int
+}
+
+// DirectoryEntry is one user in the directory, with only the fields a picker
+// needs.
+type DirectoryEntry struct {
+	ID          string `gorm:"column:id"`
+	DisplayName string `gorm:"column:display_name"`
+	Status      string `gorm:"column:status"`
+}
+
 // UserWithRoles is one user and the names of the roles assigned to them.
 type UserWithRoles struct {
 	User  User
@@ -181,13 +197,14 @@ type UpdateUserRequest struct {
 }
 
 var (
-	ErrInvalidCredentials = errors.New("invalid email or password")
-	ErrUnauthenticated    = errors.New("authentication required")
-	ErrPasswordLength     = errors.New("password must be 12 to 128 characters")
-	ErrInvalidEmail       = errors.New("email must be a plain ASCII address of 3 to 254 characters")
-	ErrInvalidDisplayName = errors.New("display name must be 1 to 200 characters without control characters")
-	ErrUserExists         = errors.New("a user with this email already exists")
-	ErrUserNotFound       = errors.New("no user with this email")
+	ErrInvalidCredentials     = errors.New("invalid email or password")
+	ErrUnauthenticated        = errors.New("authentication required")
+	ErrPasswordLength         = errors.New("password must be 12 to 128 characters")
+	ErrInvalidEmail           = errors.New("email must be a plain ASCII address of 3 to 254 characters")
+	ErrInvalidDisplayName     = errors.New("display name must be 1 to 200 characters without control characters")
+	ErrUserExists             = errors.New("a user with this email already exists")
+	ErrUserNotFound           = errors.New("no user with this email")
+	ErrInvalidDirectoryFilter = errors.New("invalid directory filter")
 )
 
 var (
