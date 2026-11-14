@@ -95,6 +95,22 @@ test("refuses a cross-site login and sets no session cookie", async ({
   expect(response.headers()["set-cookie"]).toBeUndefined();
 });
 
+test("an analyst cannot list users", async ({ page }) => {
+  await signIn(page, "analyst");
+  await page.goto("/cases");
+
+  const response = await page.request.get("/api/v1/users", {
+    headers: {
+      "X-Requested-With": "simple-siem",
+      Origin: "http://127.0.0.1:8090",
+    },
+  });
+
+  expect(response.status()).toBe(403);
+  const body = (await response.json()) as { error: { code: string } };
+  expect(body.error.code).toBe("FORBIDDEN");
+});
+
 test("shows the generic message after a wrong password", async ({ page }) => {
   await page.goto("/login");
 

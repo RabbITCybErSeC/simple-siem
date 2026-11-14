@@ -17,7 +17,13 @@ export default defineConfig({
   },
   projects: [
     {
+      name: "setup",
+      testMatch: "**/support/users.setup.ts",
+    },
+    {
       name: "chromium",
+      testMatch: "**/*.e2e.ts",
+      dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"] },
     },
   ],
