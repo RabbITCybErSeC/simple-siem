@@ -129,10 +129,12 @@ test: postgres toolchain web/node_modules
 
 lint: network toolchain web/node_modules
 	$(RUN) $(TOOLCHAIN_IMAGE) golangci-lint run
+	@if grep -rEln "from ['\"]cn['\"]" web/src; then echo "lint: the files above import the npm package cn; use @/lib/utils (see docs/frontend.md)" >&2; exit 1; fi; if grep -n '"cn":' web/package.json; then echo "lint: web/package.json declares the npm package cn; remove it" >&2; exit 1; fi
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck'
 
 build: network toolchain web/node_modules
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm build'
+	$(RUN) --env SIMPLE_SIEM_CHECK_WEB_BUILD=1 $(TOOLCHAIN_IMAGE) go test -count=1 -run TestBuiltFrontendIsSelfContained ./web
 	$(RUN) $(TOOLCHAIN_IMAGE) sh -c 'mkdir -p bin && go build -trimpath -ldflags "$(LDFLAGS)" -o bin/simple-siem ./cmd/simple-siem'
 
 e2e: postgres build e2e-image
