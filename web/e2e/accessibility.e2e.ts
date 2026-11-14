@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expectAccessible } from "./support/accessibility.ts";
-import { expect, test } from "./support/test.ts";
+import { expect, signIn, test } from "./support/test.ts";
 
 async function settleTheme(
   page: Page,
@@ -46,9 +46,8 @@ test("the login screen is accessible empty and with an error", async ({
 
 test("the shell, palette, and shortcuts dialog are accessible", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
   await expectAccessibleInBothThemes(page);

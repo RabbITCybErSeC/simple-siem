@@ -1,4 +1,4 @@
-import { expect, test } from "./support/test.ts";
+import { expect, signIn, test } from "./support/test.ts";
 
 test("an expected API 401 does not fail the test", async ({ page }) => {
   await page.goto("/");
@@ -8,7 +8,20 @@ test("an expected API 401 does not fail the test", async ({ page }) => {
     });
     return response.status;
   });
-  expect(status, "fixture response").toBe(401);
+  expect(status, "server response").toBe(401);
+});
+
+test("the server refuses a cookie request without the required header", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  await signIn(page);
+  const response = await page.request.post("/api/v1/auth/logout", {
+    headers: { Origin: "http://127.0.0.1:8090" },
+  });
+  expect(response.status()).toBe(403);
+  const body = (await response.json()) as { error: { code: string } };
+  expect(body.error.code).toBe("FORBIDDEN");
 });
 
 // These two tests prove the fixture guard fails a test; the failure is the point.

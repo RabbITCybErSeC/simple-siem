@@ -22,7 +22,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "../bin/simple-siem serve",
+    command:
+      "sh -c '../bin/simple-siem migrate && ../bin/simple-siem admin create --email analyst@example.test --display-name \"Alice Analyst\" --password-file e2e/support/test-password.txt && exec ../bin/simple-siem serve'",
     url: "http://127.0.0.1:8090/readyz",
     reuseExistingServer: false,
     stdout: "ignore",

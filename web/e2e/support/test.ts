@@ -1,6 +1,22 @@
 import { expect, test as base } from "@playwright/test";
-import type { ConsoleMessage } from "@playwright/test";
+import type { ConsoleMessage, Page } from "@playwright/test";
 import { FixtureApi } from "./api.ts";
+
+const TEST_EMAIL = "analyst@example.test";
+const TEST_PASSWORD = "correct horse battery staple";
+
+// Signs in through the real API. The request context shares the page's cookie
+// jar, so the browser keeps the HttpOnly session cookie.
+export async function signIn(page: Page): Promise<void> {
+  const response = await page.request.post("/api/v1/auth/login", {
+    headers: {
+      "X-Requested-With": "simple-siem",
+      Origin: "http://127.0.0.1:8090",
+    },
+    data: { email: TEST_EMAIL, password: TEST_PASSWORD },
+  });
+  expect(response.status(), `sign in as ${TEST_EMAIL}`).toBe(200);
+}
 
 export const BASE_CONTENT_SECURITY_POLICY =
   "default-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";

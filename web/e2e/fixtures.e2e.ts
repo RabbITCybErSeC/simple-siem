@@ -7,7 +7,7 @@ import type {
   CaseSummary,
 } from "../src/features/cases/types.ts";
 import { FIXTURE_NOW } from "./support/cases.ts";
-import { expect, test } from "./support/test.ts";
+import { expect, signIn, test } from "./support/test.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -74,7 +74,7 @@ test("lists my open cases newest first and pages with the cursor", async ({
   page,
   api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/");
 
   const first = await fetchJson<CaseListResponse>(
@@ -130,8 +130,8 @@ test("lists my open cases newest first and pages with the cursor", async ({
   );
 });
 
-test("filters closed cases on closedAt", async ({ page, api }) => {
-  api.signIn();
+test("filters closed cases on closedAt", async ({ page }) => {
+  await signIn(page);
   await page.goto("/");
 
   const closed = await listAll(page, {
@@ -151,11 +151,8 @@ test("filters closed cases on closedAt", async ({ page, api }) => {
   }
 });
 
-test("lists only unassigned cases in the unassigned scope", async ({
-  page,
-  api,
-}) => {
-  api.signIn();
+test("lists only unassigned cases in the unassigned scope", async ({ page }) => {
+  await signIn(page);
   await page.goto("/");
 
   const unassigned = await listAll(page, { scope: "unassigned" });
@@ -165,8 +162,8 @@ test("lists only unassigned cases in the unassigned scope", async ({
   }
 });
 
-test("counts match the list totals", async ({ page, api }) => {
-  api.signIn();
+test("counts match the list totals", async ({ page }) => {
+  await signIn(page);
   await page.goto("/");
 
   const range = { from: "now-7d", to: "now", timeField: "closedAt" };
@@ -205,11 +202,8 @@ test("counts match the list totals", async ({ page, api }) => {
   });
 });
 
-test("histogram buckets add up to the matching list", async ({
-  page,
-  api,
-}) => {
-  api.signIn();
+test("histogram buckets add up to the matching list", async ({ page }) => {
+  await signIn(page);
   await page.goto("/");
 
   const response = await fetchJson<CaseHistogram>(
@@ -232,8 +226,8 @@ test("histogram buckets add up to the matching list", async ({
   expect(total).toBe(matching.length);
 });
 
-test("rejects a malformed cursor and an invalid time", async ({ page, api }) => {
-  api.signIn();
+test("rejects a malformed cursor and an invalid time", async ({ page }) => {
+  await signIn(page);
   await page.goto("/");
 
   const cursorQuery = new URLSearchParams({ cursor: "not-base64!" });
@@ -253,7 +247,7 @@ test("rejects a malformed cursor and an invalid time", async ({ page, api }) => 
 });
 
 test("adds and updates a case in the fixture", async ({ page, api }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/");
 
   const added = api.addCase({ title: "New arrival" });
@@ -288,7 +282,7 @@ test("adds and updates a case in the fixture", async ({ page, api }) => {
 });
 
 test("moves the fixture clock", async ({ page, api }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/");
 
   const later = new Date(FIXTURE_NOW.getTime() + 60 * 60 * 1000);
@@ -304,11 +298,8 @@ test("moves the fixture clock", async ({ page, api }) => {
 });
 
 // This proves the fixture guard fails a test on a contract violation; the failure is the point.
-test.fail("an unknown case query parameter fails the test", async ({
-  page,
-  api,
-}) => {
-  api.signIn();
+test.fail("an unknown case query parameter fails the test", async ({ page }) => {
+  await signIn(page);
   await page.goto("/");
   await fetchJson(page, "/api/v1/cases?foo=1");
 });

@@ -1,4 +1,4 @@
-import { expect, test } from "./support/test.ts";
+import { expect, signIn, test } from "./support/test.ts";
 
 interface BrowserStorage {
   length: number;
@@ -14,6 +14,7 @@ interface BrowserGlobals {
 
 const EMAIL = "analyst@example.test";
 const PASSWORD = "correct horse battery staple";
+const LIMITED_EMAIL = "limited@example.test";
 
 test("a signed-out visitor is sent to login with the next path", async ({
   page,
@@ -66,6 +67,32 @@ test("signs in with the keyboard and keeps tokens out of storage", async ({
   expect(stored).not.toContain(PASSWORD);
   expect(stored).not.toContain(EMAIL);
   expect(stored).not.toMatch(/sessiontoken|bearer/i);
+
+  const sessionCookie = (await page.context().cookies()).find(
+    (cookie) => cookie.name === "simple_siem_session",
+  );
+  expect(sessionCookie?.httpOnly, "session cookie").toBe(true);
+  expect(storage.cookie).not.toContain("simple_siem_session");
+});
+
+test("refuses a cross-site login and sets no session cookie", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  const response = await page.request.post("/api/v1/auth/login", {
+    headers: {
+      "X-Requested-With": "simple-siem",
+      Origin: "https://evil.example",
+    },
+    data: { email: EMAIL, password: PASSWORD },
+  });
+
+  expect(response.status()).toBe(403);
+  const body = (await response.json()) as {
+    error: { code: string };
+  };
+  expect(body.error.code).toBe("FORBIDDEN");
+  expect(response.headers()["set-cookie"]).toBeUndefined();
 });
 
 test("shows the generic message after a wrong password", async ({ page }) => {
@@ -82,12 +109,23 @@ test("shows the generic message after a wrong password", async ({ page }) => {
   await expect(page.getByLabel("Email")).toHaveValue(EMAIL);
 });
 
-test("shows the rate-limit message", async ({ page, api }) => {
-  api.rateLimitLogin();
+test("shows the rate-limit message on the eleventh failed login", async ({
+  page,
+}) => {
   await page.goto("/login");
+  await page.getByLabel("Email").fill(LIMITED_EMAIL);
 
-  await page.getByLabel("Email").fill(EMAIL);
-  await page.getByLabel("Password").fill(PASSWORD);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await page.getByLabel("Password").fill("not the password");
+    const response = page.waitForResponse((candidate) =>
+      candidate.url().endsWith("/api/v1/auth/login"),
+    );
+    await page.getByRole("button", { name: "Sign in" }).click();
+    expect((await response).status(), `attempt ${attempt + 1}`).toBe(401);
+    await expect(page.getByLabel("Password")).toHaveValue("");
+  }
+
+  await page.getByLabel("Password").fill("not the password");
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page.getByRole("alert")).toHaveText(
@@ -97,13 +135,12 @@ test("shows the rate-limit message", async ({ page, api }) => {
 
 test("returns to login when the session expires and back to the next path", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
-  api.expireSession();
+  await page.context().clearCookies();
   await page.keyboard.press("Control+k");
   await page.keyboard.type("cases");
   await page.keyboard.press("Enter");
@@ -121,8 +158,8 @@ test("returns to login when the session expires and back to the next path", asyn
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 });
 
-test("signs out from the command palette", async ({ page, api }) => {
-  api.signIn();
+test("signs out from the command palette", async ({ page }) => {
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -136,9 +173,18 @@ test("signs out from the command palette", async ({ page, api }) => {
   ).toBeVisible();
 });
 
-test("keeps the shell and alerts when sign out fails", async ({ page, api }) => {
-  api.signIn();
-  api.failLogout();
+test("keeps the shell and alerts when sign out fails", async ({ page }) => {
+  await signIn(page);
+  // The real server cannot be made to fail logout, so this test stubs it.
+  await page.route("**/api/v1/auth/logout", (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "INTERNAL_ERROR", message: "Internal server error" },
+      }),
+    }),
+  );
   await page.goto("/cases");
   const heading = page.getByRole("heading", { name: "Cases" });
   await expect(heading).toBeVisible();
