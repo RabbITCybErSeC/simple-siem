@@ -280,7 +280,7 @@ func redactMap(values map[string]any, path string, paths *[]string) map[string]a
 	redacted := make(map[string]any, len(values))
 	for key, value := range values {
 		keyPath := path + "." + key
-		if isSensitiveKey(key) {
+		if IsSensitiveKey(key) {
 			redacted[key] = redactedValue
 			*paths = append(*paths, keyPath)
 			continue
@@ -308,7 +308,9 @@ func redactValue(value any, path string, paths *[]string) any {
 	}
 }
 
-func isSensitiveKey(key string) bool {
+// IsSensitiveKey reports whether a map key names a secret; audit redacts such
+// values and the outbox rejects them.
+func IsSensitiveKey(key string) bool {
 	lowered := strings.ToLower(key)
 	identifier := strings.ReplaceAll(strings.ReplaceAll(lowered, "_", ""), "-", "")
 	if strings.HasSuffix(identifier, "ref") || strings.HasSuffix(identifier, "refid") {
