@@ -466,6 +466,38 @@ func TestGenerateAuthLogsSortedWithOpaqueIDs(t *testing.T) {
 	}
 }
 
+func TestGenerateAuthLogsIDsDoNotDependOnEnd(t *testing.T) {
+	firstOptions := authLogOptions()
+	secondOptions := authLogOptions()
+	secondOptions.End = firstOptions.End.Add(8 * time.Hour)
+
+	first := documentIDs(devdata.GenerateAuthLogs(firstOptions))
+	second := documentIDs(devdata.GenerateAuthLogs(secondOptions))
+	if !slices.Equal(first, second) {
+		t.Error("ids changed when only --end changed")
+	}
+
+	otherSeedOptions := authLogOptions()
+	otherSeedOptions.Seed = 2
+	if slices.Equal(first, documentIDs(devdata.GenerateAuthLogs(otherSeedOptions))) {
+		t.Error("ids did not change with the seed")
+	}
+
+	otherPrefixOptions := authLogOptions()
+	otherPrefixOptions.IndexPrefix = "other"
+	if slices.Equal(first, documentIDs(devdata.GenerateAuthLogs(otherPrefixOptions))) {
+		t.Error("ids did not change with the prefix")
+	}
+}
+
+func documentIDs(documents []devdata.Document) []string {
+	ids := make([]string, len(documents))
+	for index, document := range documents {
+		ids[index] = document.ID
+	}
+	return ids
+}
+
 func scenarioDocuments(documents []devdata.Document, scenario string) []devdata.Document {
 	var matching []devdata.Document
 	for _, document := range documents {

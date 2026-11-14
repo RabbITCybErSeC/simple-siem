@@ -124,16 +124,20 @@ postgres: network
 # Apple container does not initialize named-volume ownership, and the image
 # runs as uid 1000, so give a new data volume to that user before first start.
 es: network
-	@if $(CONTAINER) start $(ELASTICSEARCH_CONTAINER) >/dev/null 2>&1; then \
-		exit 0; \
-	fi; \
-	if $(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) /bin/sh -c true >/dev/null 2>&1; then \
-		exit 0; \
-	fi; \
-	$(CONTAINER) run --rm --user root --entrypoint /bin/sh -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data $(ELASTICSEARCH_IMAGE) -c 'chown -R 1000:0 /usr/share/elasticsearch/data'; \
-	$(CONTAINER) run -d --name $(ELASTICSEARCH_CONTAINER) --network $(NETWORK) --memory 2g $(ELASTICSEARCH_PUBLISH) -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data --env discovery.type=single-node --env xpack.security.enabled=true --env xpack.security.http.ssl.enabled=false --env xpack.security.transport.ssl.enabled=false --env node.store.allow_mmap=false --env ES_JAVA_OPTS="-Xms1g -Xmx1g" --env ELASTIC_PASSWORD=$(ELASTICSEARCH_PASSWORD) $(ELASTICSEARCH_IMAGE)
+	@set -e; \
+	if ! $(CONTAINER) start $(ELASTICSEARCH_CONTAINER) >/dev/null 2>&1; then \
+		if ! $(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) /bin/sh -c true >/dev/null 2>&1; then \
+			$(CONTAINER) run --rm --user root --entrypoint /bin/sh -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data $(ELASTICSEARCH_IMAGE) -c 'chown -R 1000:0 /usr/share/elasticsearch/data'; \
+			$(CONTAINER) run -d --name $(ELASTICSEARCH_CONTAINER) --network $(NETWORK) --memory 2g $(ELASTICSEARCH_PUBLISH) -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data --env discovery.type=single-node --env xpack.security.enabled=true --env xpack.security.http.ssl.enabled=false --env xpack.security.transport.ssl.enabled=false --env node.store.allow_mmap=false --env ES_JAVA_OPTS="-Xms1g -Xmx1g" --env ELASTIC_PASSWORD=$(ELASTICSEARCH_PASSWORD) $(ELASTICSEARCH_IMAGE); \
+		fi; \
+	fi
 	@for attempt in $$(seq 1 120); do \
-		if $(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) curl -fsS -u "elastic:$(ELASTICSEARCH_PASSWORD)" 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s' >/dev/null 2>&1; then \
+		code=$$($(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) curl -s -o /dev/null -w '%{http_code}' -u "elastic:$(ELASTICSEARCH_PASSWORD)" 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s' 2>/dev/null); \
+		if [ "$$code" = "401" ]; then \
+			echo "Elasticsearch rejected the password; the volume $(ELASTICSEARCH_VOLUME) was created with a different ELASTICSEARCH_PASSWORD" >&2; \
+			exit 1; \
+		fi; \
+		if [ "$$code" = "200" ]; then \
 			exit 0; \
 		fi; \
 		if [ $$attempt -lt 120 ]; then sleep 1; fi; \

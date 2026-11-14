@@ -63,84 +63,74 @@ func GenerateAuthLogs(options Options) []Document {
 	return generator.documents
 }
 
-type generator struct {
-	options         Options
-	end             time.Time
-	scenarioRand    *rand.Rand
-	backgroundRand  *rand.Rand
-	sequence        int
-	windowsRecordID int
-	documents       []Document
-}
-
-func (g *generator) addScenarios() {
-	g.addLinuxSequence("linux-burst-then-success", "alice", "web01",
-		"203.0.113.7", "203.0.113.7", g.end.Add(-40*time.Minute), 15*time.Second, 12, 30*time.Second)
-	g.addWindowsSequence("windows-burst-then-success", "bob", "dc01",
-		"203.0.113.20", g.end.Add(-25*time.Minute), 10*time.Second, 12, 20*time.Second)
-	g.addLinuxSequence("near-miss", "carol", "web02",
-		"198.51.100.14", "198.51.100.14", g.end.Add(-60*time.Minute), 20*time.Second, 5, 30*time.Second)
-	g.addLinuxSequence("failures-only", "dave", "bastion01",
-		"203.0.113.99", "", g.end.Add(-90*time.Minute), 5*time.Second, 15, 0)
-	g.addLinuxSequence("other-origin-success", "erin", "web01",
-		"203.0.113.50", "198.51.100.77", g.end.Add(-75*time.Minute), 10*time.Second, 12, 30*time.Second)
-	g.addLinuxEvent(g.scenarioRand, "malformed-no-user", g.end.Add(-10*time.Minute), "", "web02", "203.0.113.8", false)
+func (generator *generator) addScenarios() {
+	generator.addLinuxSequence("linux-burst-then-success", "alice", "web01",
+		"203.0.113.7", "203.0.113.7", generator.end.Add(-40*time.Minute), 15*time.Second, 12, 30*time.Second)
+	generator.addWindowsSequence("windows-burst-then-success", "bob", "dc01",
+		"203.0.113.20", generator.end.Add(-25*time.Minute), 10*time.Second, 12, 20*time.Second)
+	generator.addLinuxSequence("near-miss", "carol", "web02",
+		"198.51.100.14", "198.51.100.14", generator.end.Add(-60*time.Minute), 20*time.Second, 5, 30*time.Second)
+	generator.addLinuxSequence("failures-only", "dave", "bastion01",
+		"203.0.113.99", "", generator.end.Add(-90*time.Minute), 5*time.Second, 15, 0)
+	generator.addLinuxSequence("other-origin-success", "erin", "web01",
+		"203.0.113.50", "198.51.100.77", generator.end.Add(-75*time.Minute), 10*time.Second, 12, 30*time.Second)
+	generator.addLinuxEvent(generator.scenarioRand, "malformed-no-user", generator.end.Add(-10*time.Minute), "", "web02", "203.0.113.8", false)
 }
 
 // addLinuxSequence writes one burst of sshd failures and, when successOrigin
 // is set, a success after the burst.
-func (g *generator) addLinuxSequence(scenario, user, host, failureOrigin, successOrigin string, start time.Time, spacing time.Duration, failures int, successDelay time.Duration) {
+func (generator *generator) addLinuxSequence(scenario, user, host, failureOrigin, successOrigin string, start time.Time, spacing time.Duration, failures int, successDelay time.Duration) {
 	last := start
 	for index := 0; index < failures; index++ {
 		last = start.Add(time.Duration(index) * spacing)
-		g.addLinuxEvent(g.scenarioRand, scenario, last, user, host, failureOrigin, false)
+		generator.addLinuxEvent(generator.scenarioRand, scenario, last, user, host, failureOrigin, false)
 	}
 	if successOrigin != "" {
-		g.addLinuxEvent(g.scenarioRand, scenario, last.Add(successDelay), user, host, successOrigin, true)
+		generator.addLinuxEvent(generator.scenarioRand, scenario, last.Add(successDelay), user, host, successOrigin, true)
 	}
 }
 
-func (g *generator) addWindowsSequence(scenario, user, host, origin string, start time.Time, spacing time.Duration, failures int, successDelay time.Duration) {
+func (generator *generator) addWindowsSequence(scenario, user, host, origin string, start time.Time, spacing time.Duration, failures int, successDelay time.Duration) {
 	last := start
 	for index := 0; index < failures; index++ {
 		last = start.Add(time.Duration(index) * spacing)
-		g.addWindowsEvent(g.scenarioRand, scenario, last, user, host, origin, "3", false)
+		generator.addWindowsEvent(generator.scenarioRand, scenario, last, user, host, origin, "3", false)
 	}
-	g.addWindowsEvent(g.scenarioRand, scenario, last.Add(successDelay), user, host, origin, "3", true)
+	generator.addWindowsEvent(generator.scenarioRand, scenario, last.Add(successDelay), user, host, origin, "3", true)
 }
 
-func (g *generator) addBackground() {
-	if g.options.Background <= 0 {
+func (generator *generator) addBackground() {
+	if generator.options.Background <= 0 {
 		return
 	}
 
 	window := int64(datasetWindow / time.Millisecond)
-	start := g.end.Add(-datasetWindow)
+	start := generator.end.Add(-datasetWindow)
 	failuresByKey := map[string]int{}
 
-	for index := 0; index < g.options.Background; index++ {
-		at := start.Add(time.Duration(g.backgroundRand.Int64N(window)) * time.Millisecond)
-		user := backgroundUsers[g.backgroundRand.IntN(len(backgroundUsers))]
-		origin := fmt.Sprintf("10.20.0.%d", 2+g.backgroundRand.IntN(253))
+	for index := 0; index < generator.options.Background; index++ {
+		at := start.Add(time.Duration(generator.backgroundRand.Int64N(window)) * time.Millisecond)
+		user := backgroundUsers[generator.backgroundRand.IntN(len(backgroundUsers))]
+		origin := fmt.Sprintf("10.20.0.%d", 2+generator.backgroundRand.IntN(253))
 
-		if g.backgroundRand.IntN(2) == 0 {
-			host := linuxHosts[g.backgroundRand.IntN(len(linuxHosts))]
-			success := g.backgroundSuccess(failuresByKey, user, host, origin)
-			g.addLinuxEvent(g.backgroundRand, scenarioBackground, at, user, host, origin, success)
+		if generator.backgroundRand.IntN(2) == 0 {
+			host := linuxHosts[generator.backgroundRand.IntN(len(linuxHosts))]
+			success := generator.backgroundSuccess(failuresByKey, user, host, origin)
+			generator.addLinuxEvent(generator.backgroundRand, scenarioBackground, at, user, host, origin, success)
 			continue
 		}
 
-		host := windowsHosts[g.backgroundRand.IntN(len(windowsHosts))]
-		success := g.backgroundSuccess(failuresByKey, user, host, origin)
-		logonType := windowsLogonTypes[g.backgroundRand.IntN(len(windowsLogonTypes))]
-		g.addWindowsEvent(g.backgroundRand, scenarioBackground, at, user, host, origin, logonType, success)
+		host := windowsHosts[generator.backgroundRand.IntN(len(windowsHosts))]
+		success := generator.backgroundSuccess(failuresByKey, user, host, origin)
+		logonType := windowsLogonTypes[generator.backgroundRand.IntN(len(windowsLogonTypes))]
+		generator.addWindowsEvent(generator.backgroundRand, scenarioBackground, at, user, host, origin, logonType, success)
 	}
 }
 
 // backgroundSuccess keeps every (user, host, origin) at two failures or fewer
 // by turning a third failure into a success.
-func (g *generator) backgroundSuccess(failuresByKey map[string]int, user, host, origin string) bool {
-	if g.backgroundRand.IntN(100) < 85 {
+func (generator *generator) backgroundSuccess(failuresByKey map[string]int, user, host, origin string) bool {
+	if generator.backgroundRand.IntN(100) < 85 {
 		return true
 	}
 	key := user + "|" + host + "|" + origin
@@ -151,7 +141,7 @@ func (g *generator) backgroundSuccess(failuresByKey map[string]int, user, host, 
 	return false
 }
 
-func (g *generator) addLinuxEvent(random *rand.Rand, scenario string, at time.Time, user, host, origin string, success bool) {
+func (generator *generator) addLinuxEvent(random *rand.Rand, scenario string, at time.Time, user, host, origin string, success bool) {
 	port := 40000 + random.IntN(25000)
 	pid := 1000 + random.IntN(64000)
 	ingested := at.Add(time.Duration(1+random.IntN(ingestJitterSeconds)) * time.Second)
@@ -203,10 +193,10 @@ func (g *generator) addLinuxEvent(random *rand.Rand, scenario string, at time.Ti
 		source["related"] = map[string]any{"ip": []string{origin}}
 	}
 
-	g.append(scenario, at, linuxSource, source)
+	generator.append(scenario, at, linuxSource, source)
 }
 
-func (g *generator) addWindowsEvent(random *rand.Rand, scenario string, at time.Time, user, host, origin, logonType string, success bool) {
+func (generator *generator) addWindowsEvent(random *rand.Rand, scenario string, at time.Time, user, host, origin, logonType string, success bool) {
 	port := 40000 + random.IntN(25000)
 	ingested := at.Add(time.Duration(1+random.IntN(ingestJitterSeconds)) * time.Second)
 
@@ -270,36 +260,36 @@ func (g *generator) addWindowsEvent(random *rand.Rand, scenario string, at time.
 		"message": message,
 	}
 
-	g.append(scenario, at, windowsSource, source)
+	generator.append(scenario, at, windowsSource, source)
 }
 
-func (g *generator) append(scenario string, at time.Time, sourceType string, source map[string]any) {
+func (generator *generator) append(scenario string, at time.Time, sourceType string, source map[string]any) {
 	if sourceType == windowsSource {
 		// Number in generation order, so scenario record ids do not shift when
 		// a different seed interleaves background events.
-		source["winlog"].(map[string]any)["record_id"] = windowsRecordIDBase + g.windowsRecordID
-		g.windowsRecordID++
+		source["winlog"].(map[string]any)["record_id"] = windowsRecordIDBase + generator.windowsRecordID
+		generator.windowsRecordID++
 	}
 
-	g.sequence++
-	g.documents = append(g.documents, Document{
-		Index:    g.indexName(sourceType, at),
-		ID:       documentID(g.options.Seed, g.end, g.sequence),
+	generator.sequence++
+	generator.documents = append(generator.documents, Document{
+		Index:    generator.indexName(sourceType, at),
+		ID:       documentID(generator.options.IndexPrefix, generator.options.Seed, generator.sequence),
 		Scenario: scenario,
 		Source:   source,
 	})
 }
 
-func (g *generator) indexName(sourceType string, at time.Time) string {
-	return fmt.Sprintf("%s-%s-%s", g.options.IndexPrefix, sourceType, at.UTC().Format(indexDayLayout))
+func (generator *generator) indexName(sourceType string, at time.Time) string {
+	return fmt.Sprintf("%s-%s-%s", generator.options.IndexPrefix, sourceType, at.UTC().Format(indexDayLayout))
 }
 
 func formatTimestamp(at time.Time) string {
 	return at.UTC().Format(timestampLayout)
 }
 
-func documentID(seed int64, end time.Time, sequence int) string {
-	input := fmt.Sprintf("%d|%s|%d", seed, end.UTC().Format(time.RFC3339Nano), sequence)
+func documentID(prefix string, seed int64, sequence int) string {
+	input := fmt.Sprintf("%s|%d|%d", prefix, seed, sequence)
 	sum := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(sum[:])[:20]
 }

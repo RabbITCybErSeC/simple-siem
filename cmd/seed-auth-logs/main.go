@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"slices"
 	"syscall"
 	"time"
@@ -25,6 +26,8 @@ const (
 Writes a reproducible auth-log dataset to a development Elasticsearch.
 Credentials come from ELASTICSEARCH_USERNAME and ELASTICSEARCH_PASSWORD.`
 )
+
+var indexPrefixPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
@@ -55,6 +58,10 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	}
 	if *urlFlag == "" {
 		_, _ = fmt.Fprintln(stderr, "missing Elasticsearch URL: set --url or ELASTICSEARCH_URL")
+		return 2
+	}
+	if !indexPrefixPattern.MatchString(*indexPrefix) {
+		_, _ = fmt.Fprintf(stderr, "invalid --index-prefix %q: must match %s\n", *indexPrefix, indexPrefixPattern)
 		return 2
 	}
 

@@ -13,31 +13,16 @@ import (
 )
 
 const (
-	bulkChunkSize = 1000
-	responseLimit = 1 << 20
+	bulkChunkSize  = 1000
+	bulkFilterPath = "errors,items.*.status,items.*.error.type,items.*.error.reason"
+	responseLimit  = 1 << 20
 )
 
-// Writer writes documents to Elasticsearch.
-type Writer struct {
-	URL      string
-	Username string
-	Password string
-	Client   *http.Client
-}
-
-// bulkItem is one outcome in a bulk response.
-type bulkItem struct {
-	Status int `json:"status"`
-	Error  *struct {
-		Type   string `json:"type"`
-		Reason string `json:"reason"`
-	} `json:"error"`
-}
-
 // PutIndexTemplate installs the typed index template for a prefix.
-func (w *Writer) PutIndexTemplate(ctx context.Context, prefix string) error {
+func (writer *Writer) PutIndexTemplate(ctx context.Context, prefix string) error {
 	template := map[string]any{
 		"index_patterns": []string{prefix + "-*"},
+		"priority":       500,
 		"template": map[string]any{
 			"mappings": map[string]any{
 				"dynamic_templates": []any{
@@ -77,28 +62,28 @@ func (w *Writer) PutIndexTemplate(ctx context.Context, prefix string) error {
 	}
 
 	path := "/_index_template/" + url.PathEscape(prefix+"-dev-auth")
-	if _, err := w.send(ctx, http.MethodPut, path, body, "application/json"); err != nil {
+	if _, err := writer.send(ctx, http.MethodPut, path, body, "application/json"); err != nil {
 		return fmt.Errorf("put index template: %w", err)
 	}
 	return nil
 }
 
 // Write indexes documents in bulk and returns the count per index.
-func (w *Writer) Write(ctx context.Context, documents []Document) (map[string]int, error) {
+func (writer *Writer) Write(ctx context.Context, documents []Document) (map[string]int, error) {
 	counts := map[string]int{}
 	for start := 0; start < len(documents); start += bulkChunkSize {
 		end := start + bulkChunkSize
 		if end > len(documents) {
 			end = len(documents)
 		}
-		if err := w.writeChunk(ctx, documents[start:end], end == len(documents), counts); err != nil {
+		if err := writer.writeChunk(ctx, documents[start:end], end == len(documents), counts); err != nil {
 			return nil, err
 		}
 	}
 	return counts, nil
 }
 
-func (w *Writer) writeChunk(ctx context.Context, documents []Document, refresh bool, counts map[string]int) error {
+func (writer *Writer) writeChunk(ctx context.Context, documents []Document, refresh bool, counts map[string]int) error {
 	var body bytes.Buffer
 	for _, document := range documents {
 		action, err := json.Marshal(map[string]any{
@@ -117,11 +102,13 @@ func (w *Writer) writeChunk(ctx context.Context, documents []Document, refresh b
 		body.WriteByte('\n')
 	}
 
-	path := "/_bulk"
+	query := url.Values{}
+	query.Set("filter_path", bulkFilterPath)
 	if refresh {
-		path += "?refresh=wait_for"
+		query.Set("refresh", "wait_for")
 	}
-	response, err := w.send(ctx, http.MethodPost, path, body.Bytes(), "application/x-ndjson")
+	path := "/_bulk?" + query.Encode()
+	response, err := writer.send(ctx, http.MethodPost, path, body.Bytes(), "application/x-ndjson")
 	if err != nil {
 		return fmt.Errorf("bulk request: %w", err)
 	}
@@ -135,10 +122,7 @@ func (w *Writer) writeChunk(ctx context.Context, documents []Document, refresh b
 }
 
 func checkBulkResponse(response []byte) error {
-	var result struct {
-		Errors bool                  `json:"errors"`
-		Items  []map[string]bulkItem `json:"items"`
-	}
+	var result bulkResponse
 	if err := json.Unmarshal(response, &result); err != nil {
 		return fmt.Errorf("decode bulk response: %w", err)
 	}
@@ -158,20 +142,20 @@ func checkBulkResponse(response []byte) error {
 
 // send performs one request with basic auth and never puts the credentials in
 // an error.
-func (w *Writer) send(ctx context.Context, method, path string, body []byte, contentType string) ([]byte, error) {
-	if w.URL == "" {
+func (writer *Writer) send(ctx context.Context, method, path string, body []byte, contentType string) ([]byte, error) {
+	if writer.URL == "" {
 		return nil, errors.New("elasticsearch URL is empty")
 	}
-	request, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(w.URL, "/")+path, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(writer.URL, "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
-	request.SetBasicAuth(w.Username, w.Password)
+	request.SetBasicAuth(writer.Username, writer.Password)
 
-	client := w.Client
+	client := writer.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -181,9 +165,12 @@ func (w *Writer) send(ctx context.Context, method, path string, body []byte, con
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, responseLimit))
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if len(responseBody) > responseLimit {
+		return nil, fmt.Errorf("response larger than %d bytes", responseLimit)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		reason := strings.TrimSpace(string(responseBody))

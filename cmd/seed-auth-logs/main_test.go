@@ -133,6 +133,41 @@ func TestRunRejectsBadArguments(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidIndexPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+	}{
+		{"uppercase", "Auth"},
+		{"empty", ""},
+		{"leading dash", "-x"},
+		{"underscore", "_x"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			seedServer := newSeedServer(t, false)
+
+			var stdout, stderr bytes.Buffer
+			status := run(context.Background(), []string{
+				"--url", seedServer.server.URL,
+				"--end", "2026-11-13T12:00:00Z",
+				"--index-prefix", test.prefix,
+			}, testGetenv, &stdout, &stderr)
+			if status != 2 {
+				t.Errorf("run = %d, want 2", status)
+			}
+			if !strings.Contains(stderr.String(), "--index-prefix") {
+				t.Errorf("stderr %q does not name --index-prefix", stderr.String())
+			}
+			if seedServer.templateRequests != 0 || seedServer.bulkDocuments != 0 {
+				t.Errorf("requests = template %d, bulk %d documents, want none",
+					seedServer.templateRequests, seedServer.bulkDocuments)
+			}
+		})
+	}
+}
+
 func TestRunReturnsOneOnBulkError(t *testing.T) {
 	seedServer := newSeedServer(t, true)
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -14,10 +15,15 @@ import (
 	"github.com/RabbITCybErSeC/simple-siem/internal/devdata"
 )
 
-const testPassword = "test-password"
+const (
+	testPassword      = "test-password"
+	testFilterPath    = "errors,items.*.status,items.*.error.type,items.*.error.reason"
+	testResponseLimit = 1 << 20
+)
 
 type indexTemplatePayload struct {
 	IndexPatterns []string `json:"index_patterns"`
+	Priority      int      `json:"priority"`
 	Template      struct {
 		Mappings struct {
 			DynamicTemplates []map[string]struct {
@@ -76,6 +82,9 @@ func TestPutIndexTemplate(t *testing.T) {
 	if !slices.Equal(template.IndexPatterns, []string{"auth-*"}) {
 		t.Errorf("index_patterns = %v, want [auth-*]", template.IndexPatterns)
 	}
+	if template.Priority != 500 {
+		t.Errorf("priority = %d, want 500", template.Priority)
+	}
 
 	properties := template.Template.Mappings.Properties
 	wantTypes := map[string]string{
@@ -116,17 +125,16 @@ func TestPutIndexTemplate(t *testing.T) {
 }
 
 func TestWriteSendsBulkNDJSON(t *testing.T) {
-	var (
-		method, path, query, contentType string
-		body                             string
-		username, password               string
-		authenticated                    bool
-	)
+	var method, path, contentType string
+	var query url.Values
+	var body string
+	var username, password string
+	var authenticated bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rawBody, _ := io.ReadAll(r.Body)
 		method = r.Method
 		path = r.URL.Path
-		query = r.URL.RawQuery
+		query = r.URL.Query()
 		contentType = r.Header.Get("Content-Type")
 		body = string(rawBody)
 		username, password, authenticated = r.BasicAuth()
@@ -159,8 +167,11 @@ func TestWriteSendsBulkNDJSON(t *testing.T) {
 	if path != "/_bulk" {
 		t.Errorf("path = %q, want /_bulk", path)
 	}
-	if query != "refresh=wait_for" {
-		t.Errorf("query = %q, want refresh=wait_for on the last chunk", query)
+	if query.Get("filter_path") != testFilterPath {
+		t.Errorf("filter_path = %q, want %q", query.Get("filter_path"), testFilterPath)
+	}
+	if query.Get("refresh") != "wait_for" {
+		t.Errorf("refresh = %q, want wait_for on the last chunk", query.Get("refresh"))
 	}
 	if contentType != "application/x-ndjson" {
 		t.Errorf("Content-Type = %q, want application/x-ndjson", contentType)
@@ -205,12 +216,12 @@ func TestWriteSendsBulkNDJSON(t *testing.T) {
 
 func TestWriteChunksAtThousand(t *testing.T) {
 	var lineCounts []int
-	var queries []string
+	var queries []url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rawBody, _ := io.ReadAll(r.Body)
 		body := string(rawBody)
 		lineCounts = append(lineCounts, bulkActionCount(body)*2)
-		queries = append(queries, r.URL.RawQuery)
+		queries = append(queries, r.URL.Query())
 		writeBulkResponse(w, bulkActionCount(body))
 	}))
 	defer server.Close()
@@ -234,11 +245,47 @@ func TestWriteChunksAtThousand(t *testing.T) {
 	if !slices.Equal(lineCounts, []int{2000, 1000}) {
 		t.Errorf("bulk body lines = %v, want [2000 1000]", lineCounts)
 	}
-	if !slices.Equal(queries, []string{"", "refresh=wait_for"}) {
-		t.Errorf("queries = %v, want refresh only on the last chunk", queries)
+	if len(queries) != 2 {
+		t.Fatalf("requests = %d, want 2", len(queries))
+	}
+	for index, query := range queries {
+		if got := query.Get("filter_path"); got != testFilterPath {
+			t.Errorf("request %d filter_path = %q, want %q", index, got, testFilterPath)
+		}
+	}
+	if got := queries[0].Get("refresh"); got != "" {
+		t.Errorf("first refresh = %q, want none", got)
+	}
+	if got := queries[1].Get("refresh"); got != "wait_for" {
+		t.Errorf("last refresh = %q, want wait_for", got)
 	}
 	if counts["auth-linux-2026.11.13"] != 1500 {
 		t.Errorf("count = %d, want 1500", counts["auth-linux-2026.11.13"])
+	}
+}
+
+func TestWriteRejectsOversizedResponse(t *testing.T) {
+	var query url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"errors":false,"items":[]}`)
+		_, _ = fmt.Fprint(w, strings.Repeat(" ", testResponseLimit))
+	}))
+	defer server.Close()
+
+	_, err := newTestWriter(server).Write(context.Background(), []devdata.Document{{
+		Index: "auth-linux-2026.11.13", ID: "id-one", Source: map[string]any{},
+	}})
+	if err == nil {
+		t.Fatal("Write() error = nil, want the read-limit error")
+	}
+	want := fmt.Sprintf("response larger than %d bytes", testResponseLimit)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not contain %q", err, want)
+	}
+	if got := query.Get("filter_path"); got != testFilterPath {
+		t.Errorf("filter_path = %q, want %q", got, testFilterPath)
 	}
 }
 
