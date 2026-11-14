@@ -21,7 +21,7 @@ import {
   writeThemePreference,
 } from "../../theme/theme";
 import type { ThemePreference } from "../../theme/theme";
-import { buildShellCommands } from "./commands";
+import { buildShellCommands, useCaseCommands } from "./commands";
 import { useTimeZone, writeTimeZone } from "./timeZone";
 import type { ShellCommand } from "./types";
 
@@ -34,6 +34,7 @@ export interface CommandPaletteProps {
 
 const GROUP_ORDER: ShellCommand["group"][] = [
   "Navigation",
+  "Case",
   "Theme",
   "Time zone",
   "Account",
@@ -49,6 +50,7 @@ export function CommandPalette({
   const navigate = useNavigate();
   const location = useLocation();
   const timeZone = useTimeZone();
+  const caseCommands = useCaseCommands();
   const [theme, setTheme] = useState(readThemePreference);
   const opener = useRef<HTMLElement | null>(null);
   const commandMovesFocus = useRef(false);
@@ -64,6 +66,7 @@ export function CommandPalette({
     search: location.search,
     theme,
     timeZone,
+    caseCommands,
     onNavigate: (path) => {
       void navigate(path);
     },

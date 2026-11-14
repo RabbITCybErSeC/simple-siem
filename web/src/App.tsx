@@ -15,6 +15,7 @@ export const routes: RouteObject[] = [
         children: [
           { index: true, element: <Navigate to="/cases" replace /> },
           { path: "cases", element: <CasesPage /> },
+          { path: "cases/:caseNumber", element: <CasesPage /> },
           { path: "*", element: <NotFoundPage /> },
         ],
       },

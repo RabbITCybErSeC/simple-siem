@@ -5,7 +5,13 @@ export type TimeZoneSetting = "local" | "utc";
 export interface ShellCommand {
   id: string;
   label: string;
-  group: "Navigation" | "Theme" | "Time zone" | "Account" | "Help";
+  group:
+    | "Navigation"
+    | "Case"
+    | "Theme"
+    | "Time zone"
+    | "Account"
+    | "Help";
   keywords: string[];
   movesFocus: boolean;
   run: () => void;

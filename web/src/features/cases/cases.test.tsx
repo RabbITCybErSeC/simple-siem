@@ -13,6 +13,7 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routes } from "../../App";
 import { writeTimeZone } from "../shell/timeZone";
+import type { CaseDetail } from "./detail/types";
 import type {
   CaseCounts,
   CaseHistogram,
@@ -104,6 +105,20 @@ const CLOSED_CASE = caseSummary({
   closedAt: "2026-11-09T10:00:00Z",
 });
 
+function caseDetail(summary: CaseSummary): CaseDetail {
+  return {
+    ...summary,
+    lastActivityAt: summary.lastEventAt,
+    closedBy: null,
+    conclusion: null,
+    alertCount: 2,
+    linkedCases: [],
+    mergedInto: null,
+  };
+}
+
+const ALL_CASES = [...OPEN_CASES, CLOSED_CASE];
+
 class ResizeObserverStub {
   observe() {}
   unobserve() {}
@@ -129,6 +144,9 @@ function stubApi(
     list?: Responder;
     counts?: Responder;
     histogram?: Responder;
+    detail?: Responder;
+    alerts?: Responder;
+    timeline?: Responder;
   } = {},
 ): ApiStub {
   const requests: string[] = [];
@@ -154,9 +172,30 @@ function stubApi(
           return (
             responders.histogram ?? (() => jsonResponse(HISTOGRAM))
           )(url);
-        default:
-          throw new Error(`unexpected request ${url.pathname}`);
       }
+
+      const detail = /^\/api\/v1\/cases\/([^/]+)$/.exec(url.pathname);
+      if (detail !== null) {
+        return (responders.detail ?? defaultDetail)(url);
+      }
+      const alerts = /^\/api\/v1\/cases\/([^/]+)\/alerts$/.exec(url.pathname);
+      if (alerts !== null) {
+        return (
+          responders.alerts ??
+          (() => jsonResponse({ data: [], pagination: { limit: 50, nextCursor: null } }))
+        )(url);
+      }
+      const timeline = /^\/api\/v1\/cases\/([^/]+)\/timeline$/.exec(
+        url.pathname,
+      );
+      if (timeline !== null) {
+        return (
+          responders.timeline ??
+          (() => jsonResponse({ data: [], pagination: { limit: 50, nextCursor: null } }))
+        )(url);
+      }
+
+      throw new Error(`unexpected request ${url.pathname}`);
     }),
   );
 
@@ -165,6 +204,22 @@ function stubApi(
     listRequests: () =>
       requests.filter((request) => request.startsWith("/api/v1/cases?")),
   };
+}
+
+function defaultDetail(url: URL): Response {
+  const caseRef = url.pathname.split("/").pop() ?? "";
+  const found = ALL_CASES.find(
+    (item) =>
+      item.id === caseRef ||
+      (/^\d+$/.test(caseRef) && item.caseNumber === Number(caseRef)),
+  );
+  if (found === undefined) {
+    return jsonResponse(
+      { error: { code: "NOT_FOUND", message: "Not found", details: {} } },
+      404,
+    );
+  }
+  return jsonResponse(caseDetail(found));
 }
 
 function renderCases(
@@ -1190,3 +1245,175 @@ function renderCasesWithError(onListRequest: () => void) {
     </QueryClientProvider>,
   );
 }
+
+describe("case detail route and layout", () => {
+  function listWrapper(): HTMLElement | null {
+    return document.querySelector("[data-case-list]");
+  }
+
+  it("renders the queue and the detail at the case number, with focus on the heading", async () => {
+    const { router } = renderCases("/cases/312?scope=all");
+
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(table).findByText("Brute force → success");
+
+    const heading = await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    await waitFor(() => {
+      expect(heading).toHaveFocus();
+    });
+    expect(router.state.location.pathname).toBe("/cases/312");
+    expect(screen.getByRole("region", { name: "Case #312" })).toBeInTheDocument();
+  });
+
+  it("opens with Enter on a row and keeps the queue parameters", async () => {
+    const { router } = renderCases("/cases?scope=all");
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(table).findByText("Brute force → success");
+    const row = caseRow(table, 312);
+    row.focus();
+
+    fireEvent.keyDown(row, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/cases/312");
+    });
+    expect(
+      new URLSearchParams(router.state.location.search).get("scope"),
+    ).toBe("all");
+    const heading = await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    await waitFor(() => {
+      expect(heading).toHaveFocus();
+    });
+  });
+
+  it("opens from a click on the title cell", async () => {
+    const { router } = renderCases();
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    const title = await within(table).findByText("Brute force → success");
+
+    fireEvent.click(title);
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/cases/312");
+    });
+  });
+
+  it("closes with Escape and returns focus to the row", async () => {
+    const { router } = renderCases("/cases/312?scope=all");
+    const heading = await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    await waitFor(() => {
+      expect(heading).toHaveFocus();
+    });
+
+    fireEvent.keyDown(heading, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/cases");
+    });
+    expect(
+      new URLSearchParams(router.state.location.search).get("scope"),
+    ).toBe("all");
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await waitFor(() => {
+      expect(caseRow(table, 312)).toHaveFocus();
+    });
+  });
+
+  it("hides the list in full layout and restores it, keeping the rows", async () => {
+    const { router } = renderCases("/cases/312?scope=all&layout=full");
+
+    await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    expect(listWrapper()).toHaveAttribute("hidden");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Toggle full page" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        new URLSearchParams(router.state.location.search).has("layout"),
+      ).toBe(false);
+    });
+    expect(listWrapper()).not.toHaveAttribute("hidden");
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    expect(within(table).getByText("Brute force → success")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Toggle full page" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        new URLSearchParams(router.state.location.search).get("layout"),
+      ).toBe("full");
+    });
+    expect(listWrapper()).toHaveAttribute("hidden");
+  });
+
+  it("says a missing case was not found and keeps the queue usable", async () => {
+    renderCases("/cases/99999", {
+      detail: () =>
+        jsonResponse(
+          { error: { code: "NOT_FOUND", message: "Not found", details: {} } },
+          404,
+        ),
+    });
+
+    expect(
+      await screen.findByText("Case #99999 was not found."),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("table", { name: "Cases: Open, Mine" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the not-found page for a case number that is not digits", async () => {
+    const { requests } = renderCases("/cases/abc");
+
+    expect(
+      await screen.findByRole("heading", { name: "Page not found" }),
+    ).toBeInTheDocument();
+    expect(requests).toEqual([]);
+  });
+
+  it("drives the detail section from view and pushes tab changes", async () => {
+    const { router } = renderCases("/cases/312?scope=all&view=timeline");
+
+    expect(
+      await screen.findByRole("tab", { name: "Timeline" }),
+    ).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Alerts 2" }));
+
+    await waitFor(() => {
+      expect(
+        new URLSearchParams(router.state.location.search).get("view"),
+      ).toBe("alerts");
+    });
+    expect(
+      new URLSearchParams(router.state.location.search).get("scope"),
+    ).toBe("all");
+  });
+});

@@ -27,15 +27,25 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
-  const previousLocationKey = useRef(location.key);
+  const previousPathname = useRef(location.pathname);
 
   useEffect(() => {
-    if (previousLocationKey.current === location.key) {
+    if (previousPathname.current === location.pathname) {
       return;
     }
-    previousLocationKey.current = location.key;
+    previousPathname.current = location.pathname;
+    // A page that moved focus itself (the case detail heading, a queue row
+    // after Escape) keeps it; otherwise the page heading is the target.
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      mainRef.current?.contains(active)
+    ) {
+      return;
+    }
     mainRef.current?.querySelector<HTMLElement>("h1")?.focus();
-  }, [location.key]);
+  }, [location.pathname]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

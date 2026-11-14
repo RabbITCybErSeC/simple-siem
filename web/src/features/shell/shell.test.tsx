@@ -311,7 +311,10 @@ describe("CommandPalette and shortcuts", () => {
     });
     expect(within(dialog).getByText("Next case")).toBeInTheDocument();
     expect(within(dialog).getByText("Previous case")).toBeInTheDocument();
-    expect(within(dialog).getAllByText("Cases list")).toHaveLength(2);
+    expect(within(dialog).getByText("Open case")).toBeInTheDocument();
+    expect(within(dialog).getByText("Assign to me")).toBeInTheDocument();
+    expect(within(dialog).getByText("Close case detail")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("Cases list")).toHaveLength(5);
   });
 
   it("does not stack the palette on the shortcuts dialog", async () => {

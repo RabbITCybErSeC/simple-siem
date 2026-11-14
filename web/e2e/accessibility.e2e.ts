@@ -26,6 +26,14 @@ async function expectAccessibleInBothThemes(page: Page): Promise<void> {
   await expectAccessible(page);
 }
 
+function numberFromCell(text: string | null): number {
+  const match = /^#(\d+)$/.exec((text ?? "").trim());
+  if (match === null) {
+    throw new Error(`not a case number cell: ${text ?? ""}`);
+  }
+  return Number(match[1]);
+}
+
 test("the login screen is accessible empty and with an error", async ({
   page,
 }) => {
@@ -109,5 +117,37 @@ test("the cases error state is accessible", async ({ page }) => {
   await page.goto("/cases");
 
   await expect(page.getByRole("alert")).toBeVisible({ timeout: 10_000 });
+  await expectAccessibleInBothThemes(page);
+});
+
+test("the case detail is accessible in every section and both themes", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto("/cases");
+  const table = page.getByRole("table", { name: "Cases: Open, Mine" });
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+  const number = numberFromCell(
+    await table.locator("tbody tr").first().locator("td").first().textContent(),
+  );
+
+  await page.goto(`/cases/${number}`);
+  await expect(
+    page.getByRole("region", { name: `Case #${number}` }),
+  ).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+
+  await page.getByRole("tab", { name: /^Alerts/ }).click();
+  await expect(page.getByRole("table", { name: "Alerts" })).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+
+  await page.getByRole("tab", { name: "Timeline" }).click();
+  await expect(
+    page.getByRole("table", { name: "Evidence events" }).first(),
+  ).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+
+  await page.getByRole("tab", { name: "Activity" }).click();
+  await expect(page.getByRole("list", { name: "Activity" })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });

@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError } from "../../api/client";
 import { Badge } from "../../components/ui/badge";
@@ -30,14 +37,21 @@ export interface CaseTableProps {
   loading: boolean;
   error: Error | null;
   onRetry: () => void;
+  onOpen?: (item: CaseSummary) => void;
+  onAssign?: (item: CaseSummary) => void;
 }
 
-interface SeverityStyle {
+export interface CaseTableHandle {
+  /** Focus a row by case id; used when the detail closes back to the list. */
+  focusCase: (caseId: string) => void;
+}
+
+export interface SeverityStyle {
   label: string;
   className: string;
 }
 
-const SEVERITY_STYLES: Record<CaseSeverity, SeverityStyle> = {
+export const SEVERITY_STYLES: Record<CaseSeverity, SeverityStyle> = {
   HIGH: {
     label: "HIGH",
     className: "bg-severity-high text-severity-high-foreground",
@@ -52,7 +66,7 @@ const SEVERITY_STYLES: Record<CaseSeverity, SeverityStyle> = {
   },
 };
 
-const OUTCOME_LABELS: Record<CaseOutcome, string> = {
+export const OUTCOME_LABELS: Record<CaseOutcome, string> = {
   MALICIOUS: "Malicious",
   ACCEPTED: "Accepted",
 };
@@ -73,124 +87,167 @@ const SCOPE_LABELS: Record<CaseScope, string> = {
 const SKELETON_ROWS = 5;
 const MINUTE_MILLISECONDS = 60_000;
 
-export function CaseTable({
-  cases,
-  tab,
-  scope,
-  timeZone,
-  loading,
-  error,
-  onRetry,
-}: CaseTableProps) {
-  const now = useMinuteNow();
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [activeId, setActiveId] = useState<string | undefined>(undefined);
-  const activeIndex = cases.findIndex((item) => item.id === activeId);
-  // A filter or Show can remove the active row; the first row then takes over.
-  const currentIndex = activeIndex === -1 ? 0 : activeIndex;
-
-  function focusRow(index: number) {
-    const target = cases[index];
-    if (target === undefined) {
-      return;
-    }
-    setActiveId(target.id);
-    containerRef.current
-      ?.querySelector<HTMLElement>(`[data-case-id="${target.id}"]`)
-      ?.focus();
-  }
-
-  function handleRowKeyDown(
-    event: ReactKeyboardEvent<HTMLTableSectionElement>,
+export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
+  function CaseTable(
+    {
+      cases,
+      tab,
+      scope,
+      timeZone,
+      loading,
+      error,
+      onRetry,
+      onOpen,
+      onAssign,
+    },
+    ref,
   ) {
-    if (cases.length === 0 || isTextEntryTarget(event.target)) {
-      return;
-    }
+    const now = useMinuteNow();
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [activeId, setActiveId] = useState<string | undefined>(undefined);
+    const activeIndex = cases.findIndex((item) => item.id === activeId);
+    // A filter or Show can remove the active row; the first row then takes over.
+    const currentIndex = activeIndex === -1 ? 0 : activeIndex;
 
-    let nextIndex: number;
-    switch (event.key) {
-      case "j":
-      case "ArrowDown":
-        nextIndex = Math.min(currentIndex + 1, cases.length - 1);
-        break;
-      case "k":
-      case "ArrowUp":
-        nextIndex = Math.max(currentIndex - 1, 0);
-        break;
-      case "Home":
-        nextIndex = 0;
-        break;
-      case "End":
-        nextIndex = cases.length - 1;
-        break;
-      default:
+    const focusRow = useCallback(
+      (index: number) => {
+        const target = cases[index];
+        if (target === undefined) {
+          return;
+        }
+        setActiveId(target.id);
+        containerRef.current
+          ?.querySelector<HTMLElement>(`[data-case-id="${target.id}"]`)
+          ?.focus();
+      },
+      [cases],
+    );
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        focusCase(caseId: string) {
+          const index = cases.findIndex((item) => item.id === caseId);
+          if (index >= 0) {
+            focusRow(index);
+          }
+        },
+      }),
+      [cases, focusRow],
+    );
+
+    function handleRowKeyDown(
+      event: ReactKeyboardEvent<HTMLTableSectionElement>,
+    ) {
+      if (cases.length === 0 || isTextEntryTarget(event.target)) {
         return;
+      }
+
+      const target = cases[currentIndex];
+      let nextIndex: number;
+      switch (event.key) {
+        case "j":
+        case "ArrowDown":
+          nextIndex = Math.min(currentIndex + 1, cases.length - 1);
+          break;
+        case "k":
+        case "ArrowUp":
+          nextIndex = Math.max(currentIndex - 1, 0);
+          break;
+        case "Home":
+          nextIndex = 0;
+          break;
+        case "End":
+          nextIndex = cases.length - 1;
+          break;
+        case "Enter":
+          if (
+            !(event.target instanceof HTMLTableRowElement) ||
+            target === undefined ||
+            onOpen === undefined
+          ) {
+            return;
+          }
+          event.preventDefault();
+          onOpen(target);
+          return;
+        case "a":
+          if (target === undefined) {
+            return;
+          }
+          event.preventDefault();
+          onAssign?.(target);
+          return;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      focusRow(nextIndex);
     }
 
-    event.preventDefault();
-    focusRow(nextIndex);
-  }
-
-  if (error !== null) {
-    return (
-      <div
-        role="alert"
-        className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-foreground"
-      >
-        <p>{caseErrorMessage(error)}</p>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="mt-3"
-          onClick={onRetry}
+    if (error !== null) {
+      return (
+        <div
+          role="alert"
+          className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-foreground"
         >
-          Retry
-        </Button>
+          <p>{caseErrorMessage(error)}</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={onRetry}
+          >
+            Retry
+          </Button>
+        </div>
+      );
+    }
+
+    return (
+      <div ref={containerRef}>
+        <Table aria-busy={loading}>
+          <TableCaption>{caption(tab, scope)}</TableCaption>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Number</TableHead>
+              <TableHead>Title</TableHead>
+              <TableHead>Severity</TableHead>
+              <TableHead>Assignee</TableHead>
+              <TableHead>Last event</TableHead>
+              <TableHead>Age</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody onKeyDown={handleRowKeyDown}>
+            {loading ? (
+              <SkeletonRows />
+            ) : cases.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6} className="py-8 text-muted-foreground">
+                  {emptyMessage(tab, scope)}
+                </TableCell>
+              </TableRow>
+            ) : (
+              cases.map((item, index) => (
+                <CaseRow
+                  key={item.id}
+                  item={item}
+                  timeZone={timeZone}
+                  now={now}
+                  active={index === currentIndex}
+                  onFocus={() => setActiveId(item.id)}
+                  onOpen={onOpen}
+                />
+              ))
+            )}
+          </TableBody>
+        </Table>
       </div>
     );
-  }
-
-  return (
-    <div ref={containerRef}>
-      <Table aria-busy={loading}>
-        <TableCaption>{caption(tab, scope)}</TableCaption>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Number</TableHead>
-            <TableHead>Title</TableHead>
-            <TableHead>Severity</TableHead>
-            <TableHead>Assignee</TableHead>
-            <TableHead>Last event</TableHead>
-            <TableHead>Age</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody onKeyDown={handleRowKeyDown}>
-          {loading ? (
-            <SkeletonRows />
-          ) : cases.length === 0 ? (
-            <TableRow>
-              <TableCell colSpan={6} className="py-8 text-muted-foreground">
-                {emptyMessage(tab, scope)}
-              </TableCell>
-            </TableRow>
-          ) : (
-            cases.map((item, index) => (
-              <CaseRow
-                key={item.id}
-                item={item}
-                timeZone={timeZone}
-                now={now}
-                active={index === currentIndex}
-                onFocus={() => setActiveId(item.id)}
-              />
-            ))
-          )}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
+  },
+);
 
 interface CaseRowProps {
   item: CaseSummary;
@@ -198,6 +255,7 @@ interface CaseRowProps {
   now: Date;
   active: boolean;
   onFocus: () => void;
+  onOpen: ((item: CaseSummary) => void) | undefined;
 }
 
 function CaseRow({
@@ -206,6 +264,7 @@ function CaseRow({
   now,
   active,
   onFocus,
+  onOpen,
 }: CaseRowProps) {
   const severity = SEVERITY_STYLES[item.severity];
 
@@ -216,7 +275,16 @@ function CaseRow({
       onFocus={onFocus}
     >
       <TableCell className="font-mono">#{item.caseNumber}</TableCell>
-      <TableCell className="font-medium">{item.title}</TableCell>
+      <TableCell
+        className={
+          onOpen === undefined
+            ? "font-medium"
+            : "cursor-pointer font-medium underline-offset-4 hover:underline"
+        }
+        onClick={onOpen === undefined ? undefined : () => onOpen(item)}
+      >
+        {item.title}
+      </TableCell>
       <TableCell>
         <Badge className={severity.className}>{severity.label}</Badge>
       </TableCell>
@@ -241,7 +309,7 @@ interface TimeCellProps {
   now: Date;
 }
 
-function TimeCell({ value, timeZone, now }: TimeCellProps) {
+export function TimeCell({ value, timeZone, now }: TimeCellProps) {
   const exact = formatExact(value, timeZone, "timestamp");
 
   return (
@@ -334,8 +402,8 @@ function caseErrorMessage(error: Error): string {
   return "Something went wrong. Try again.";
 }
 
-/** Relative labels tick once a minute while the queue stays open. */
-function useMinuteNow(): Date {
+/** Relative labels tick once a minute while the list stays open. */
+export function useMinuteNow(): Date {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
