@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"time"
 )
 
@@ -106,6 +107,12 @@ type Actor struct {
 	Email       string
 	DisplayName string
 	Roles       []string
+	Permissions []string
+}
+
+// Can reports whether the actor's roles grant the permission.
+func (actor Actor) Can(permission string) bool {
+	return slices.Contains(actor.Permissions, permission)
 }
 
 type Settings struct {

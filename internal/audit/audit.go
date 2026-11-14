@@ -2,7 +2,10 @@ package audit
 
 import (
 	"bytes"
+	"context"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -53,6 +56,92 @@ func Record(tx *gorm.DB, event Event) error {
 		return fmt.Errorf("record audit event: %w", err)
 	}
 	return nil
+}
+
+// List returns one page of events, newest first, and the total that match.
+// shortcut: page-based with count(*); switch to keyset pagination when audit_events passes a few million rows (Phase 7 measurement).
+func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) ([]Event, int64, error) {
+	if page < 1 || pageSize < 1 {
+		return nil, 0, errors.New("list audit events: page and pageSize must be at least 1")
+	}
+
+	query := db.WithContext(ctx).Model(&Event{})
+	if filter.EventName != "" {
+		query = query.Where("event_name = ?", filter.EventName)
+	}
+	if filter.EventCategory != "" {
+		query = query.Where("event_category = ?", filter.EventCategory)
+	}
+	if filter.EventOutcome != "" {
+		query = query.Where("event_outcome = ?", filter.EventOutcome)
+	}
+	if filter.ActorID != "" {
+		query = query.Where("actor_id = ?", filter.ActorID)
+	}
+	if filter.Action != "" {
+		query = query.Where("action = ?", filter.Action)
+	}
+	if filter.TargetType != "" {
+		query = query.Where("target_type = ?", filter.TargetType)
+	}
+	if filter.TargetID != "" {
+		query = query.Where("target_id = ?", filter.TargetID)
+	}
+	if filter.RequestID != "" {
+		query = query.Where("request_id = ?", filter.RequestID)
+	}
+	if filter.TraceID != "" {
+		query = query.Where("trace_id = ?", filter.TraceID)
+	}
+	if filter.CreatedAfter != nil {
+		query = query.Where("created_at >= ?", *filter.CreatedAfter)
+	}
+	if filter.CreatedBefore != nil {
+		query = query.Where("created_at < ?", *filter.CreatedBefore)
+	}
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count audit events: %w", err)
+	}
+
+	events := []Event{}
+	err := query.
+		Order("created_at DESC, id DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&events).Error
+	if err != nil {
+		return nil, 0, fmt.Errorf("list audit events: %w", err)
+	}
+	return events, total, nil
+}
+
+// Get returns one audit event by id.
+func Get(ctx context.Context, db *gorm.DB, id string) (Event, error) {
+	if !isUUID(id) {
+		return Event{}, ErrNotFound
+	}
+	var event Event
+	err := db.WithContext(ctx).Where("id = ?", id).First(&event).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Event{}, ErrNotFound
+	}
+	if err != nil {
+		return Event{}, fmt.Errorf("get audit event: %w", err)
+	}
+	return event, nil
+}
+
+// isUUID reports whether id is in canonical UUID form. The database rejects
+// every other form for this column, so the check keeps malformed ids out of
+// the query.
+func isUUID(id string) bool {
+	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
+		return false
+	}
+	_, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
+	return err == nil
 }
 
 // normalizeChanges round-trips changes through JSON, so redaction walks nested

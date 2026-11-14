@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"slices"
 	"strings"
@@ -161,6 +162,116 @@ func TestRolesRejectDelimiterInName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "roles_name_check") {
 		t.Errorf("inserting READ,WRITE error = %v, want the roles_name_check violation", err)
+	}
+}
+
+// TestDefaultRolePermissions compares the migration with a second,
+// independent copy of the reviewed mapping in rbac-admin-api decision 3.
+func TestDefaultRolePermissions(t *testing.T) {
+	test := newTestService(t)
+	want := map[string][]string{
+		RoleAdmin: {
+			"alert:read",
+			"audit:read",
+			"case:close",
+			"case:merge",
+			"case:read",
+			"case:write",
+			"config:read",
+			"config:write",
+			"dataset:read",
+			"detection:read",
+			"detection:reload",
+			"detection:run",
+			"detection:write",
+			"pipeline:read",
+			"pipeline:run",
+			"pipeline:write",
+			"role:assign",
+			"suppression:broad_write",
+			"suppression:read",
+			"suppression:write",
+			"tag:manage",
+			"task:read",
+			"task:write",
+			"template:write",
+			"user:on_call",
+			"user:read",
+			"user:write",
+			"view:share",
+			"webhook:read",
+			"webhook:write",
+		},
+		"SECURITY_ENGINEER": {
+			"alert:read",
+			"audit:read",
+			"case:read",
+			"config:read",
+			"config:write",
+			"dataset:read",
+			"detection:read",
+			"detection:reload",
+			"detection:run",
+			"detection:write",
+			"pipeline:read",
+			"pipeline:run",
+			"pipeline:write",
+			"suppression:broad_write",
+			"suppression:read",
+			"suppression:write",
+			"tag:manage",
+			"task:read",
+			"template:write",
+			"view:share",
+			"webhook:read",
+			"webhook:write",
+		},
+		"ANALYST": {
+			"alert:read",
+			"case:close",
+			"case:merge",
+			"case:read",
+			"case:write",
+			"dataset:read",
+			"detection:read",
+			"pipeline:read",
+			"suppression:read",
+			"suppression:write",
+			"task:read",
+			"task:write",
+			"view:share",
+		},
+		"READ_ONLY": {
+			"alert:read",
+			"case:read",
+			"detection:read",
+			"pipeline:read",
+			"suppression:read",
+			"task:read",
+		},
+		"SERVICE": {},
+	}
+
+	var rows []struct {
+		Role       string `gorm:"column:role_name"`
+		Permission string `gorm:"column:permission"`
+	}
+	err := test.database.Raw(
+		"SELECT role_name, permission FROM role_permissions ORDER BY role_name, permission",
+	).Scan(&rows).Error
+	if err != nil {
+		t.Fatalf("read role permissions: %v", err)
+	}
+
+	got := make(map[string][]string, len(want))
+	for role := range want {
+		got[role] = []string{}
+	}
+	for _, row := range rows {
+		got[row.Role] = append(got[row.Role], row.Permission)
+	}
+	if !maps.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("role permissions = %v, want %v", got, want)
 	}
 }
 
@@ -628,6 +739,118 @@ func TestAuthenticateReturnsActor(t *testing.T) {
 	}
 	if !slices.Equal(actor.Roles, []string{RoleAdmin, "READ_ONLY"}) {
 		t.Errorf("actor roles = %v, want [%s READ_ONLY]", actor.Roles, RoleAdmin)
+	}
+}
+
+func TestAuthenticateLoadsAnalystPermissions(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID, "ANALYST")
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	for _, permission := range []string{"case:write", "alert:read"} {
+		if !slices.Contains(actor.Permissions, permission) {
+			t.Errorf("actor permissions %v do not contain %q", actor.Permissions, permission)
+		}
+		if !actor.Can(permission) {
+			t.Errorf("Can(%q) = false, want true", permission)
+		}
+	}
+	if slices.Contains(actor.Permissions, "user:read") {
+		t.Errorf("actor permissions %v contain user:read, want none", actor.Permissions)
+	}
+	if actor.Can("user:read") {
+		t.Error("Can(user:read) = true, want false")
+	}
+	if !slices.Equal(actor.Roles, []string{"ANALYST"}) {
+		t.Errorf("actor roles = %v, want [ANALYST]", actor.Roles)
+	}
+}
+
+func TestAuthenticateWithoutRolesHasNoPermissions(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID)
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if len(actor.Permissions) != 0 {
+		t.Errorf("actor permissions = %v (%d entries), want none", actor.Permissions, len(actor.Permissions))
+	}
+	if actor.Can("alert:read") {
+		t.Error("Can(alert:read) = true, want false")
+	}
+}
+
+func TestAuthenticatePermissionsAreSortedAndUnique(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID, "ANALYST", "READ_ONLY")
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if !slices.IsSorted(actor.Permissions) {
+		t.Errorf("actor permissions %v are not sorted", actor.Permissions)
+	}
+	unique := slices.Compact(slices.Clone(actor.Permissions))
+	if len(unique) != len(actor.Permissions) {
+		t.Errorf("actor permissions %v contain duplicates", actor.Permissions)
+	}
+	if !slices.Equal(actor.Roles, []string{"ANALYST", "READ_ONLY"}) {
+		t.Errorf("actor roles = %v, want [ANALYST READ_ONLY]", actor.Roles)
+	}
+}
+
+func TestAuthenticateReloadsRolesOnNextRequest(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID)
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if actor.Can("case:read") {
+		t.Fatal("Can(case:read) before the role is assigned = true, want false")
+	}
+
+	if err := test.database.Exec(
+		"INSERT INTO user_roles (user_id, role_name) VALUES (?, 'READ_ONLY')", user.ID,
+	).Error; err != nil {
+		t.Fatalf("assign READ_ONLY: %v", err)
+	}
+
+	actor, err = test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate after the role is assigned: %v", err)
+	}
+	if !actor.Can("case:read") {
+		t.Errorf("actor permissions %v after the role is assigned lack case:read", actor.Permissions)
+	}
+}
+
+func setRoles(t *testing.T, db *gorm.DB, userID string, roles ...string) {
+	t.Helper()
+	if err := db.Exec("DELETE FROM user_roles WHERE user_id = ?", userID).Error; err != nil {
+		t.Fatalf("clear user roles: %v", err)
+	}
+	for _, role := range roles {
+		if err := db.Exec(
+			"INSERT INTO user_roles (user_id, role_name) VALUES (?, ?)", userID, role,
+		).Error; err != nil {
+			t.Fatalf("assign role %s: %v", role, err)
+		}
 	}
 }
 

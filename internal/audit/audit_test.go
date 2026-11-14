@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"regexp"
 	"slices"
@@ -580,6 +581,342 @@ func TestRecordKeepsReferenceKeys(t *testing.T) {
 	}
 }
 
+func TestListFiltersByEachEqualityField(t *testing.T) {
+	db := databasetest.New(t)
+	matchActorID := "actor-filter"
+	otherActorID := "actor-filter-other"
+	match := validEvent("filter-match")
+	match.EventName = "simple_siem.test.filter_match"
+	match.EventCategory = "FILTER"
+	match.EventOutcome = "DENIED"
+	match.ActorType = "USER"
+	match.ActorID = &matchActorID
+	match.RequestID = "request-filter"
+	match.TraceID = "trace-filter"
+	match.TargetType = "FILTER_TARGET"
+	match.Action = "filter-action"
+
+	other := validEvent("filter-other")
+	other.EventName = "simple_siem.test.filter_other"
+	other.EventCategory = "OTHER"
+	other.EventOutcome = "SUCCESS"
+	other.ActorType = "USER"
+	other.ActorID = &otherActorID
+	other.RequestID = "request-other"
+	other.TraceID = "trace-other"
+	other.TargetType = "OTHER_TARGET"
+	other.Action = "other-action"
+
+	for _, event := range []audit.Event{match, other} {
+		if err := audit.Record(db, event); err != nil {
+			t.Fatalf("Record %q: %v", event.TargetID, err)
+		}
+	}
+
+	cases := []struct {
+		name   string
+		filter audit.Filter
+	}{
+		{"eventName", audit.Filter{EventName: match.EventName}},
+		{"eventCategory", audit.Filter{EventCategory: match.EventCategory}},
+		{"eventOutcome", audit.Filter{EventOutcome: match.EventOutcome}},
+		{"actorId", audit.Filter{ActorID: matchActorID}},
+		{"action", audit.Filter{Action: match.Action}},
+		{"targetType", audit.Filter{TargetType: match.TargetType}},
+		{"targetId", audit.Filter{TargetID: match.TargetID}},
+		{"requestId", audit.Filter{RequestID: match.RequestID}},
+		{"traceId", audit.Filter{TraceID: match.TraceID}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			events, total, err := audit.List(context.Background(), db, testCase.filter, 1, 50)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if total != 1 {
+				t.Errorf("total = %d, want 1", total)
+			}
+			if len(events) != 1 || events[0].TargetID != match.TargetID {
+				t.Errorf("events = %v, want only %q", targetIDs(events), match.TargetID)
+			}
+		})
+	}
+}
+
+func TestListFiltersByActorAndTime(t *testing.T) {
+	db := databasetest.New(t)
+	actorA := "admin-a"
+	actorB := "admin-b"
+	firstDay := time.Date(2026, time.November, 12, 9, 0, 0, 0, time.UTC)
+	secondDay := time.Date(2026, time.November, 13, 9, 0, 0, 0, time.UTC)
+	secondDayLater := time.Date(2026, time.November, 13, 10, 0, 0, 0, time.UTC)
+
+	before := validEvent("actor-time-before")
+	before.ActorType = "USER"
+	before.ActorID = &actorA
+	wanted := validEvent("actor-time-wanted")
+	wanted.ActorType = "USER"
+	wanted.ActorID = &actorA
+	otherActor := validEvent("actor-time-other")
+	otherActor.ActorType = "USER"
+	otherActor.ActorID = &actorB
+
+	recordEventAt(t, db, before, firstDay)
+	recordEventAt(t, db, wanted, secondDay)
+	recordEventAt(t, db, otherActor, secondDayLater)
+
+	createdAfter := secondDay
+	events, total, err := audit.List(context.Background(), db, audit.Filter{
+		ActorID:      actorA,
+		CreatedAfter: &createdAfter,
+	}, 1, 50)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("total = %d, want 1", total)
+	}
+	if len(events) != 1 || events[0].TargetID != wanted.TargetID {
+		t.Errorf("events = %v, want only %q", targetIDs(events), wanted.TargetID)
+	}
+}
+
+func TestListAppliesCreatedAtBounds(t *testing.T) {
+	db := databasetest.New(t)
+	targetType := "BOUNDS_TARGET"
+	boundary := time.Date(2026, time.November, 13, 12, 0, 0, 0, time.UTC)
+
+	recordEventAt(t, db, eventOfType(targetType, "bounds-before"), boundary.Add(-time.Second))
+	recordEventAt(t, db, eventOfType(targetType, "bounds-at"), boundary)
+	recordEventAt(t, db, eventOfType(targetType, "bounds-after"), boundary.Add(time.Second))
+
+	createdAfter := boundary
+	events, total, err := audit.List(context.Background(), db, audit.Filter{
+		TargetType:   targetType,
+		CreatedAfter: &createdAfter,
+	}, 1, 50)
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("total after = %d, want 2", total)
+	}
+	if got, want := targetIDs(events), []string{"bounds-after", "bounds-at"}; !slices.Equal(got, want) {
+		t.Errorf("events after = %v, want %v", got, want)
+	}
+
+	createdBefore := boundary
+	events, total, err = audit.List(context.Background(), db, audit.Filter{
+		TargetType:    targetType,
+		CreatedBefore: &createdBefore,
+	}, 1, 50)
+	if err != nil {
+		t.Fatalf("List before: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("total before = %d, want 1", total)
+	}
+	if got, want := targetIDs(events), []string{"bounds-before"}; !slices.Equal(got, want) {
+		t.Errorf("events before = %v, want %v", got, want)
+	}
+}
+
+func TestListOrdersNewestFirstWithIDTieBreak(t *testing.T) {
+	db := databasetest.New(t)
+	targetType := "ORDER_TARGET"
+	newer := time.Date(2026, time.November, 13, 12, 0, 0, 0, time.UTC)
+	older := newer.Add(-time.Hour)
+
+	for _, targetID := range []string{"order-tie-a", "order-tie-b", "order-tie-c"} {
+		recordEventAt(t, db, eventOfType(targetType, targetID), newer)
+	}
+	recordEventAt(t, db, eventOfType(targetType, "order-older"), older)
+	recordEventAt(t, db, eventOfType(targetType, "order-oldest"), older.Add(-time.Hour))
+
+	events, total, err := audit.List(context.Background(), db, audit.Filter{TargetType: targetType}, 1, 50)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("total = %d, want 5", total)
+	}
+
+	tieIDs := []string{
+		storedEventByTarget(t, db, "order-tie-a").ID,
+		storedEventByTarget(t, db, "order-tie-b").ID,
+		storedEventByTarget(t, db, "order-tie-c").ID,
+	}
+	slices.Sort(tieIDs)
+	slices.Reverse(tieIDs)
+	want := append(tieIDs,
+		storedEventByTarget(t, db, "order-older").ID,
+		storedEventByTarget(t, db, "order-oldest").ID,
+	)
+	got := eventIDs(events)
+	if !slices.Equal(got, want) {
+		t.Errorf("event ids = %v, want %v", got, want)
+	}
+}
+
+func TestListPaginatesWithTotal(t *testing.T) {
+	db := databasetest.New(t)
+	targetType := "PAGINATION_TARGET"
+	base := time.Date(2026, time.November, 13, 12, 0, 0, 0, time.UTC)
+	for index := 1; index <= 5; index++ {
+		targetID := fmt.Sprintf("page-%d", index)
+		recordEventAt(t, db, eventOfType(targetType, targetID), base.Add(time.Duration(index)*time.Minute))
+	}
+
+	events, total, err := audit.List(context.Background(), db, audit.Filter{TargetType: targetType}, 2, 2)
+	if err != nil {
+		t.Fatalf("List page 2: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("total = %d, want 5", total)
+	}
+	if got, want := targetIDs(events), []string{"page-3", "page-2"}; !slices.Equal(got, want) {
+		t.Errorf("page 2 events = %v, want %v", got, want)
+	}
+
+	events, total, err = audit.List(context.Background(), db, audit.Filter{TargetType: targetType}, 3, 2)
+	if err != nil {
+		t.Fatalf("List page 3: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("page 3 total = %d, want 5", total)
+	}
+	if got, want := targetIDs(events), []string{"page-1"}; !slices.Equal(got, want) {
+		t.Errorf("page 3 events = %v, want %v", got, want)
+	}
+}
+
+func TestListReturnsEmptySliceAndZeroTotal(t *testing.T) {
+	db := databasetest.New(t)
+
+	events, total, err := audit.List(context.Background(), db, audit.Filter{TargetType: "NO_SUCH_TARGET"}, 1, 50)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if events == nil {
+		t.Error("List returned nil, want an empty slice")
+	}
+	if len(events) != 0 {
+		t.Errorf("List returned %d events, want none", len(events))
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+}
+
+func TestListRejectsInvalidPagination(t *testing.T) {
+	db := databasetest.New(t)
+	cases := []struct {
+		name     string
+		page     int
+		pageSize int
+	}{
+		{"page zero", 0, 50},
+		{"page negative", -1, 50},
+		{"page size zero", 1, 0},
+		{"page size negative", 1, -1},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			events, total, err := audit.List(context.Background(), db, audit.Filter{}, testCase.page, testCase.pageSize)
+			if err == nil {
+				t.Fatal("List accepted invalid pagination")
+			}
+			if events != nil {
+				t.Errorf("List returned %d events with invalid pagination, want none", len(events))
+			}
+			if total != 0 {
+				t.Errorf("total = %d with invalid pagination, want 0", total)
+			}
+		})
+	}
+}
+
+func TestGetReturnsEvent(t *testing.T) {
+	db := databasetest.New(t)
+	actorID := "actor-get"
+	sessionID := "0190f8dc-6f43-7f0a-8b2f-9c8c0a2d3e4f"
+	event := validEvent("get-found")
+	event.EventName = "simple_siem.test.get"
+	event.ActorType = "USER"
+	event.ActorID = &actorID
+	event.ActorSessionID = &sessionID
+	event.RequestID = "request-get"
+	event.TraceID = "trace-get"
+	event.Action = "get"
+	event.Changes = map[string]any{"after": map[string]any{"password": "s3cret"}}
+
+	if err := audit.Record(db, event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	id := storedEventByTarget(t, db, event.TargetID).ID
+
+	got, err := audit.Get(context.Background(), db, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	fields := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"id", got.ID, id},
+		{"event_name", got.EventName, event.EventName},
+		{"event_category", got.EventCategory, event.EventCategory},
+		{"event_outcome", got.EventOutcome, event.EventOutcome},
+		{"actor_type", got.ActorType, event.ActorType},
+		{"request_id", got.RequestID, event.RequestID},
+		{"trace_id", got.TraceID, event.TraceID},
+		{"target_type", got.TargetType, event.TargetType},
+		{"target_id", got.TargetID, event.TargetID},
+		{"action", got.Action, event.Action},
+	}
+	for _, field := range fields {
+		if field.got != field.want {
+			t.Errorf("Get %s = %q, want %q", field.name, field.got, field.want)
+		}
+	}
+	if got.ActorID == nil || *got.ActorID != actorID {
+		t.Errorf("Get actor_id = %v, want %q", got.ActorID, actorID)
+	}
+	if got.ActorSessionID == nil || *got.ActorSessionID != sessionID {
+		t.Errorf("Get actor_session_id = %v, want %q", got.ActorSessionID, sessionID)
+	}
+
+	after, ok := got.Changes["after"].(map[string]any)
+	if !ok {
+		t.Fatalf("Get changes has no after object: %v", got.Changes)
+	}
+	if after["password"] != redactedValue {
+		t.Errorf("Get changes.after.password = %v, want %s", after["password"], redactedValue)
+	}
+	if !slices.Contains(got.Redactions, "changes.after.password") {
+		t.Errorf("Get redactions = %v, want changes.after.password", got.Redactions)
+	}
+}
+
+func TestGetReturnsNotFound(t *testing.T) {
+	db := databasetest.New(t)
+	for _, id := range []string{
+		"0190f8dc-6f43-7f0a-8b2f-9c8c0a2d3e4f",
+		"not-a-uuid",
+	} {
+		t.Run(id, func(t *testing.T) {
+			event, err := audit.Get(context.Background(), db, id)
+			if !errors.Is(err, audit.ErrNotFound) {
+				t.Fatalf("Get %q returned %v, want ErrNotFound", id, err)
+			}
+			if event.ID != "" {
+				t.Errorf("Get %q returned event %q, want a zero event", id, event.ID)
+			}
+		})
+	}
+}
+
 func TestMigrateAuditsAppliedMigration(t *testing.T) {
 	db := databasetest.New(t)
 	versions := appliedMigrationVersions(t, db)
@@ -676,6 +1013,38 @@ func TestRecordRejectsDuplicateMigrationAppliedEvent(t *testing.T) {
 	if got := countEvents(t, db, "event_name = ? AND target_id = ?", event.EventName, event.TargetID); got != 1 {
 		t.Errorf("stored %d migration_applied events for version %s, want 1", got, event.TargetID)
 	}
+}
+
+func eventOfType(targetType, targetID string) audit.Event {
+	event := validEvent(targetID)
+	event.TargetType = targetType
+	return event
+}
+
+func recordEventAt(t *testing.T, db *gorm.DB, event audit.Event, createdAt time.Time) {
+	t.Helper()
+	if err := audit.Record(db, event); err != nil {
+		t.Fatalf("Record %q: %v", event.TargetID, err)
+	}
+	if err := db.Exec("UPDATE audit_events SET created_at = ? WHERE target_id = ?", createdAt, event.TargetID).Error; err != nil {
+		t.Fatalf("set created_at for %q: %v", event.TargetID, err)
+	}
+}
+
+func targetIDs(events []audit.Event) []string {
+	ids := make([]string, len(events))
+	for index, event := range events {
+		ids[index] = event.TargetID
+	}
+	return ids
+}
+
+func eventIDs(events []audit.Event) []string {
+	ids := make([]string, len(events))
+	for index, event := range events {
+		ids[index] = event.ID
+	}
+	return ids
 }
 
 func validEvent(targetID string) audit.Event {
