@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
+	"gorm.io/gorm"
 )
 
 const accountTestNewPassword = "a whole new password"
@@ -122,7 +123,7 @@ func TestChangePasswordRateLimited(t *testing.T) {
 	if err != nil || retryAfter < 1 {
 		t.Errorf("Retry-After = %q, want a positive number of seconds", response.Header().Get("Retry-After"))
 	}
-	assertErrorCode(t, response, "RATE_LIMITED", "too many failed logins")
+	assertErrorCode(t, response, "RATE_LIMITED", "too many failed attempts")
 	if response := get(router, "/api/v1/me", "", bearer(token)); response.Code != http.StatusOK {
 		t.Errorf("GET /api/v1/me after a rate-limited change = %d, want 200: %s", response.Code, response.Body)
 	}
@@ -179,6 +180,73 @@ func TestChangePasswordRejectsMalformedBodies(t *testing.T) {
 			assertNoStore(t, response)
 			assertErrorCode(t, response, "VALIDATION_ERROR", "invalid request body")
 		})
+	}
+}
+
+func TestChangePasswordRejectsDisabledUserWithCookie(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	user := createTestAdmin(t, service)
+	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
+	attemptsBefore := countLoginAttempts(t, database)
+	eventsBefore := countAuditEvents(t, database)
+
+	userLocked := make(chan struct{})
+	releaseUser := make(chan struct{})
+	lockResult := make(chan error, 1)
+	go func() {
+		lockResult <- database.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(
+				"SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE", user.ID,
+			).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(
+				"UPDATE users SET status = 'DISABLED' WHERE id = ?", user.ID,
+			).Error; err != nil {
+				return err
+			}
+			close(userLocked)
+			<-releaseUser
+			return nil
+		})
+	}()
+	<-userLocked
+
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- sendJSONWithHeaders(router, http.MethodPost, "/api/v1/me/password", map[string]string{
+			"Cookie":          cookieHeader(cookie),
+			testBrowserHeader: testBrowserHeaderValue,
+			"Origin":          authTestOrigin,
+		}, fmt.Sprintf(`{"currentPassword":%q,"newPassword":%q}`, authTestPassword, accountTestNewPassword))
+	}()
+	waitForAPILockWait(t, database, 1)
+	close(releaseUser)
+	if err := <-lockResult; err != nil {
+		t.Fatalf("release the user lock: %v", err)
+	}
+
+	response := <-responses
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("password change for a user disabled during the change = %d, want 401: %s",
+			response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	if got := response.Body.String(); got != authenticationRequiredBody {
+		t.Errorf("body = %s, want %s", got, authenticationRequiredBody)
+	}
+	if got := response.Header().Get("WWW-Authenticate"); got != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+	}
+	cleared := responseCookie(t, response)
+	if cleared.MaxAge >= 0 {
+		t.Errorf("clearing cookie MaxAge = %d, want negative", cleared.MaxAge)
+	}
+	if got := countLoginAttempts(t, database); got != attemptsBefore {
+		t.Errorf("login attempts = %d after the rejection, want %d", got, attemptsBefore)
+	}
+	if got := countAuditEvents(t, database); got != eventsBefore {
+		t.Errorf("audit events = %d after the rejection, want %d", got, eventsBefore)
 	}
 }
 
@@ -427,4 +495,23 @@ func revokeOwnSession(router http.Handler, headers map[string]string, sessionID 
 	return sendJSONWithHeaders(
 		router, http.MethodPost, "/api/v1/me/sessions/"+sessionID+"/revoke", headers, "",
 	)
+}
+
+func waitForAPILockWait(t *testing.T, database *gorm.DB, want int64) {
+	t.Helper()
+	var waiting int64
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		err := database.Raw(`
+			SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting).Error
+		if err != nil {
+			t.Fatalf("read postgres activity: %v", err)
+		}
+		if waiting >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%d sessions waited on a lock, want %d", waiting, want)
 }

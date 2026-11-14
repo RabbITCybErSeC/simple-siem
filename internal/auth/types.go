@@ -142,7 +142,7 @@ type SessionInfo struct {
 	LastUsedAt        time.Time
 	IdleExpiresAt     time.Time
 	AbsoluteExpiresAt time.Time
-	ClientIP          net.IP
+	ClientIP          *string
 	UserAgent         string
 	AuthProvider      string
 	Current           bool

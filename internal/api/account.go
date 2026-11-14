@@ -41,6 +41,11 @@ func (account accountHandler) changePassword(c *gin.Context) {
 
 	var rateLimited auth.RateLimitedError
 	switch {
+	case errors.Is(err, auth.ErrUnauthenticated):
+		if c.GetString(credentialKey) == credentialCookie {
+			clearSessionCookie(c, account.policy)
+		}
+		abortAuthenticationRequired(c)
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		writeError(c, http.StatusBadRequest, codeValidationError, "current password is incorrect")
 	case errors.Is(err, auth.ErrPasswordLength):
@@ -48,7 +53,7 @@ func (account accountHandler) changePassword(c *gin.Context) {
 	case errors.As(err, &rateLimited):
 		retryAfter := max(int(math.Ceil(rateLimited.RetryAfter.Seconds())), 1)
 		c.Header("Retry-After", strconv.Itoa(retryAfter))
-		writeError(c, http.StatusTooManyRequests, codeRateLimited, "too many failed logins")
+		writeError(c, http.StatusTooManyRequests, codeRateLimited, "too many failed attempts")
 	default:
 		internalError(c, account.logger, err)
 	}
@@ -71,13 +76,10 @@ func (account accountHandler) listSessions(c *gin.Context) {
 			LastUsedAt:        session.LastUsedAt.UTC().Format(time.RFC3339),
 			IdleExpiresAt:     session.IdleExpiresAt.UTC().Format(time.RFC3339),
 			AbsoluteExpiresAt: session.AbsoluteExpiresAt.UTC().Format(time.RFC3339),
+			ClientIP:          session.ClientIP,
 			UserAgent:         session.UserAgent,
 			AuthProvider:      session.AuthProvider,
 			Current:           session.Current,
-		}
-		if session.ClientIP != nil {
-			clientIP := session.ClientIP.String()
-			item.ClientIP = &clientIP
 		}
 		data = append(data, item)
 	}

@@ -611,10 +611,7 @@ func (service *Service) UseResetToken(ctx context.Context, token, password strin
 			return ErrInvalidResetToken
 		}
 
-		var identity struct {
-			ID      string `gorm:"column:id"`
-			Version int    `gorm:"column:version"`
-		}
+		var identity lockedIdentity
 		err = tx.Raw(
 			"SELECT id::text AS id, version FROM user_identities WHERE user_id = ? AND provider = ? FOR UPDATE",
 			lookup.UserID, ProviderLocal,
