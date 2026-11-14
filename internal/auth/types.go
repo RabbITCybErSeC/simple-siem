@@ -135,6 +135,19 @@ type LoginResult struct {
 	Roles     []string
 }
 
+// SessionInfo is one live session of the current user, without token data.
+type SessionInfo struct {
+	ID                string
+	CreatedAt         time.Time
+	LastUsedAt        time.Time
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
+	ClientIP          net.IP
+	UserAgent         string
+	AuthProvider      string
+	Current           bool
+}
+
 // UserFilter narrows a user list; an empty status means every status.
 type UserFilter struct {
 	Status   string
@@ -184,6 +197,7 @@ var (
 	ErrUnknownRole       = errors.New("unknown role")
 	ErrInvalidResetToken = errors.New("invalid or expired token")
 	ErrInvalidStatus     = errors.New("status must be ACTIVE, DISABLED, or INVITED")
+	ErrSessionNotFound   = errors.New("session not found")
 )
 
 // RateLimitedError is returned when too many logins failed recently.
