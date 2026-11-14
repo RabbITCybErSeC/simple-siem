@@ -96,6 +96,29 @@ type loginUser struct {
 	Roles       []string `json:"roles"`
 }
 
+// changePasswordRequest keeps both fields as pointers, so a missing field is a
+// 400 rather than an empty password.
+type changePasswordRequest struct {
+	CurrentPassword *string `json:"currentPassword"`
+	NewPassword     *string `json:"newPassword"`
+}
+
+type sessionResponse struct {
+	ID                string  `json:"id"`
+	CreatedAt         string  `json:"createdAt"`
+	LastUsedAt        string  `json:"lastUsedAt"`
+	IdleExpiresAt     string  `json:"idleExpiresAt"`
+	AbsoluteExpiresAt string  `json:"absoluteExpiresAt"`
+	ClientIP          *string `json:"clientIp"`
+	UserAgent         string  `json:"userAgent"`
+	AuthProvider      string  `json:"authProvider"`
+	Current           bool    `json:"current"`
+}
+
+type sessionListResponse struct {
+	Data []sessionResponse `json:"data"`
+}
+
 type userResponse struct {
 	ID          string   `json:"id"`
 	Email       string   `json:"email"`

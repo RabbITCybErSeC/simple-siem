@@ -24,8 +24,11 @@ var publicRoutes = map[string]bool{
 }
 
 var authenticatedOnlyRoutes = map[string]bool{
-	"POST /api/v1/auth/logout": true,
-	"GET /api/v1/me":           true,
+	"POST /api/v1/auth/logout":                   true,
+	"GET /api/v1/me":                             true,
+	"POST /api/v1/me/password":                   true,
+	"GET /api/v1/me/sessions":                    true,
+	"POST /api/v1/me/sessions/:sessionId/revoke": true,
 }
 
 func TestAPIRoutesDenyByDefault(t *testing.T) {
