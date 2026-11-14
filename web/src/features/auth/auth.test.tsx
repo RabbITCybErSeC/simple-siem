@@ -13,15 +13,18 @@ import {
   RouterProvider,
 } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { get } from "../../api/client";
+import { ApiError, get } from "../../api/client";
+import { AppShell } from "../shell/AppShell";
 import { LoginPage } from "./LoginPage";
 import {
   createQueryClient,
   loginPath,
   RequireSession,
   safeNextPath,
+  sessionView,
   useSignOut,
 } from "./session";
+import type { CurrentUser } from "./session";
 
 type FetchFunction = (
   input: RequestInfo | URL,
@@ -96,8 +99,13 @@ function renderSession(initialEntry: string) {
       {
         element: <RequireSession />,
         children: [
-          { path: "/cases", element: <p>Cases page</p> },
-          { path: "/nope", element: <p>Not found page</p> },
+          {
+            element: <AppShell />,
+            children: [
+              { path: "/cases", element: <p>Cases page</p> },
+              { path: "/nope", element: <p>Not found page</p> },
+            ],
+          },
         ],
       },
     ],
@@ -127,7 +135,42 @@ function renderSession(initialEntry: string) {
 function SignOutProbe() {
   const signOut = useSignOut();
 
-  return <button onClick={() => signOut.mutate()}>Sign out</button>;
+  return (
+    <div>
+      <button onClick={() => signOut.mutate()}>Sign out</button>
+      {signOut.isError && <p>Sign out failed</p>}
+    </div>
+  );
+}
+
+function renderSignOut(logoutResponse: () => Response) {
+  stubApi({
+    "GET /api/v1/me": () => signedInUser(),
+    "POST /api/v1/auth/logout": logoutResponse,
+  });
+  const router = createMemoryRouter(
+    [
+      { path: "/cases", element: <SignOutProbe /> },
+      { path: "/login", element: <p>Login destination</p> },
+    ],
+    { initialEntries: ["/cases"] },
+  );
+  const queryClient = createQueryClient(() => undefined);
+  const user = {
+    id: "user_1",
+    email: "analyst@example.test",
+    displayName: "Alice Analyst",
+    roles: ["ANALYST"],
+  };
+  queryClient.setQueryData(["me"], user);
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+
+  return { router, queryClient, user };
 }
 
 function fillCredentials(email: string, password: string): void {
@@ -274,6 +317,7 @@ describe("LoginPage", () => {
     const { router, queryClient } = renderLogin(
       "/login?next=%2Fcases%3Fstatus%3Dopen",
     );
+    const navigateSpy = vi.spyOn(router, "navigate");
 
     fillCredentials("analyst@example.test", "correct horse battery staple");
     submitForm();
@@ -281,6 +325,7 @@ describe("LoginPage", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/cases");
     });
+    expect(navigateSpy).toHaveBeenCalledTimes(1);
     expect(router.state.location.search).toBe("?status=open");
     expect(queryClient.getQueryData(["me"])).toEqual(user);
 
@@ -294,6 +339,19 @@ describe("LoginPage", () => {
 });
 
 describe("session handling", () => {
+  it("keeps the shell when a background error arrives with data", () => {
+    const user: CurrentUser = {
+      id: "user_1",
+      email: "analyst@example.test",
+      displayName: "Alice Analyst",
+      roles: ["ANALYST"],
+    };
+
+    expect(
+      sessionView(user, new ApiError(503, "INTERNAL_ERROR", "boom"), false),
+    ).toBe("ready");
+  });
+
   it("redirects a signed-out visitor with the next path and no message", async () => {
     stubApi({ "GET /api/v1/me": signedOut });
     const { router } = renderSession("/cases?scope=mine");
@@ -360,6 +418,29 @@ describe("session handling", () => {
     ).toBeInTheDocument();
   });
 
+  it("requests /me once on load and once per navigation", async () => {
+    let meCalls = 0;
+    stubApi({
+      "GET /api/v1/me": () => {
+        meCalls += 1;
+        return signedInUser();
+      },
+    });
+    const { router } = renderSession("/cases");
+    await screen.findByText("Cases page");
+
+    expect(meCalls).toBe(1);
+
+    await act(async () => {
+      await router.navigate("/nope");
+    });
+    await screen.findByText("Not found page");
+
+    await waitFor(() => {
+      expect(meCalls).toBe(2);
+    });
+  });
+
   it("offers Retry when the server is unreachable", async () => {
     let meCalls = 0;
     vi.stubGlobal(
@@ -391,33 +472,37 @@ describe("session handling", () => {
     expect(await screen.findByText("Cases page")).toBeInTheDocument();
   });
 
-  it("reaches the login screen when sign out fails", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn<FetchFunction>(async () => {
-        throw new TypeError("Failed to fetch");
-      }),
+  it("keeps the user signed in when sign out fails", async () => {
+    const { router, queryClient, user } = renderSignOut(() =>
+      jsonResponse(
+        { error: { code: "INTERNAL_ERROR", message: "boom" } },
+        500,
+      ),
     );
-    const router = createMemoryRouter(
-      [
-        { path: "/cases", element: <SignOutProbe /> },
-        { path: "/login", element: <p>Login destination</p> },
-      ],
-      { initialEntries: ["/cases"] },
-    );
-    const queryClient = createQueryClient(() => undefined);
-    queryClient.setQueryData(["me"], {
-      id: "user_1",
-      email: "analyst@example.test",
-      displayName: "Alice Analyst",
-      roles: ["ANALYST"],
-    });
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>,
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(await screen.findByText("Sign out failed")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/cases");
+    expect(queryClient.getQueryData(["me"])).toEqual(user);
+  });
+
+  it("reaches the login screen when logout answers 204", async () => {
+    const { router, queryClient } = renderSignOut(
+      () => new Response(null, { status: 204 }),
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/login");
+    });
+    expect(queryClient.getQueryData(["me"])).toBeUndefined();
+  });
+
+  it("treats a 401 from logout as a successful sign out", async () => {
+    const { router, queryClient } = renderSignOut(signedOut);
+
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
 
     await waitFor(() => {

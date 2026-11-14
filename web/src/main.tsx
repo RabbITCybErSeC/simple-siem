@@ -13,7 +13,7 @@ import "./index.css";
 const nonce = document.querySelector<HTMLMetaElement>(
   'meta[property="csp-nonce"]',
 )?.nonce;
-if (nonce && nonce !== "SIMPLE_SIEM_CSP_NONCE") {
+if (nonce) {
   setNonce(nonce);
 }
 

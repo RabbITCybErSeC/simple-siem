@@ -52,6 +52,43 @@ test("runs a theme command and returns focus to the skip link", async ({
   await expect(skipLink).toBeFocused();
 });
 
+test("Go to Cases leaves focus on the Cases heading", async ({ page, api }) => {
+  api.signIn();
+  await page.goto("/nope");
+  await expect(
+    page.getByRole("heading", { name: "Page not found" }),
+  ).toBeVisible();
+
+  await page.keyboard.press("Tab");
+  await expect(
+    page.getByRole("link", { name: "Skip to content" }),
+  ).toBeFocused();
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("cases");
+  await page.keyboard.press("Enter");
+
+  const heading = page.getByRole("heading", { name: "Cases" });
+  await expect(heading).toBeVisible();
+  await expect(heading).toBeFocused();
+});
+
+test("Keyboard shortcuts leaves focus inside the shortcuts dialog", async ({
+  page,
+  api,
+}) => {
+  api.signIn();
+  await page.goto("/cases");
+  await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
+
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("keyboard");
+  await page.keyboard.press("Enter");
+
+  const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(":focus")).toHaveCount(1);
+});
+
 test("Escape closes the palette opened from the header and returns focus", async ({
   page,
   api,

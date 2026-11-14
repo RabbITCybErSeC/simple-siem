@@ -5,6 +5,7 @@ export interface ShellCommand {
   label: string;
   group: "Navigation" | "Theme" | "Account" | "Help";
   keywords: string[];
+  movesFocus: boolean;
   run: () => void;
 }
 

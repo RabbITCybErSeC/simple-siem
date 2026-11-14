@@ -30,7 +30,10 @@ export function createQueryClient(onUnauthorized: () => void): QueryClient {
   return new QueryClient({
     queryCache: new QueryCache({
       onError: (error, query) => {
-        if (!ignoresUnauthorized(query.meta)) {
+        const isFirstLoad =
+          query.state.data === undefined &&
+          ignoresUnauthorized(query.meta);
+        if (!isFirstLoad) {
           handleError(error);
         }
       },
@@ -64,6 +67,7 @@ export function useCurrentUser() {
     queryKey: ME_QUERY_KEY,
     queryFn: () => get<CurrentUser>("/me"),
     meta: { ignoreUnauthorized: true },
+    staleTime: 30_000,
   });
 }
 
@@ -83,15 +87,47 @@ export function useSignIn() {
 export function useSignOut() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const finish = () => {
+    queryClient.clear();
+    void navigate("/login");
+  };
 
   return useMutation({
     mutationFn: () => post<void>("/auth/logout"),
     meta: { ignoreUnauthorized: true },
-    onSettled: () => {
-      queryClient.clear();
-      void navigate("/login");
+    onSuccess: finish,
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 401) {
+        finish();
+      }
     },
   });
+}
+
+export type SessionView = "loading" | "login" | "offline" | "ready";
+
+export function sessionView(
+  data: CurrentUser | undefined,
+  error: Error | null,
+  isPending: boolean,
+): SessionView {
+  if (isPending) {
+    return "loading";
+  }
+
+  if (!data && error instanceof ApiError && error.status === 401) {
+    return "login";
+  }
+
+  if (data) {
+    return "ready";
+  }
+
+  if (error) {
+    return "offline";
+  }
+
+  return "ready";
 }
 
 export function RequireSession() {
@@ -107,19 +143,12 @@ export function RequireSession() {
       return;
     }
     previousLocationKey.current = location.key;
-    if (!data) {
-      return;
-    }
+    void queryClient.invalidateQueries({ queryKey: ME_QUERY_KEY });
+  }, [location.key, queryClient]);
 
-    void queryClient
-      .fetchQuery({
-        queryKey: ["me", "revalidation"],
-        queryFn: () => get<CurrentUser>("/me"),
-      })
-      .catch(() => undefined);
-  }, [data, location.key, queryClient]);
+  const view = sessionView(data, error, isPending);
 
-  if (isPending) {
+  if (view === "loading") {
     return (
       <main className="flex min-h-svh items-center justify-center bg-background p-6 text-foreground">
         <p aria-busy="true" className="text-muted-foreground">
@@ -129,7 +158,7 @@ export function RequireSession() {
     );
   }
 
-  if (error instanceof ApiError && error.status === 401) {
+  if (view === "login") {
     return (
       <Navigate
         to={loginPath(location.pathname + location.search)}
@@ -138,7 +167,7 @@ export function RequireSession() {
     );
   }
 
-  if (error) {
+  if (view === "offline") {
     return (
       <main className="flex min-h-svh items-center justify-center bg-background p-6 text-foreground">
         <section className="w-full max-w-sm rounded-xl border border-border bg-card p-8 text-card-foreground shadow-sm">

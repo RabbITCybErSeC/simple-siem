@@ -1,8 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   Command,
-  CommandDialog,
   CommandEmpty,
   CommandGroup,
   CommandInput,
@@ -10,18 +9,25 @@ import {
   CommandList,
 } from "../../components/ui/command";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "../../components/ui/dialog";
+import {
   applyTheme,
   readThemePreference,
   writeThemePreference,
 } from "../../theme/theme";
 import type { ThemePreference } from "../../theme/theme";
-import { useSignOut } from "../auth/session";
 import type { ShellCommand } from "./types";
 
 export interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onShowShortcuts: () => void;
+  onSignOut: () => void;
 }
 
 const GROUP_ORDER: ShellCommand["group"][] = [
@@ -35,10 +41,12 @@ export function CommandPalette({
   open,
   onOpenChange,
   onShowShortcuts,
+  onSignOut,
 }: CommandPaletteProps) {
   const navigate = useNavigate();
-  const signOut = useSignOut();
   const [theme, setTheme] = useState(readThemePreference);
+  const opener = useRef<HTMLElement | null>(null);
+  const commandMovesFocus = useRef(false);
 
   const chooseTheme = (preference: ThemePreference) => {
     writeThemePreference(preference);
@@ -52,6 +60,7 @@ export function CommandPalette({
       label: "Go to Cases",
       group: "Navigation",
       keywords: ["queue", "case"],
+      movesFocus: true,
       run: () => {
         void navigate("/cases");
       },
@@ -62,59 +71,86 @@ export function CommandPalette({
       label: "Sign out",
       group: "Account",
       keywords: ["logout", "exit"],
-      run: () => signOut.mutate(),
+      movesFocus: true,
+      run: onSignOut,
     },
     {
       id: "keyboard-shortcuts",
       label: "Keyboard shortcuts",
       group: "Help",
       keywords: ["help", "keys"],
+      movesFocus: true,
       run: onShowShortcuts,
     },
   ];
 
   const runCommand = (command: ShellCommand) => {
+    commandMovesFocus.current = command.movesFocus;
     onOpenChange(false);
     command.run();
   };
 
-  return (
-    <CommandDialog
-      open={open}
-      onOpenChange={onOpenChange}
-      title="Command palette"
-      description="Search for and run a console command."
-    >
-      <Command>
-        <CommandInput placeholder="Type a command…" />
-        <CommandList>
-          <CommandEmpty>No results.</CommandEmpty>
-          {GROUP_ORDER.map((group) => {
-            const groupCommands = commands.filter(
-              (command) => command.group === group,
-            );
-            if (groupCommands.length === 0) {
-              return null;
-            }
+  const handleOpenAutoFocus = () => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement ? active : null;
+  };
 
-            return (
-              <CommandGroup key={group} heading={group}>
-                {groupCommands.map((command) => (
-                  <CommandItem
-                    key={command.id}
-                    value={command.label}
-                    keywords={command.keywords}
-                    onSelect={() => runCommand(command)}
-                  >
-                    {command.label}
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            );
-          })}
-        </CommandList>
-      </Command>
-    </CommandDialog>
+  const handleCloseAutoFocus = (event: Event) => {
+    event.preventDefault();
+
+    const target = opener.current;
+    opener.current = null;
+    if (!commandMovesFocus.current) {
+      target?.focus();
+    }
+    commandMovesFocus.current = false;
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogHeader className="sr-only">
+        <DialogTitle>Command palette</DialogTitle>
+        <DialogDescription>
+          Search for and run a console command.
+        </DialogDescription>
+      </DialogHeader>
+      <DialogContent
+        className="top-1/3 translate-y-0 overflow-hidden rounded-xl! p-0"
+        showCloseButton={false}
+        onOpenAutoFocus={handleOpenAutoFocus}
+        onCloseAutoFocus={handleCloseAutoFocus}
+      >
+        <Command>
+          <CommandInput placeholder="Type a command…" />
+          <CommandList>
+            <CommandEmpty>No results.</CommandEmpty>
+            {GROUP_ORDER.map((group) => {
+              const groupCommands = commands.filter(
+                (command) => command.group === group,
+              );
+              if (groupCommands.length === 0) {
+                return null;
+              }
+
+              return (
+                <CommandGroup key={group} heading={group}>
+                  {groupCommands.map((command) => (
+                    <CommandItem
+                      key={command.id}
+                      value={command.label}
+                      keywords={command.keywords}
+                      onSelect={() => runCommand(command)}
+                    >
+                      {command.label}
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              );
+            })}
+          </CommandList>
+        </Command>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -132,6 +168,7 @@ function themeCommands(
         : `Theme: ${capitalize(preference)}`,
     group: "Theme",
     keywords: ["appearance", "color", "colour", preference],
+    movesFocus: false,
     run: () => chooseTheme(preference),
   }));
 }

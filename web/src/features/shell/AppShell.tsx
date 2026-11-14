@@ -1,15 +1,19 @@
 import { Inbox } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
+import { ApiError } from "../../api/client";
 import { Button } from "../../components/ui/button";
 import { Kbd } from "../../components/ui/kbd";
-import { useCurrentUser } from "../auth/session";
+import { useCurrentUser, useSignOut } from "../auth/session";
 import { CommandPalette } from "./CommandPalette";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { shortcutFor } from "./shortcuts";
 import type { NavigationItem } from "./types";
 
 const SIDEBAR_STORAGE_KEY = "simple-siem.sidebar";
+const PALETTE_HINT = /Mac|iPhone|iPad/.test(navigator.userAgent)
+  ? "⌘K"
+  : "Ctrl K";
 
 const navigationItems: NavigationItem[] = [
   { label: "Cases", path: "/cases", icon: Inbox },
@@ -18,11 +22,11 @@ const navigationItems: NavigationItem[] = [
 export function AppShell() {
   const location = useLocation();
   const { data: user } = useCurrentUser();
+  const signOut = useSignOut();
   const [collapsed, setCollapsed] = useState(readCollapsedSidebar);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
-  const paletteTrigger = useRef<HTMLElement | null>(null);
   const previousLocationKey = useRef(location.key);
 
   useEffect(() => {
@@ -33,30 +37,12 @@ export function AppShell() {
     mainRef.current?.querySelector<HTMLElement>("h1")?.focus();
   }, [location.key]);
 
-  const openPalette = useCallback(() => {
-    const active = document.activeElement;
-    paletteTrigger.current = active instanceof HTMLElement ? active : null;
-    setPaletteOpen(true);
-  }, []);
-
-  const changePaletteOpen = useCallback((open: boolean) => {
-    setPaletteOpen(open);
-    if (open) {
-      return;
-    }
-
-    const trigger = paletteTrigger.current;
-    paletteTrigger.current = null;
-    if (trigger) {
-      window.requestAnimationFrame(() => trigger.focus());
-    }
-  }, []);
-
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const shortcut = shortcutFor(
         event,
         paletteOpen || shortcutsOpen,
+        shortcutsOpen,
       );
 
       if (shortcut === undefined) {
@@ -65,11 +51,7 @@ export function AppShell() {
 
       event.preventDefault();
       if (shortcut === "palette") {
-        if (paletteOpen) {
-          changePaletteOpen(false);
-        } else {
-          openPalette();
-        }
+        setPaletteOpen(!paletteOpen);
       } else {
         setShortcutsOpen(true);
       }
@@ -77,12 +59,11 @@ export function AppShell() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    changePaletteOpen,
-    openPalette,
-    paletteOpen,
-    shortcutsOpen,
-  ]);
+  }, [paletteOpen, shortcutsOpen]);
+
+  const signOutFailed =
+    signOut.isError &&
+    !(signOut.error instanceof ApiError && signOut.error.status === 401);
 
   const toggleSidebar = () => {
     const next = !collapsed;
@@ -157,13 +138,21 @@ export function AppShell() {
               variant="outline"
               className="w-full max-w-sm justify-start gap-2"
               aria-keyshortcuts="Control+K Meta+K"
-              onClick={openPalette}
+              onClick={() => setPaletteOpen(true)}
             >
               <span className="text-foreground">
                 Search or run a command…
               </span>
-              <Kbd className="ml-auto">⌘K</Kbd>
+              <Kbd className="ml-auto">{PALETTE_HINT}</Kbd>
             </Button>
+            {signOutFailed && (
+              <div
+                role="alert"
+                className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1 text-sm text-foreground"
+              >
+                Sign out failed. Try again.
+              </div>
+            )}
             <span className="ml-auto text-sm text-muted-foreground">
               {user?.displayName}
             </span>
@@ -180,8 +169,9 @@ export function AppShell() {
       </div>
       <CommandPalette
         open={paletteOpen}
-        onOpenChange={changePaletteOpen}
+        onOpenChange={setPaletteOpen}
         onShowShortcuts={() => setShortcutsOpen(true)}
+        onSignOut={() => signOut.mutate()}
       />
       <ShortcutsDialog
         open={shortcutsOpen}

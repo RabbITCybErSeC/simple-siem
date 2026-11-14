@@ -135,3 +135,21 @@ test("signs out from the command palette", async ({ page, api }) => {
     page.getByRole("heading", { name: "Sign in to Simple SIEM" }),
   ).toBeVisible();
 });
+
+test("keeps the shell and alerts when sign out fails", async ({ page, api }) => {
+  api.signIn();
+  api.failLogout();
+  await page.goto("/cases");
+  const heading = page.getByRole("heading", { name: "Cases" });
+  await expect(heading).toBeVisible();
+
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("sign out");
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("alert")).toHaveText(
+    "Sign out failed. Try again.",
+  );
+  await expect(page).toHaveURL(/\/cases$/);
+  await expect(heading).toBeVisible();
+});

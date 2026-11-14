@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { Navigate, useNavigate, useSearchParams } from "react-router";
+import { Navigate, useSearchParams } from "react-router";
 import { z } from "zod";
 import { ApiError } from "../../api/client";
 import { Button } from "../../components/ui/button";
@@ -23,7 +23,6 @@ type LoginValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
   const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
   const currentUser = useCurrentUser();
   const signIn = useSignIn();
   const [serverMessage, setServerMessage] = useState<string | null>(null);
@@ -49,7 +48,6 @@ export function LoginPage() {
     setServerMessage(null);
     try {
       await signIn.mutateAsync(values);
-      void navigate(safeNextPath(next), { replace: true });
     } catch (error) {
       setServerMessage(loginErrorMessage(error));
       form.resetField("password");

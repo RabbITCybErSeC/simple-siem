@@ -1,31 +1,11 @@
 // shortcut: network fixtures for /auth and /me, use the real backend when simple-siem-8jx is on main.
 import type { Page, Request, Route } from "@playwright/test";
-
-type Role = "ANALYST";
-
-type User = {
-  id: string;
-  email: string;
-  displayName: string;
-  status: "ACTIVE";
-  roles: Role[];
-  createdAt: string;
-  updatedAt: string;
-  version: number;
-};
-
-type LoginRequest = {
-  email: string;
-  password: string;
-};
-
-type ErrorEnvelope = {
-  error: {
-    code: string;
-    message: string;
-    details: Record<string, never>;
-  };
-};
+import type {
+  ErrorEnvelope,
+  LoginRequest,
+  LoginResponse,
+  User,
+} from "../../src/api/types.ts";
 
 const KNOWN_EMAIL = "analyst@example.test";
 const KNOWN_PASSWORD = "correct horse battery staple";
@@ -74,6 +54,7 @@ export class FixtureApi {
   private signedIn = false;
   private expired = false;
   private loginRateLimited = false;
+  private logoutFails = false;
 
   readonly requests: string[] = [];
   readonly violations: string[] = [];
@@ -98,6 +79,10 @@ export class FixtureApi {
     this.loginRateLimited = true;
   }
 
+  failLogout(): void {
+    this.logoutFails = true;
+  }
+
   private async handle(route: Route): Promise<void> {
     const request = route.request();
     const method = request.method();
@@ -117,6 +102,14 @@ export class FixtureApi {
       return;
     }
     if (method === "POST" && path === "/api/v1/auth/logout") {
+      if (this.logoutFails) {
+        await this.respondJson(
+          route,
+          500,
+          errorEnvelope("INTERNAL_ERROR", "Internal error"),
+        );
+        return;
+      }
       this.signedIn = false;
       await route.fulfill({ status: 204 });
       return;
@@ -182,7 +175,7 @@ export class FixtureApi {
       credentials.password === KNOWN_PASSWORD
     ) {
       this.signedIn = true;
-      await this.respondJson(route, 200, {
+      const response: LoginResponse = {
         expiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
         user: {
           id: KNOWN_USER.id,
@@ -190,7 +183,8 @@ export class FixtureApi {
           displayName: KNOWN_USER.displayName,
           roles: KNOWN_USER.roles,
         },
-      });
+      };
+      await this.respondJson(route, 200, response);
       return;
     }
 

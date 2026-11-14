@@ -18,11 +18,16 @@ type FetchFunction = (
   init?: RequestInit,
 ) => Promise<Response>;
 
-function stubSignedIn(): void {
+function stubSignedIn(
+  logout: () => Response = () => new Response(null, { status: 204 }),
+): void {
   vi.stubGlobal(
     "fetch",
     vi.fn<FetchFunction>(async (input) => {
       const path = new URL(input.toString(), "http://localhost").pathname;
+      if (path === "/api/v1/auth/logout") {
+        return logout();
+      }
       if (path !== "/api/v1/me") {
         throw new Error(`unexpected request ${path}`);
       }
@@ -39,8 +44,11 @@ function stubSignedIn(): void {
   );
 }
 
-function renderShell(initialPath = "/cases") {
-  stubSignedIn();
+function renderShell(
+  initialPath = "/cases",
+  logout?: () => Response,
+) {
+  stubSignedIn(logout);
   const router = createMemoryRouter(routes, { initialEntries: [initialPath] });
   const queryClient = createQueryClient(() => undefined);
 
@@ -113,6 +121,18 @@ describe("shortcutFor", () => {
     const event = keydown({ key: "K", metaKey: true });
 
     expect(shortcutFor(event, false)).toBe("palette");
+  });
+
+  it("still toggles the palette while the palette is open", () => {
+    const event = keydown({ key: "k", ctrlKey: true });
+
+    expect(shortcutFor(event, true, false)).toBe("palette");
+  });
+
+  it("ignores Ctrl+K while the shortcuts dialog is open", () => {
+    const event = keydown({ key: "k", ctrlKey: true });
+
+    expect(shortcutFor(event, true, true)).toBeUndefined();
   });
 
   it("opens help with a question mark outside a text field", () => {
@@ -277,5 +297,50 @@ describe("CommandPalette and shortcuts", () => {
     expect(screen.getByText("Show keyboard shortcuts")).toBeInTheDocument();
     expect(screen.getByText("Ctrl")).toBeInTheDocument();
     expect(screen.getByText("⌘")).toBeInTheDocument();
+  });
+
+  it("does not stack the palette on the shortcuts dialog", async () => {
+    renderShell();
+    await screen.findByRole("heading", { name: "Cases" });
+    fireEvent.keyDown(document.body, { key: "?" });
+    const dialog = await screen.findByRole("dialog", {
+      name: "Keyboard shortcuts",
+    });
+
+    fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+
+    expect(
+      screen.queryByPlaceholderText("Type a command…"),
+    ).not.toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it("reports a failed sign out in the header and stays on Cases", async () => {
+    const router = renderShell(
+      "/cases",
+      () =>
+        new Response(
+          JSON.stringify({
+            error: { code: "INTERNAL_ERROR", message: "boom" },
+          }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+    );
+    await screen.findByRole("heading", { name: "Cases" });
+    fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("Type a command…");
+    fireEvent.change(input, { target: { value: "sign out" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Sign out failed. Try again.",
+    );
+    expect(router.state.location.pathname).toBe("/cases");
+    expect(
+      screen.getByRole("heading", { name: "Cases" }),
+    ).toBeInTheDocument();
   });
 });

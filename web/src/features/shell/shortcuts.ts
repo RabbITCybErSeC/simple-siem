@@ -9,9 +9,10 @@ export const shellShortcuts: Shortcut[] = [
 export function shortcutFor(
   event: KeyboardEvent,
   dialogOpen: boolean,
+  shortcutsOpen = false,
 ): "palette" | "help" | undefined {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-    return "palette";
+    return shortcutsOpen ? undefined : "palette";
   }
 
   if (
