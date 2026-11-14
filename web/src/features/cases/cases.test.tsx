@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -522,7 +523,52 @@ describe("Cases page", () => {
       expect(listCalls).toBeGreaterThanOrEqual(3);
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(within(table).getByText("Brute force → success")).toBeInTheDocument();
+    const restored = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    expect(
+      within(restored).getByText("Brute force → success"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not reset twice for the same failing cursor", async () => {
+    let listCalls = 0;
+    renderCases("/cases", {
+      list: (url) => {
+        listCalls += 1;
+        if (url.searchParams.get("cursor") === "expired") {
+          return jsonResponse(
+            {
+              error: {
+                code: "VALIDATION_ERROR",
+                message: "Invalid cursor",
+                details: {},
+              },
+            },
+            400,
+          );
+        }
+        return jsonResponse(listResponse([OPEN_CASES[0]], "expired"));
+      },
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => {
+      expect(listCalls).toBe(3);
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "The queue could not be loaded with these filters.",
+    );
+    expect(listCalls).toBe(4);
   });
 
   it("sorts by oldest waiting first and replaces the URL entry", async () => {
@@ -822,6 +868,156 @@ describe("auto-refresh", () => {
     await waitFor(() => {
       expect(listRequests().length).toBeGreaterThan(before);
     });
+  });
+
+  it("ignores a tick that resolves after the view changed", async () => {
+    let releaseLatest: ((response: Response) => void) | undefined;
+    let openListCalls = 0;
+    const { router } = renderCases(REFRESH_PATH, {
+      list: (url) => {
+        openListCalls += 1;
+        if (url.searchParams.get("status") === "OPEN" && openListCalls > 1) {
+          return new Promise<Response>((resolve) => {
+            releaseLatest = resolve;
+          });
+        }
+        return jsonResponse(listResponse(OPEN_CASES));
+      },
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await waitFor(() => expect(releaseLatest).toBeDefined());
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^Closed/ }));
+    await waitFor(() => {
+      expect(
+        new URLSearchParams(router.state.location.search).get("tab"),
+      ).toBe("closed");
+    });
+
+    await act(async () => {
+      releaseLatest?.(
+        jsonResponse(
+          listResponse([
+            caseSummary({
+              id: "case_330",
+              caseNumber: 330,
+              title: "Stale arrival",
+            }),
+            ...OPEN_CASES,
+          ]),
+        ),
+      );
+    });
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("does not announce changes when the first page never loaded", async () => {
+    let listCalls = 0;
+    renderCases(REFRESH_PATH, {
+      list: () => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return jsonResponse(
+            {
+              error: {
+                code: "INTERNAL_ERROR",
+                message: "boom",
+                details: {},
+              },
+            },
+            503,
+          );
+        }
+        return jsonResponse(
+          listResponse([
+            caseSummary({
+              id: "case_331",
+              caseNumber: 331,
+              title: "Arrival",
+            }),
+            ...OPEN_CASES,
+          ]),
+        );
+      },
+    });
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("keeps loaded pages and the active row when Show applies", async () => {
+    const firstPage = [
+      caseSummary({
+        id: "case_320",
+        caseNumber: 320,
+        title: "First page case",
+      }),
+    ];
+    const secondPage = [
+      caseSummary({
+        id: "case_310",
+        caseNumber: 310,
+        title: "Second page case",
+      }),
+      caseSummary({
+        id: "case_309",
+        caseNumber: 309,
+        title: "Another page case",
+      }),
+    ];
+    let latestFirstPage = firstPage;
+
+    renderCases(REFRESH_PATH, {
+      list: (url) =>
+        jsonResponse(
+          url.searchParams.get("cursor") === "second"
+            ? listResponse(secondPage)
+            : listResponse(latestFirstPage, "second"),
+        ),
+    });
+
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("First page case");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await within(table).findByText("Second page case");
+
+    const active = caseRow(table, 310);
+    active.focus();
+    expect(active).toHaveFocus();
+
+    latestFirstPage = [
+      caseSummary({
+        id: "case_330",
+        caseNumber: 330,
+        title: "New arrival",
+      }),
+      ...firstPage,
+    ];
+    await vi.advanceTimersByTimeAsync(30_000);
+    const banner = await screen.findByRole("status");
+    expect(banner).toHaveTextContent("1 new or updated case");
+
+    fireEvent.click(within(banner).getByRole("button", { name: "Show" }));
+
+    expect(await within(table).findByText("New arrival")).toBeInTheDocument();
+    expect(
+      within(table).getByText("Second page case"),
+    ).toBeInTheDocument();
+    expect(caseRow(table, 310)).toHaveAttribute("tabindex", "0");
+    expect(caseRow(table, 310)).toHaveFocus();
   });
 
   it("does not refresh when the interval is off", async () => {

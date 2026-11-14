@@ -1,20 +1,16 @@
-export type TimeZoneSetting = "local" | "utc";
+import type { TimeZoneSetting } from "../shell/types";
+import type { TimeRange } from "./types";
 
-export interface TimeRange {
-  from: string;
-  to: string;
-}
-
-interface OffsetExpression {
+export interface OffsetExpression {
   count: number;
   unit: TimeUnit;
 }
 
-type TimeUnit = "m" | "h" | "d" | "w";
+export type TimeUnit = "m" | "h" | "d" | "w";
 
 type ExactVariant = "label" | "timestamp";
 
-const UNIT_MILLISECONDS: Record<TimeUnit, number> = {
+export const UNIT_MILLISECONDS: Record<TimeUnit, number> = {
   m: 60_000,
   h: 3_600_000,
   d: 86_400_000,
@@ -123,10 +119,11 @@ export function rangeLabel(
     return `Last ${offset.count} ${unitName(offset.unit, offset.count)}`;
   }
   if (range.from === "now/d" && range.to === "now") {
-    return "Today";
+    // now/d is anchored in UTC, so local labels say so.
+    return timeZone === "local" ? "Today (UTC)" : "Today";
   }
   if (range.from === "now/w" && range.to === "now") {
-    return "This week";
+    return timeZone === "local" ? "This week (UTC)" : "This week";
   }
 
   const label = `${labelEnd(range.from, timeZone)} → ${labelEnd(range.to, timeZone)}`;
@@ -199,7 +196,7 @@ function createFormat(
   });
 }
 
-function parseOffset(value: string): OffsetExpression | undefined {
+export function parseOffset(value: string): OffsetExpression | undefined {
   const match = OFFSET_PATTERN.exec(value);
   if (!match) {
     return undefined;
@@ -244,7 +241,7 @@ function startOfUtcWeek(now: Date): Date {
   );
 }
 
-function toSecondIso(date: Date): string {
+export function toSecondIso(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 

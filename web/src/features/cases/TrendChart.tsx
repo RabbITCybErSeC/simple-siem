@@ -8,7 +8,14 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "../../components/ui/chart";
-import { formatExact, type TimeRange, type TimeZoneSetting } from "./timeRange";
+import type { TimeZoneSetting } from "../shell/types";
+import {
+  formatExact,
+  toSecondIso,
+  UNIT_MILLISECONDS,
+  type TimeUnit,
+} from "./timeRange";
+import type { TimeRange } from "./types";
 import type { CaseHistogram } from "./types";
 
 export interface TrendChartProps {
@@ -38,14 +45,6 @@ const chartConfig = {
 } satisfies ChartConfig;
 
 const severityOrder = ["HIGH", "MEDIUM", "LOW"];
-
-const DAY_MILLISECONDS = 86_400_000;
-const UNIT_MILLISECONDS: Record<string, number> = {
-  m: 60_000,
-  h: 3_600_000,
-  d: DAY_MILLISECONDS,
-  w: 7 * DAY_MILLISECONDS,
-};
 
 const tickFormats: Record<TimeZoneSetting, Intl.DateTimeFormat> = {
   local: new Intl.DateTimeFormat("en-US", {
@@ -106,8 +105,8 @@ export function zoomRange(
   }
 
   return {
-    from: toSecondIso(startMilliseconds),
-    to: toSecondIso(endMilliseconds),
+    from: toSecondIso(new Date(startMilliseconds)),
+    to: toSecondIso(new Date(endMilliseconds)),
   };
 }
 
@@ -305,7 +304,7 @@ function bucketTick(
 
   const format =
     intervalMilliseconds !== undefined &&
-    intervalMilliseconds < DAY_MILLISECONDS
+    intervalMilliseconds < UNIT_MILLISECONDS.d
       ? tickFormats[timeZone]
       : dateTickFormats[timeZone];
   return format.format(date);
@@ -317,11 +316,5 @@ function parseInterval(interval: string | undefined): number | undefined {
     return undefined;
   }
 
-  return Number(match[1]) * UNIT_MILLISECONDS[match[2]];
-}
-
-function toSecondIso(milliseconds: number): string {
-  return new Date(milliseconds)
-    .toISOString()
-    .replace(/\.\d{3}Z$/, "Z");
+  return Number(match[1]) * UNIT_MILLISECONDS[match[2] as TimeUnit];
 }

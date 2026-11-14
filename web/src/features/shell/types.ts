@@ -1,5 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 
+export type TimeZoneSetting = "local" | "utc";
+
 export interface ShellCommand {
   id: string;
   label: string;

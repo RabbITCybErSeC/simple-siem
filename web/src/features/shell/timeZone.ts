@@ -1,9 +1,10 @@
 import { useSyncExternalStore } from "react";
-import type { TimeZoneSetting } from "../cases/timeRange";
+import type { TimeZoneSetting } from "./types";
 
 const STORAGE_KEY = "simple-siem.time-zone";
 const subscribers = new Set<() => void>();
 let current: TimeZoneSetting | undefined;
+let listening = false;
 
 export function readTimeZone(): TimeZoneSetting {
   try {
@@ -22,9 +23,7 @@ export function writeTimeZone(setting: TimeZoneSetting): void {
   } catch {
     // Storage can be unavailable; the setting still applies for this page.
   }
-  for (const notify of subscribers) {
-    notify();
-  }
+  notifySubscribers();
 }
 
 export function useTimeZone(): TimeZoneSetting {
@@ -32,10 +31,28 @@ export function useTimeZone(): TimeZoneSetting {
 }
 
 function subscribe(notify: () => void): () => void {
+  if (!listening) {
+    window.addEventListener("storage", handleStorage);
+    listening = true;
+  }
   subscribers.add(notify);
   return () => {
     subscribers.delete(notify);
   };
+}
+
+function handleStorage(event: StorageEvent): void {
+  if (event.key !== STORAGE_KEY && event.key !== null) {
+    return;
+  }
+  current = readTimeZone();
+  notifySubscribers();
+}
+
+function notifySubscribers(): void {
+  for (const notify of subscribers) {
+    notify();
+  }
 }
 
 function getSnapshot(): TimeZoneSetting {

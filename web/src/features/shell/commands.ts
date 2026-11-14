@@ -1,12 +1,7 @@
-import {
-  caseQueueSearch,
-  parseCaseQueueState,
-  type CaseScope,
-  type CaseTab,
-} from "../cases/urlState";
-import type { TimeZoneSetting } from "../cases/timeRange";
+import type { CaseScope, CaseTab } from "../cases/types";
+import { caseQueueSearch, parseCaseQueueState } from "../cases/urlState";
 import type { ThemePreference } from "../../theme/theme";
-import type { ShellCommand } from "./types";
+import type { ShellCommand, TimeZoneSetting } from "./types";
 
 export interface ShellCommandContext {
   pathname: string;

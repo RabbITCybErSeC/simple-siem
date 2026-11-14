@@ -7,8 +7,8 @@ import {
   listParams,
   parseCaseQueueState,
   refreshMilliseconds,
-  type CaseQueueState,
 } from "./urlState";
+import type { CaseQueueState } from "./types";
 
 function parseState(
   values: string | Record<string, string>,
@@ -30,14 +30,17 @@ describe("parseCaseQueueState", () => {
 
   it("round-trips every parameter", () => {
     const search =
-      "?tab=closed&scope=all&from=now-7d&to=2026-11-07T10:00:00Z&field=closedAt&sort=createdAt:asc&refresh=30s";
+      "?tab=closed&scope=all&from=2026-11-01T10:00:00Z&to=2026-11-07T10:00:00Z&field=closedAt&sort=createdAt:asc&refresh=30s";
 
     const state = parseState(search);
 
     expect(state).toEqual({
       tab: "closed",
       scope: "all",
-      range: { from: "now-7d", to: "2026-11-07T10:00:00Z" },
+      range: {
+        from: "2026-11-01T10:00:00Z",
+        to: "2026-11-07T10:00:00Z",
+      },
       field: "closedAt",
       sort: "createdAt:asc",
       refresh: "30s",
@@ -84,6 +87,19 @@ describe("parseCaseQueueState", () => {
     expect(parseState({ tab: "", scope: "" })).toEqual(
       defaultCaseQueueState,
     );
+  });
+
+  it("uses the default range when the end is not after the start", () => {
+    expect(parseState({ tab: "closed", from: "now", to: "now-1h" })).toEqual(
+      { ...defaultCaseQueueState, tab: "closed" },
+    );
+    expect(
+      parseState({
+        tab: "all",
+        from: "2026-11-09T12:00:00Z",
+        to: "2026-11-09T12:00:00Z",
+      }),
+    ).toEqual({ ...defaultCaseQueueState, tab: "all" });
   });
 });
 

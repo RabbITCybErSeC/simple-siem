@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TimeRangePicker } from "./TimeRangePicker";
-import type { TimeRange } from "./timeRange";
+import type { TimeRange } from "./types";
 
 const RANGE: TimeRange = { from: "now-24h", to: "now" };
 

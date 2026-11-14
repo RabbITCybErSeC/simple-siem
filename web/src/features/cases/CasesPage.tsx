@@ -21,23 +21,27 @@ import { CaseTable, isTextEntryTarget } from "./CaseTable";
 import { TimeRangePicker } from "./TimeRangePicker";
 import { TrendChart } from "./TrendChart";
 import {
-  caseListQueryKey,
   countNewOrUpdated,
   fetchLatestFirstPage,
   useCaseCounts,
   useCaseHistogram,
   useCaseList,
 } from "./queries";
-import type { CaseCounts, CaseSummary } from "./types";
+import type {
+  CaseCounts,
+  CaseQueueState,
+  CaseScope,
+  CaseSort,
+  CaseSummary,
+  CaseTab,
+  RefreshInterval,
+} from "./types";
 import {
   caseQueueSearch,
+  listParams,
   parseCaseQueueState,
   refreshMilliseconds,
-  type CaseQueueState,
-  type CaseScope,
-  type CaseSort,
-  type CaseTab,
-  type RefreshInterval,
+  usesTimeRange,
 } from "./urlState";
 
 const TAB_OPTIONS: { value: CaseTab; label: string }[] = [
@@ -83,12 +87,12 @@ export function CasesPage() {
   const timeZone = useTimeZone();
   const [pendingChanges, setPendingChanges] = useState(0);
   const stateRef = useRef(state);
-  const firstPageRef = useRef<CaseSummary[]>([]);
+  const firstPageRef = useRef<CaseSummary[] | undefined>(undefined);
   const restoreFocus = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
-    firstPageRef.current = listQuery.data?.pages[0]?.data ?? [];
+    firstPageRef.current = listQuery.data?.pages[0]?.data;
   });
 
   const updateState = (
@@ -116,9 +120,19 @@ export function CasesPage() {
       }
 
       const current = stateRef.current;
+      const parameters = listParams(current).toString();
+      // Without a loaded first page there is no snapshot to compare against.
       const snapshot = firstPageRef.current;
+      if (snapshot === undefined) {
+        return;
+      }
+
       try {
         const latest = await fetchLatestFirstPage(queryClient, current);
+        // The analyst may have changed the view while the page was in flight.
+        if (listParams(stateRef.current).toString() !== parameters) {
+          return;
+        }
         setPendingChanges(countNewOrUpdated(snapshot, latest.data));
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ["cases", "counts"] }),
@@ -153,25 +167,20 @@ export function CasesPage() {
   }, [listQuery.data]);
 
   const showPendingChanges = async () => {
-    const current = stateRef.current;
-    try {
-      const latest = await fetchLatestFirstPage(queryClient, current);
-      queryClient.setQueryData(caseListQueryKey(current), {
-        pages: [latest],
-        pageParams: [null],
-      });
-      restoreFocus.current = true;
-      setPendingChanges(0);
-    } catch {
+    // Refetching the infinite query keeps every loaded page; replacing it
+    // with the latest first page would drop the pages Load more added.
+    restoreFocus.current = true;
+    const result = await listQuery.refetch();
+    if (result.isError) {
       // Keep the banner so the analyst can try again.
+      restoreFocus.current = false;
+      return;
     }
+    setPendingChanges(0);
   };
 
   const cases = listQuery.data?.pages.flatMap((page) => page.data) ?? [];
-  const listError =
-    listQuery.isError && listQuery.data === undefined
-      ? listQuery.error
-      : null;
+  const listError = listQuery.isError ? listQuery.error : null;
   const counts = countsQuery.data;
 
   return (
@@ -333,7 +342,7 @@ export function CasesPage() {
             error={listError}
             onRetry={() => void listQuery.refetch()}
           />
-          {listQuery.hasNextPage && (
+          {listQuery.hasNextPage && listError === null && (
             <Button
               type="button"
               variant="outline"
@@ -384,10 +393,6 @@ function refreshPaused(): boolean {
       '[role="dialog"], [data-radix-popper-content-wrapper]',
     ) !== null
   );
-}
-
-function usesTimeRange(tab: CaseTab): boolean {
-  return tab === "closed" || tab === "all";
 }
 
 function sameSearch(left: string, right: string): boolean {

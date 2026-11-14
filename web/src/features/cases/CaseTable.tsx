@@ -12,13 +12,15 @@ import {
   TableHeader,
   TableRow,
 } from "../../components/ui/table";
-import {
-  formatExact,
-  relativeTime,
-  type TimeZoneSetting,
-} from "./timeRange";
-import type { CaseOutcome, CaseSeverity, CaseSummary } from "./types";
-import type { CaseScope, CaseTab } from "./urlState";
+import type { TimeZoneSetting } from "../shell/types";
+import { formatExact, relativeTime } from "./timeRange";
+import type {
+  CaseOutcome,
+  CaseScope,
+  CaseSeverity,
+  CaseSummary,
+  CaseTab,
+} from "./types";
 
 export interface CaseTableProps {
   cases: CaseSummary[];

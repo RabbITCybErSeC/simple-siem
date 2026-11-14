@@ -1,24 +1,10 @@
 import { z } from "zod";
-import { isTimeExpression, type TimeRange } from "./timeRange";
-
-export type CaseTab = "open" | "in_progress" | "closed" | "all";
-export type CaseScope = "mine" | "unassigned" | "all";
-export type TimeField =
-  | "lastEventAt"
-  | "firstEventAt"
-  | "createdAt"
-  | "closedAt";
-export type CaseSort = "lastEventAt:desc" | "createdAt:asc";
-export type RefreshInterval = "off" | "10s" | "30s" | "1m" | "5m";
-
-export interface CaseQueueState {
-  tab: CaseTab;
-  scope: CaseScope;
-  range: TimeRange;
-  field: TimeField;
-  sort: CaseSort;
-  refresh: RefreshInterval;
-}
+import { isTimeExpression, resolveRange } from "./timeRange";
+import type {
+  CaseQueueState,
+  CaseTab,
+  RefreshInterval,
+} from "./types";
 
 export const defaultCaseQueueState: CaseQueueState = {
   tab: "open",
@@ -55,13 +41,20 @@ const tabStatuses: Record<CaseTab, string | undefined> = {
 };
 
 export function parseCaseQueueState(params: URLSearchParams): CaseQueueState {
+  const range = {
+    from: fromSchema.parse(params.get("from")),
+    to: toSchema.parse(params.get("to")),
+  };
+
   return {
     tab: tabSchema.parse(params.get("tab")),
     scope: scopeSchema.parse(params.get("scope")),
-    range: {
-      from: fromSchema.parse(params.get("from")),
-      to: toSchema.parse(params.get("to")),
-    },
+    // Both ends fall back together: a URL whose end is not after its start
+    // would otherwise ask the API for a reversed range.
+    range:
+      resolveRange(range, new Date()) === undefined
+        ? defaultCaseQueueState.range
+        : range,
     field: fieldSchema.parse(params.get("field")),
     sort: sortSchema.parse(params.get("sort")),
     refresh: refreshSchema.parse(params.get("refresh")),
@@ -156,6 +149,6 @@ function addTimeRange(parameters: URLSearchParams, state: CaseQueueState) {
   parameters.set("timeField", state.field);
 }
 
-function usesTimeRange(tab: CaseTab): boolean {
+export function usesTimeRange(tab: CaseTab): boolean {
   return tab === "closed" || tab === "all";
 }

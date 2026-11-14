@@ -15,17 +15,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
+import type { TimeZoneSetting } from "../shell/types";
 import {
   commonlyUsedRanges,
   isTimeExpression,
+  parseOffset,
   rangeLabel,
   resolveRange,
   resolveTime,
   stepRange,
-  type TimeRange,
-  type TimeZoneSetting,
+  type TimeUnit,
 } from "./timeRange";
-import type { TimeField } from "./urlState";
+import type { TimeField, TimeRange } from "./types";
 
 export interface TimeRangePickerProps {
   range: TimeRange;
@@ -35,14 +36,13 @@ export interface TimeRangePickerProps {
   onFieldChange: (field: TimeField) => void;
 }
 
-type RangeUnit = "m" | "h" | "d" | "w";
 type EndpointMode = "absolute" | "relative" | "now";
 
 interface EndpointDraft {
   mode: EndpointMode;
   absolute: string;
   count: string;
-  unit: RangeUnit;
+  unit: TimeUnit;
   /** The expression the draft came from; kept until the user edits it. */
   expression: string;
   edited: boolean;
@@ -58,7 +58,7 @@ const RECENT_RANGE_LIMIT = 5;
 const RANGE_ERROR_ID = "time-range-error";
 const INVALID_RANGE_MESSAGE = "The end must be after the start.";
 
-const UNIT_OPTIONS: { value: RangeUnit; label: string }[] = [
+const UNIT_OPTIONS: { value: TimeUnit; label: string }[] = [
   { value: "m", label: "minutes" },
   { value: "h", label: "hours" },
   { value: "d", label: "days" },
@@ -77,8 +77,6 @@ const MODE_LABELS: Record<EndpointMode, string> = {
   relative: "Relative",
   now: "Now",
 };
-
-const OFFSET_PATTERN = /^now-([1-9]\d*)([mhdw])$/;
 
 export function TimeRangePicker({
   range,
@@ -153,7 +151,7 @@ export function TimeRangePicker({
               <Select
                 value={quick.unit}
                 onValueChange={(value) =>
-                  setQuick({ ...quick, unit: value as RangeUnit })
+                  setQuick({ ...quick, unit: value as TimeUnit })
                 }
               >
                 <SelectTrigger size="sm" aria-label="Unit">
@@ -386,7 +384,7 @@ function EndpointEditor({
           />
           <Select
             value={draft.unit}
-            onValueChange={(value) => edit({ unit: value as RangeUnit })}
+            onValueChange={(value) => edit({ unit: value as TimeUnit })}
           >
             <SelectTrigger size="sm" aria-label={`${label} unit`}>
               <SelectValue />
@@ -459,22 +457,12 @@ function endpointExpression(
 
 function quickDraftFromRange(range: TimeRange): {
   count: string;
-  unit: RangeUnit;
+  unit: TimeUnit;
 } {
   const offset = range.to === "now" ? parseOffset(range.from) : undefined;
   return offset === undefined
     ? { count: "24", unit: "h" }
     : { count: String(offset.count), unit: offset.unit };
-}
-
-function parseOffset(
-  expression: string,
-): { count: number; unit: RangeUnit } | undefined {
-  const match = OFFSET_PATTERN.exec(expression);
-  if (!match) {
-    return undefined;
-  }
-  return { count: Number(match[1]), unit: match[2] as RangeUnit };
 }
 
 function expressionToInputValue(

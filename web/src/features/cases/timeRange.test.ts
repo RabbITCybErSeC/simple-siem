@@ -152,7 +152,10 @@ describe("stepRange", () => {
 
 describe("rangeLabel", () => {
   it.each(commonlyUsedRanges)("labels $label", ({ label, range }) => {
-    expect(rangeLabel(range, "local")).toBe(label);
+    const utcAnchored = label === "Today" || label === "This week";
+    expect(rangeLabel(range, "local")).toBe(
+      utcAnchored ? `${label} (UTC)` : label,
+    );
     expect(rangeLabel(range, "utc")).toBe(label);
   });
 
@@ -162,8 +165,14 @@ describe("rangeLabel", () => {
     );
   });
 
-  it("labels today and this week", () => {
-    expect(rangeLabel({ from: "now/d", to: "now" }, "local")).toBe("Today");
+  it("marks UTC-anchored today and this week in local time", () => {
+    expect(rangeLabel({ from: "now/d", to: "now" }, "local")).toBe(
+      "Today (UTC)",
+    );
+    expect(rangeLabel({ from: "now/w", to: "now" }, "local")).toBe(
+      "This week (UTC)",
+    );
+    expect(rangeLabel({ from: "now/d", to: "now" }, "utc")).toBe("Today");
     expect(rangeLabel({ from: "now/w", to: "now" }, "utc")).toBe(
       "This week",
     );

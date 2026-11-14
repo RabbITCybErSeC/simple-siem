@@ -10,33 +10,33 @@ import type {
   CaseCounts,
   CaseHistogram,
   CaseListResponse,
+  CaseQueueState,
   CaseSummary,
 } from "./types";
-import {
-  countsParams,
-  histogramParams,
-  listParams,
-  type CaseQueueState,
-} from "./urlState";
+import { countsParams, histogramParams, listParams } from "./urlState";
 
 const CASES_PATH = "/cases";
-
-export function caseListQueryKey(state: CaseQueueState) {
-  return listQueryKey(listParams(state).toString());
-}
 
 export function useCaseList(state: CaseQueueState) {
   const queryClient = useQueryClient();
   const parameters = listParams(state).toString();
   // A cursor can expire between Load more clicks; the contract says the
-  // client then restarts from the first page (contract A6).
-  const usedCursor = useRef(false);
+  // client then restarts from the first page (contract A6). Reset once per
+  // failing cursor: a second failure must surface instead of looping.
+  const attemptedCursor = useRef<string | null>(null);
+  const resetFailure = useRef<string | null>(null);
 
   const query = useInfiniteQuery({
     queryKey: listQueryKey(parameters),
     queryFn: async ({ pageParam }) => {
-      usedCursor.current = pageParam !== null;
-      return get<CaseListResponse>(casePagePath(parameters, pageParam));
+      attemptedCursor.current = pageParam;
+      const page = await get<CaseListResponse>(
+        casePagePath(parameters, pageParam),
+      );
+      if (pageParam !== null) {
+        resetFailure.current = null;
+      }
+      return page;
     },
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) =>
@@ -44,9 +44,15 @@ export function useCaseList(state: CaseQueueState) {
   });
 
   useEffect(() => {
-    if (!usedCursor.current || !isCursorError(query.error)) {
+    const cursor = attemptedCursor.current;
+    if (cursor === null || !isCursorError(query.error)) {
       return;
     }
+    const failure = `${parameters}|${cursor}`;
+    if (resetFailure.current === failure) {
+      return;
+    }
+    resetFailure.current = failure;
     void queryClient.resetQueries({
       queryKey: listQueryKey(parameters),
       exact: true,
