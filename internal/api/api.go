@@ -47,7 +47,10 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	v1 := router.Group("/api/v1")
 	v1.GET("/auth/providers", authentication.providers)
 	v1.POST("/auth/login", authentication.login)
-	authenticated := v1.Group("", requireSession(dependencies.Auth, dependencies.Logger, policy))
+	authenticated := v1.Group("",
+		requireSameOriginForCookie(policy, dependencies.Logger),
+		requireSession(dependencies.Auth, dependencies.Logger, policy),
+	)
 	authenticated.POST("/auth/logout", authentication.logout)
 	authenticated.GET("/me", authentication.me)
 

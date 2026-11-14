@@ -72,14 +72,9 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	SessionToken string    `json:"sessionToken"`
+	SessionToken string    `json:"sessionToken,omitempty"`
 	ExpiresAt    string    `json:"expiresAt"`
 	User         loginUser `json:"user"`
-}
-
-type browserLoginResponse struct {
-	ExpiresAt string    `json:"expiresAt"`
-	User      loginUser `json:"user"`
 }
 
 type loginUser struct {

@@ -29,9 +29,10 @@ const (
 	authTestPublicURL = "https://siem.example.com"
 	authTestOrigin    = "https://siem.example.com"
 
-	testSessionCookieName  = "simple_siem_session"
-	testBrowserHeader      = "X-Requested-With"
-	testBrowserHeaderValue = "simple-siem"
+	testSessionCookieName       = "simple_siem_session"
+	testSecureSessionCookieName = "__Host-simple_siem_session"
+	testBrowserHeader           = "X-Requested-With"
+	testBrowserHeaderValue      = "simple-siem"
 
 	authenticationRequiredBody = `{"error":{"code":"AUTHENTICATION_REQUIRED","message":"authentication required"}}`
 	forbiddenBody              = `{"error":{"code":"FORBIDDEN","message":"cross-site request rejected"}}`
@@ -456,8 +457,14 @@ func TestBrowserLoginSetsSessionCookie(t *testing.T) {
 	if cookie.SameSite != http.SameSiteStrictMode {
 		t.Errorf("session cookie SameSite = %v, want Strict", cookie.SameSite)
 	}
-	if cookie.Path != "/api" {
-		t.Errorf("session cookie Path = %q, want /api", cookie.Path)
+	if cookie.Name != testSecureSessionCookieName {
+		t.Errorf("session cookie name = %q, want %q", cookie.Name, testSecureSessionCookieName)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("session cookie Path = %q, want /", cookie.Path)
+	}
+	if cookie.Domain != "" {
+		t.Errorf("session cookie Domain = %q, want none", cookie.Domain)
 	}
 	if cookie.MaxAge <= 0 || time.Duration(cookie.MaxAge)*time.Second > 12*time.Hour+time.Second {
 		t.Errorf("session cookie MaxAge = %d, want more than 0 and at most 12h", cookie.MaxAge)
@@ -547,7 +554,7 @@ func TestCookieSessionAuthenticates(t *testing.T) {
 	createTestAdmin(t, service)
 
 	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
-	response := get(router, "/api/v1/me", "", map[string]string{"Cookie": cookie.String()})
+	response := get(router, "/api/v1/me", "", map[string]string{"Cookie": cookieHeader(cookie)})
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/me with the cookie = %d, want 200: %s", response.Code, response.Body)
 	}
@@ -568,7 +575,7 @@ func TestCookieAndBearerAreRejected(t *testing.T) {
 	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
 	token := loginToken(t, router)
 	response := get(router, "/api/v1/me", "", map[string]string{
-		"Cookie":        cookie.String(),
+		"Cookie":        cookieHeader(cookie),
 		"Authorization": "Bearer " + token,
 	})
 
@@ -579,13 +586,27 @@ func TestCookieAndBearerAreRejected(t *testing.T) {
 	}
 }
 
+func TestBasicAuthorizationHeaderIsIgnoredWithCookie(t *testing.T) {
+	router, service, _, _ := newAuthRouter(t)
+	createTestAdmin(t, service)
+	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
+
+	response := get(router, "/api/v1/me", "", map[string]string{
+		"Cookie":        cookieHeader(cookie),
+		"Authorization": "Basic dXNlcjpwYXNz",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/me with cookie and Basic header = %d, want 200: %s", response.Code, response.Body)
+	}
+}
+
 func TestDeadCookieIsCleared(t *testing.T) {
 	router, service, _, _ := newAuthRouter(t)
 	createTestAdmin(t, service)
 
 	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
 	logoutResponse := send(router, http.MethodPost, "/api/v1/auth/logout", "", map[string]string{
-		"Cookie":          cookie.String(),
+		"Cookie":          cookieHeader(cookie),
 		testBrowserHeader: testBrowserHeaderValue,
 		"Origin":          authTestOrigin,
 	})
@@ -593,7 +614,7 @@ func TestDeadCookieIsCleared(t *testing.T) {
 		t.Fatalf("logout over the cookie = %d, want 204: %s", logoutResponse.Code, logoutResponse.Body)
 	}
 
-	response := get(router, "/api/v1/me", "", map[string]string{"Cookie": cookie.String()})
+	response := get(router, "/api/v1/me", "", map[string]string{"Cookie": cookieHeader(cookie)})
 	assertAuthenticationRequired(t, response)
 	cleared := responseCookie(t, response)
 	if cleared.MaxAge >= 0 {
@@ -636,7 +657,7 @@ func TestCookieStateChangeRequiresBrowserHeaders(t *testing.T) {
 			createTestAdmin(t, service)
 			cookie := responseCookie(t, browserLogin(router, authTestOrigin))
 
-			headers := map[string]string{"Cookie": cookie.String()}
+			headers := map[string]string{"Cookie": cookieHeader(cookie)}
 			for name, value := range test.headers {
 				headers[name] = value
 			}
@@ -649,11 +670,103 @@ func TestCookieStateChangeRequiresBrowserHeaders(t *testing.T) {
 				t.Errorf("body = %s, want %s", got, forbiddenBody)
 			}
 
-			stillAuthenticated := get(router, "/api/v1/me", "", map[string]string{"Cookie": cookie.String()})
+			stillAuthenticated := get(router, "/api/v1/me", "", map[string]string{"Cookie": cookieHeader(cookie)})
 			if stillAuthenticated.Code != http.StatusOK {
 				t.Errorf("GET /api/v1/me after the rejected logout = %d, want 200", stillAuthenticated.Code)
 			}
 		})
+	}
+}
+
+func TestBrowserCookieNameAndPathFollowMode(t *testing.T) {
+	tests := []struct {
+		name        string
+		publicURL   string
+		origin      string
+		cookieName  string
+		development bool
+	}{
+		{
+			name:       "secure https",
+			publicURL:  authTestPublicURL,
+			origin:     authTestOrigin,
+			cookieName: "__Host-simple_siem_session",
+		},
+		{
+			name:        "development over http",
+			publicURL:   "http://localhost:8080",
+			origin:      "http://localhost:8080",
+			cookieName:  testSessionCookieName,
+			development: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router, service, _, _ := newAuthRouterFor(t, test.publicURL, test.development)
+			createTestAdmin(t, service)
+
+			response := browserLogin(router, test.origin)
+			if response.Code != http.StatusOK {
+				t.Fatalf("browser login = %d, want 200: %s", response.Code, response.Body)
+			}
+			cookie := responseCookie(t, response)
+			if cookie.Name != test.cookieName {
+				t.Errorf("session cookie name = %q, want %q", cookie.Name, test.cookieName)
+			}
+			if cookie.Path != "/" {
+				t.Errorf("session cookie Path = %q, want /", cookie.Path)
+			}
+			if cookie.Domain != "" {
+				t.Errorf("session cookie Domain = %q, want none", cookie.Domain)
+			}
+		})
+	}
+}
+
+func TestShadowingSessionCookieIsRejected(t *testing.T) {
+	router, service, _, _ := newAuthRouter(t)
+	createTestAdmin(t, service)
+	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
+
+	response := get(router, "/api/v1/me", "", map[string]string{
+		"Cookie": cookie.Name + "=" + cookie.Value + "; " + cookie.Name + "=shadow",
+	})
+	assertAuthenticationRequired(t, response)
+	cleared := responseCookie(t, response)
+	if cleared.Name != cookie.Name {
+		t.Errorf("clearing cookie name = %q, want %q", cleared.Name, cookie.Name)
+	}
+	if cleared.MaxAge >= 0 {
+		t.Errorf("clearing cookie MaxAge = %d, want negative", cleared.MaxAge)
+	}
+}
+
+func TestRejectedCookieRequestTouchesNoSession(t *testing.T) {
+	router, service, database, _ := newAuthRouter(t)
+	createTestAdmin(t, service)
+	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
+
+	if err := database.Exec(`
+		UPDATE sessions
+		SET last_used_at = now() - interval '2 minutes',
+		    idle_expires_at = now() + interval '10 minutes'`).Error; err != nil {
+		t.Fatalf("age the session: %v", err)
+	}
+	before := readSessionTimes(t, database)
+
+	response := send(router, http.MethodPost, "/api/v1/auth/logout", "", map[string]string{
+		"Cookie":          cookieHeader(cookie),
+		testBrowserHeader: testBrowserHeaderValue,
+		"Origin":          "https://evil.example",
+	})
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cookie POST from a foreign origin = %d, want 403: %s", response.Code, response.Body)
+	}
+
+	after := readSessionTimes(t, database)
+	if !after.LastUsedAt.Equal(before.LastUsedAt) || !after.IdleExpiresAt.Equal(before.IdleExpiresAt) {
+		t.Errorf("rejected request changed the session: before %+v, after %+v", before, after)
 	}
 }
 
@@ -673,6 +786,19 @@ func TestBrowserLoginRejectsForeignOrigin(t *testing.T) {
 	}
 	if attempts := countLoginAttempts(t, database); attempts != 0 {
 		t.Errorf("refused browser login recorded %d attempts, want 0", attempts)
+	}
+}
+
+func TestBrowserLoginNormalizesUppercasePublicURL(t *testing.T) {
+	router, service, _, _ := newAuthRouterFor(t, "https://SIEM.example.com", false)
+	createTestAdmin(t, service)
+
+	response := browserLogin(router, "https://siem.example.com")
+	if response.Code != http.StatusOK {
+		t.Fatalf("browser login with an uppercase public URL = %d, want 200: %s", response.Code, response.Body)
+	}
+	if cookie := responseCookie(t, response); !cookie.Secure {
+		t.Error("session cookie is not Secure for an https public URL")
 	}
 }
 
@@ -716,7 +842,7 @@ func TestLogoutOverCookieClearsCookie(t *testing.T) {
 	cookie := responseCookie(t, browserLogin(router, authTestOrigin))
 
 	response := send(router, http.MethodPost, "/api/v1/auth/logout", "", map[string]string{
-		"Cookie":          cookie.String(),
+		"Cookie":          cookieHeader(cookie),
 		testBrowserHeader: testBrowserHeaderValue,
 		"Origin":          authTestOrigin,
 	})
@@ -727,12 +853,12 @@ func TestLogoutOverCookieClearsCookie(t *testing.T) {
 	if cleared.MaxAge >= 0 {
 		t.Errorf("clearing cookie MaxAge = %d, want negative", cleared.MaxAge)
 	}
-	if !cleared.HttpOnly || !cleared.Secure || cleared.Path != "/api" ||
+	if !cleared.HttpOnly || !cleared.Secure || cleared.Path != "/" ||
 		cleared.SameSite != http.SameSiteStrictMode {
 		t.Errorf("clearing cookie attributes = %+v, want the session attributes", cleared)
 	}
 
-	assertAuthenticationRequired(t, get(router, "/api/v1/me", "", map[string]string{"Cookie": cookie.String()}))
+	assertAuthenticationRequired(t, get(router, "/api/v1/me", "", map[string]string{"Cookie": cookieHeader(cookie)}))
 }
 
 func TestBrowserSessionNeverLogsCookieValue(t *testing.T) {
@@ -743,9 +869,9 @@ func TestBrowserSessionNeverLogsCookieValue(t *testing.T) {
 		t.Fatal("session cookie has no value")
 	}
 
-	get(router, "/api/v1/me", "", map[string]string{"Cookie": cookie.String()})
+	get(router, "/api/v1/me", "", map[string]string{"Cookie": cookieHeader(cookie)})
 	send(router, http.MethodPost, "/api/v1/auth/logout", "", map[string]string{
-		"Cookie":          cookie.String(),
+		"Cookie":          cookieHeader(cookie),
 		testBrowserHeader: testBrowserHeaderValue,
 		"Origin":          authTestOrigin,
 	})
@@ -854,6 +980,20 @@ func bearer(token string) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + token}
 }
 
+type sessionTimes struct {
+	LastUsedAt    time.Time `gorm:"column:last_used_at"`
+	IdleExpiresAt time.Time `gorm:"column:idle_expires_at"`
+}
+
+func readSessionTimes(t *testing.T, database *gorm.DB) sessionTimes {
+	t.Helper()
+	var times sessionTimes
+	if err := database.Raw("SELECT last_used_at, idle_expires_at FROM sessions").Scan(&times).Error; err != nil {
+		t.Fatalf("read session times: %v", err)
+	}
+	return times
+}
+
 func countLoginAttempts(t *testing.T, database *gorm.DB) int64 {
 	t.Helper()
 	var count int64
@@ -904,13 +1044,17 @@ func browserLogin(router http.Handler, origin string) *httptest.ResponseRecorder
 func responseCookie(t *testing.T, response *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	for _, cookie := range response.Result().Cookies() {
-		if cookie.Name == testSessionCookieName {
+		if cookie.Name == testSessionCookieName || cookie.Name == testSecureSessionCookieName {
 			return cookie
 		}
 	}
-	t.Fatalf("response has no %s cookie; Set-Cookie = %v",
-		testSessionCookieName, response.Header().Values("Set-Cookie"))
+	t.Fatalf("response has no session cookie; Set-Cookie = %v",
+		response.Header().Values("Set-Cookie"))
 	return nil
+}
+
+func cookieHeader(cookie *http.Cookie) string {
+	return cookie.Name + "=" + cookie.Value
 }
 
 func assertAuthenticationRequired(t *testing.T, response *httptest.ResponseRecorder) {
