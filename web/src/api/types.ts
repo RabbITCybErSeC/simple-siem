@@ -54,6 +54,7 @@ export interface User {
   email: string;
   displayName: string;
   status: UserStatus;
+  onCall: boolean;
   roles: Role[];
   createdAt: string;
   updatedAt: string;
