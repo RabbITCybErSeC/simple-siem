@@ -139,6 +139,10 @@ func (authentication authHandler) login(c *gin.Context) {
 func (authentication authHandler) logout(c *gin.Context) {
 	actor := c.MustGet(ActorKey).(auth.Actor)
 	if err := authentication.service.Logout(c.Request.Context(), actor, clientInfo(c)); err != nil {
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			abortAuthenticationRequired(c)
+			return
+		}
 		internalError(c, authentication.logger, err)
 		return
 	}

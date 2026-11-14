@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +14,7 @@ import (
 	"net/mail"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
@@ -24,6 +27,7 @@ const (
 	addressFailureLimit   = 30
 	maxLoginPasswordRunes = 128
 	maxUserAgentBytes     = 512
+	maxDisplayNameRunes   = 200
 )
 
 type failureWindow struct {
@@ -42,14 +46,21 @@ type sessionActor struct {
 	UserID      string `gorm:"column:user_id"`
 	Email       string `gorm:"column:email"`
 	DisplayName string `gorm:"column:display_name"`
+	SlideDue    bool   `gorm:"column:slide_due"`
+	RoleNames   string `gorm:"column:role_names"`
+}
+
+type localAccount struct {
+	Identity
+	Status string `gorm:"column:status"`
 }
 
 // Service owns logins, sessions, and local accounts.
 type Service struct {
-	database  *gorm.DB
-	settings  Settings
-	providers []IdentityProvider
-	logger    *slog.Logger
+	database *gorm.DB
+	settings Settings
+	provider IdentityProvider
+	logger   *slog.Logger
 }
 
 // LocalProvider checks a password against a local identity.
@@ -71,10 +82,10 @@ func NewService(ctx context.Context, database *gorm.DB, settings Settings, logge
 
 	provider := &LocalProvider{database: database, dummyHash: dummyHash, logger: logger}
 	return &Service{
-		database:  database,
-		settings:  settings,
-		providers: []IdentityProvider{provider},
-		logger:    logger,
+		database: database,
+		settings: settings,
+		provider: provider,
+		logger:   logger,
 	}, nil
 }
 
@@ -98,8 +109,21 @@ func NormalizeEmail(email string) (string, error) {
 	return normalized, nil
 }
 
+// NormalizeDisplayName trims spaces and accepts 1 to 200 runes without
+// control characters.
+func NormalizeDisplayName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if count := utf8.RuneCountInString(trimmed); count < 1 || count > maxDisplayNameRunes {
+		return "", ErrInvalidDisplayName
+	}
+	if strings.ContainsFunc(trimmed, unicode.IsControl) {
+		return "", ErrInvalidDisplayName
+	}
+	return trimmed, nil
+}
+
 func (service *Service) Providers() []string {
-	return []string{ProviderLocal}
+	return []string{service.provider.Name()}
 }
 
 func (service *Service) CountUsers(ctx context.Context) (int64, error) {
@@ -115,6 +139,10 @@ func (service *Service) CreateAdmin(ctx context.Context, email, displayName, pas
 	if err != nil {
 		return User{}, err
 	}
+	normalizedDisplayName, err := NormalizeDisplayName(displayName)
+	if err != nil {
+		return User{}, err
+	}
 	if err := ValidatePassword(password); err != nil {
 		return User{}, err
 	}
@@ -125,7 +153,7 @@ func (service *Service) CreateAdmin(ctx context.Context, email, displayName, pas
 
 	var user User
 	err = service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		user = User{Email: normalizedEmail, DisplayName: displayName, Status: StatusActive}
+		user = User{Email: normalizedEmail, DisplayName: normalizedDisplayName, Status: StatusActive}
 		if err := tx.Create(&user).Error; err != nil {
 			if errors.Is(err, gorm.ErrDuplicatedKey) {
 				return ErrUserExists
@@ -236,7 +264,7 @@ func (service *Service) ResetPassword(ctx context.Context, email, password strin
 	return sessionsRevoked, nil
 }
 
-func (service *Service) Login(ctx context.Context, request LoginRequest, client ClientInfo) (LoginResult, error) {
+func (service *Service) Login(ctx context.Context, request LoginRequest, client ClientInfo) (result LoginResult, err error) {
 	client.IP = normalizedIP(client.IP)
 	normalizedEmail, normalizeError := NormalizeEmail(request.Email)
 	failureEmail := ""
@@ -248,38 +276,87 @@ func (service *Service) Login(ctx context.Context, request LoginRequest, client 
 	}
 	hashedEmail := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(request.Email))))
 
-	emailWindow, err := service.recentFailures(ctx, "email_hash = ?", hashedEmail[:])
+	// The attempt is recorded before the count so concurrent logins see each
+	// other's rows. The email lock then the address lock serializes the
+	// decision without holding anything across password hashing; the order is
+	// fixed so two logins cannot deadlock. A contended lock is the attack case,
+	// so it ends the login instead of queueing on a pooled connection.
+	var attemptID string
+	var emailWindow, addressWindow failureWindow
+	limited := false
+	lockBusy := false
+	err = service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		lockKeys := []int64{
+			loginLockKey("login-email:", hex.EncodeToString(hashedEmail[:])),
+			loginLockKey("login-ip:", client.IP.String()),
+		}
+		for _, key := range lockKeys {
+			var acquired bool
+			if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", key).Scan(&acquired).Error; err != nil {
+				return fmt.Errorf("lock login rate limit: %w", err)
+			}
+			if !acquired {
+				lockBusy = true
+				return nil
+			}
+		}
+
+		attempt := LoginAttempt{EmailHash: hashedEmail[:], ClientIP: client.IP, Succeeded: false}
+		if err := tx.Create(&attempt).Error; err != nil {
+			return fmt.Errorf("record login attempt: %w", err)
+		}
+		attemptID = attempt.ID
+
+		var err error
+		emailWindow, err = recentFailures(tx, "email_hash = ?", hashedEmail[:])
+		if err != nil {
+			return fmt.Errorf("count failed logins for the email: %w", err)
+		}
+		addressWindow, err = recentFailures(tx, "client_ip = ?", client.IP.String())
+		if err != nil {
+			return fmt.Errorf("count failed logins for the address: %w", err)
+		}
+		if emailWindow.Attempts > emailFailureLimit || addressWindow.Attempts > addressFailureLimit {
+			limited = true
+			if err := tx.Exec("DELETE FROM login_attempts WHERE id = ?", attemptID).Error; err != nil {
+				return fmt.Errorf("discard rate-limited login attempt: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return LoginResult{}, fmt.Errorf("count failed logins for the email: %w", err)
+		return LoginResult{}, err
 	}
-	addressWindow, err := service.recentFailures(ctx, "client_ip = ?", client.IP.String())
-	if err != nil {
-		return LoginResult{}, fmt.Errorf("count failed logins for the address: %w", err)
+	if lockBusy {
+		service.logRateLimited(client)
+		return LoginResult{}, RateLimitedError{RetryAfter: time.Second}
 	}
-	emailLimited := emailWindow.Attempts >= emailFailureLimit
-	addressLimited := addressWindow.Attempts >= addressFailureLimit
-	if emailLimited || addressLimited {
+	if limited {
 		retryAfter := time.Duration(0)
-		if emailLimited {
+		if emailWindow.Attempts > emailFailureLimit {
 			retryAfter = windowRetryAfter(emailWindow)
 		}
-		if addressLimited {
+		if addressWindow.Attempts > addressFailureLimit {
 			if addressRetryAfter := windowRetryAfter(addressWindow); addressRetryAfter > retryAfter {
 				retryAfter = addressRetryAfter
 			}
 		}
-		service.logger.Warn(
-			"login rate limited",
-			"request_id", client.RequestID,
-			"client_address", client.IP.String(),
-		)
+		service.logRateLimited(client)
 		return LoginResult{}, RateLimitedError{RetryAfter: retryAfter}
 	}
 
-	identity, err := service.providers[0].Authenticate(ctx, providerRequest)
+	// Only a real credential failure keeps the attempt row; every other
+	// outcome after this point is an infrastructure error, not a login result.
+	defer func() {
+		if err != nil && !errors.Is(err, ErrInvalidCredentials) {
+			service.discardLoginAttempt(ctx, attemptID)
+		}
+	}()
+
+	identity, err := service.provider.Authenticate(ctx, providerRequest)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
-			return LoginResult{}, service.recordFailedLogin(ctx, failureEmail, hashedEmail, client)
+			return LoginResult{}, service.recordFailedLogin(ctx, failureEmail, client, "invalid_credentials")
 		}
 		return LoginResult{}, fmt.Errorf("authenticate login: %w", err)
 	}
@@ -295,10 +372,20 @@ func (service *Service) Login(ctx context.Context, request LoginRequest, client 
 		return LoginResult{}, fmt.Errorf("find login user: %w", err)
 	}
 	if user.ID == "" {
-		return LoginResult{}, service.recordFailedLogin(ctx, failureEmail, hashedEmail, client)
+		return LoginResult{}, service.recordFailedLogin(ctx, failureEmail, client, "invalid_credentials")
 	}
 
-	return service.startSession(ctx, user, identity.Provider, hashedEmail, client)
+	return service.startSession(ctx, user, identity, attemptID, client)
+}
+
+// discardLoginAttempt removes the row of a login that ended in an
+// infrastructure error, using a context that survives client cancellation.
+func (service *Service) discardLoginAttempt(ctx context.Context, attemptID string) {
+	if err := service.database.WithContext(context.WithoutCancel(ctx)).Exec(
+		"DELETE FROM login_attempts WHERE id = ?", attemptID,
+	).Error; err != nil {
+		service.logger.Warn("discard login attempt failed", "attempt_id", attemptID, "error", err)
+	}
 }
 
 func (service *Service) Authenticate(ctx context.Context, token string) (Actor, error) {
@@ -308,13 +395,19 @@ func (service *Service) Authenticate(ctx context.Context, token string) (Actor, 
 	}
 	tokenHash := sha256.Sum256(rawToken)
 
+	// The roles.name check constraint keeps the comma out of every role name,
+	// so the aggregate delimiter below is unambiguous.
 	var session sessionActor
 	err = service.database.WithContext(ctx).Raw(`
-		SELECT sessions.id::text AS session_id, users.id::text AS user_id, users.email, users.display_name
+		SELECT sessions.id::text AS session_id, users.id::text AS user_id, users.email,
+		       users.display_name, sessions.last_used_at < now() - interval '1 minute' AS slide_due,
+		       COALESCE(string_agg(user_roles.role_name, ',' ORDER BY user_roles.role_name), '') AS role_names
 		FROM sessions
 		JOIN users ON users.id = sessions.user_id
+		LEFT JOIN user_roles ON user_roles.user_id = users.id
 		WHERE sessions.token_hash = ? AND sessions.idle_expires_at > now()
-		  AND sessions.absolute_expires_at > now() AND users.status = ?`,
+		  AND sessions.absolute_expires_at > now() AND users.status = ?
+		GROUP BY sessions.id, users.id`,
 		tokenHash[:], StatusActive,
 	).Scan(&session).Error
 	if err != nil {
@@ -324,20 +417,22 @@ func (service *Service) Authenticate(ctx context.Context, token string) (Actor, 
 		return Actor{}, ErrUnauthenticated
 	}
 
-	// shortcut: one write per minute per session; move to a batched touch if session writes show up in Phase 7 profiles.
-	err = service.database.WithContext(ctx).Exec(`
-		UPDATE sessions
-		SET last_used_at = now(), idle_expires_at = LEAST(now() + make_interval(secs => ?), absolute_expires_at)
-		WHERE id = ? AND last_used_at < now() - interval '1 minute'`,
-		service.settings.IdleTimeout.Seconds(), session.SessionID,
-	).Error
-	if err != nil {
-		return Actor{}, fmt.Errorf("slide session idle expiry: %w", err)
+	var roles []string
+	if session.RoleNames != "" {
+		roles = strings.Split(session.RoleNames, ",")
 	}
 
-	roles, err := loadRoles(service.database.WithContext(ctx), session.UserID)
-	if err != nil {
-		return Actor{}, err
+	// shortcut: one write per minute per session; move to a batched touch if session writes show up in Phase 7 profiles.
+	if session.SlideDue {
+		err = service.database.WithContext(ctx).Exec(`
+			UPDATE sessions
+			SET last_used_at = now(), idle_expires_at = LEAST(now() + make_interval(secs => ?), absolute_expires_at)
+			WHERE id = ? AND last_used_at < now() - interval '1 minute'`,
+			service.settings.IdleTimeout.Seconds(), session.SessionID,
+		).Error
+		if err != nil {
+			return Actor{}, fmt.Errorf("slide session idle expiry: %w", err)
+		}
 	}
 
 	return Actor{
@@ -355,12 +450,7 @@ func (service *Service) CurrentUser(ctx context.Context, actor Actor) (User, []s
 	if err != nil {
 		return User{}, nil, fmt.Errorf("load current user: %w", err)
 	}
-
-	roles, err := loadRoles(service.database.WithContext(ctx), actor.UserID)
-	if err != nil {
-		return User{}, nil, err
-	}
-	return user, roles, nil
+	return user, actor.Roles, nil
 }
 
 func (service *Service) Logout(ctx context.Context, actor Actor, client ClientInfo) error {
@@ -392,6 +482,10 @@ func (service *Service) Logout(ctx context.Context, actor Actor, client ClientIn
 	})
 }
 
+func (provider *LocalProvider) Name() string {
+	return ProviderLocal
+}
+
 func (provider *LocalProvider) Authenticate(ctx context.Context, request LoginRequest) (ExternalIdentity, error) {
 	if utf8.RuneCountInString(request.Password) > maxLoginPasswordRunes {
 		if _, err := VerifyPassword(ctx, "", provider.dummyHash); err != nil {
@@ -400,47 +494,62 @@ func (provider *LocalProvider) Authenticate(ctx context.Context, request LoginRe
 		return ExternalIdentity{}, ErrInvalidCredentials
 	}
 
-	var identity Identity
+	var account localAccount
 	normalizedEmail, normalizeError := NormalizeEmail(request.Email)
 	if normalizeError == nil {
 		err := provider.database.WithContext(ctx).Raw(`
-			SELECT user_identities.* FROM user_identities
+			SELECT user_identities.*, users.status FROM user_identities
 			JOIN users ON users.id = user_identities.user_id
 			WHERE users.email = ? AND user_identities.provider = ?`,
 			normalizedEmail, ProviderLocal,
-		).Scan(&identity).Error
+		).Scan(&account).Error
 		if err != nil {
 			return ExternalIdentity{}, fmt.Errorf("find local identity: %w", err)
 		}
 	}
 
-	if identity.ID == "" || identity.PasswordHash == nil {
+	if account.ID == "" || account.PasswordHash == nil {
 		if _, err := VerifyPassword(ctx, request.Password, provider.dummyHash); err != nil {
 			return ExternalIdentity{}, fmt.Errorf("verify dummy password: %w", err)
 		}
 		return ExternalIdentity{}, ErrInvalidCredentials
 	}
 
-	matches, err := VerifyPassword(ctx, request.Password, *identity.PasswordHash)
+	matches, err := VerifyPassword(ctx, request.Password, *account.PasswordHash)
 	if err != nil {
-		provider.logger.Warn("stored password hash is malformed", "user_id", identity.UserID, "error", err)
+		provider.logger.Warn("stored password hash is malformed", "user_id", account.UserID, "error", err)
 		return ExternalIdentity{}, fmt.Errorf("verify stored password: %w", err)
 	}
 	if !matches {
 		return ExternalIdentity{}, ErrInvalidCredentials
 	}
 
-	if needsRehash(*identity.PasswordHash) {
-		provider.rehashPassword(ctx, identity, request.Password)
+	credentialVersion := account.Version
+	if account.Status == StatusActive && needsRehash(*account.PasswordHash) {
+		rehashed, lostRace := provider.rehashPassword(ctx, account.Identity, request.Password)
+		switch {
+		case rehashed:
+			credentialVersion++
+		case lostRace:
+			reloadedVersion, err := provider.verifyReloadedIdentity(ctx, account.ID, request.Password)
+			if err != nil {
+				return ExternalIdentity{}, err
+			}
+			credentialVersion = reloadedVersion
+		}
 	}
-	return ExternalIdentity{Provider: ProviderLocal, Subject: identity.UserID}, nil
+	return ExternalIdentity{
+		Provider:          ProviderLocal,
+		Subject:           account.UserID,
+		CredentialVersion: credentialVersion,
+	}, nil
 }
 
-func (provider *LocalProvider) rehashPassword(ctx context.Context, identity Identity, password string) {
+func (provider *LocalProvider) rehashPassword(ctx context.Context, identity Identity, password string) (rehashed bool, lostRace bool) {
 	freshHash, err := HashPassword(ctx, password)
 	if err != nil {
 		provider.logger.Warn("rehash password failed", "user_id", identity.UserID, "error", err)
-		return
+		return false, false
 	}
 	result := provider.database.WithContext(ctx).
 		Model(&Identity{}).
@@ -452,14 +561,37 @@ func (provider *LocalProvider) rehashPassword(ctx context.Context, identity Iden
 		})
 	if result.Error != nil {
 		provider.logger.Warn("rehash password failed", "user_id", identity.UserID, "error", result.Error)
-		return
+		return false, false
 	}
 	if result.RowsAffected == 0 {
 		provider.logger.Warn("rehash password skipped: identity changed", "user_id", identity.UserID)
+		return false, true
 	}
+	return true, false
 }
 
-func (service *Service) recordFailedLogin(ctx context.Context, email string, hashedEmail [32]byte, client ClientInfo) error {
+// verifyReloadedIdentity checks the password against a hash reloaded after a
+// lost rehash race and returns the loaded version.
+func (provider *LocalProvider) verifyReloadedIdentity(ctx context.Context, identityID, password string) (int, error) {
+	var reloaded Identity
+	if err := provider.database.WithContext(ctx).Where("id = ?", identityID).First(&reloaded).Error; err != nil {
+		return 0, fmt.Errorf("reload local identity: %w", err)
+	}
+	if reloaded.PasswordHash == nil {
+		return 0, ErrInvalidCredentials
+	}
+	matches, err := VerifyPassword(ctx, password, *reloaded.PasswordHash)
+	if err != nil {
+		provider.logger.Warn("stored password hash is malformed", "user_id", reloaded.UserID, "error", err)
+		return 0, fmt.Errorf("verify stored password: %w", err)
+	}
+	if !matches {
+		return 0, ErrInvalidCredentials
+	}
+	return reloaded.Version, nil
+}
+
+func (service *Service) recordFailedLogin(ctx context.Context, email string, client ClientInfo, reason string) error {
 	targetID := "unknown"
 	if email != "" {
 		var user User
@@ -472,22 +604,7 @@ func (service *Service) recordFailedLogin(ctx context.Context, email string, has
 	}
 
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		attempt := LoginAttempt{EmailHash: hashedEmail[:], ClientIP: client.IP, Succeeded: false}
-		if err := tx.Create(&attempt).Error; err != nil {
-			return fmt.Errorf("record login attempt: %w", err)
-		}
-		return audit.Record(tx, audit.Event{
-			EventName:     "simple_siem.auth.login",
-			EventCategory: "AUTHENTICATION",
-			EventOutcome:  "FAILED",
-			ActorType:     "ANONYMOUS",
-			RequestID:     client.RequestID,
-			SourceIP:      client.IP,
-			TargetType:    "USER",
-			TargetID:      targetID,
-			Action:        "login",
-			Changes:       map[string]any{"reason": "invalid_credentials"},
-		})
+		return recordFailedLoginEvent(tx, targetID, client, reason)
 	})
 	if err != nil {
 		return fmt.Errorf("record failed login: %w", err)
@@ -495,7 +612,22 @@ func (service *Service) recordFailedLogin(ctx context.Context, email string, has
 	return ErrInvalidCredentials
 }
 
-func (service *Service) startSession(ctx context.Context, user User, provider string, hashedEmail [32]byte, client ClientInfo) (LoginResult, error) {
+func recordFailedLoginEvent(tx *gorm.DB, targetID string, client ClientInfo, reason string) error {
+	return audit.Record(tx, audit.Event{
+		EventName:     "simple_siem.auth.login",
+		EventCategory: "AUTHENTICATION",
+		EventOutcome:  "FAILED",
+		ActorType:     "ANONYMOUS",
+		RequestID:     client.RequestID,
+		SourceIP:      client.IP,
+		TargetType:    "USER",
+		TargetID:      targetID,
+		Action:        "login",
+		Changes:       map[string]any{"reason": reason},
+	})
+}
+
+func (service *Service) startSession(ctx context.Context, user User, identity ExternalIdentity, attemptID string, client ClientInfo) (LoginResult, error) {
 	rawToken := make([]byte, 32)
 	if _, err := rand.Read(rawToken); err != nil {
 		return LoginResult{}, fmt.Errorf("generate session token: %w", err)
@@ -505,14 +637,34 @@ func (service *Service) startSession(ctx context.Context, user User, provider st
 
 	var session createdSession
 	var roles []string
+	credentialRejected := false
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		err := tx.Raw(`
+		var lockedIdentity struct {
+			Version *int `gorm:"column:version"`
+		}
+		err := tx.Raw(
+			"SELECT version FROM user_identities WHERE provider = ? AND subject = ? FOR UPDATE",
+			identity.Provider, identity.Subject,
+		).Scan(&lockedIdentity).Error
+		if err != nil {
+			return fmt.Errorf("lock login identity: %w", err)
+		}
+		if lockedIdentity.Version == nil {
+			credentialRejected = true
+			return recordFailedLoginEvent(tx, user.ID, client, "identity_missing")
+		}
+		if *lockedIdentity.Version != identity.CredentialVersion {
+			credentialRejected = true
+			return recordFailedLoginEvent(tx, user.ID, client, "credential_changed")
+		}
+
+		err = tx.Raw(`
 			INSERT INTO sessions (user_id, token_hash, auth_provider, idle_expires_at, absolute_expires_at, client_ip, user_agent)
 			VALUES (?, ?, ?, now() + make_interval(secs => ?), now() + make_interval(secs => ?), ?, ?)
 			RETURNING id::text AS id, absolute_expires_at`,
 			user.ID,
 			tokenHash[:],
-			provider,
+			identity.Provider,
 			service.settings.IdleTimeout.Seconds(),
 			service.settings.AbsoluteLifetime.Seconds(),
 			client.IP,
@@ -522,15 +674,16 @@ func (service *Service) startSession(ctx context.Context, user User, provider st
 			return fmt.Errorf("create session: %w", err)
 		}
 
-		attempt := LoginAttempt{EmailHash: hashedEmail[:], ClientIP: client.IP, Succeeded: true}
-		if err := tx.Create(&attempt).Error; err != nil {
-			return fmt.Errorf("record login attempt: %w", err)
+		if err := tx.Exec(
+			"UPDATE login_attempts SET succeeded = true WHERE id = ?", attemptID,
+		).Error; err != nil {
+			return fmt.Errorf("mark login attempt succeeded: %w", err)
 		}
 		if err := tx.Exec("UPDATE users SET last_login_at = now() WHERE id = ?", user.ID).Error; err != nil {
 			return fmt.Errorf("update last login: %w", err)
 		}
 		if err := tx.Exec(
-			"UPDATE user_identities SET last_used_at = now() WHERE user_id = ? AND provider = ?", user.ID, provider,
+			"UPDATE user_identities SET last_used_at = now() WHERE user_id = ? AND provider = ?", user.ID, identity.Provider,
 		).Error; err != nil {
 			return fmt.Errorf("update identity last used: %w", err)
 		}
@@ -553,18 +706,21 @@ func (service *Service) startSession(ctx context.Context, user User, provider st
 			TargetType:     "USER",
 			TargetID:       user.ID,
 			Action:         "login",
-			Changes:        map[string]any{"provider": provider},
+			Changes:        map[string]any{"provider": identity.Provider},
 		})
 	})
 	if err != nil {
 		return LoginResult{}, err
 	}
+	if credentialRejected {
+		return LoginResult{}, ErrInvalidCredentials
+	}
 	return LoginResult{Token: token, ExpiresAt: session.AbsoluteExpiresAt, User: user, Roles: roles}, nil
 }
 
-func (service *Service) recentFailures(ctx context.Context, condition string, value any) (failureWindow, error) {
+func recentFailures(database *gorm.DB, condition string, value any) (failureWindow, error) {
 	var window failureWindow
-	err := service.database.WithContext(ctx).Raw(
+	err := database.Raw(
 		"SELECT count(*) AS attempts, min(created_at) AS oldest, now() AS now "+
 			"FROM login_attempts WHERE NOT succeeded AND created_at > now() - make_interval(secs => ?) AND "+condition,
 		failureWindowDuration.Seconds(), value,
@@ -573,6 +729,20 @@ func (service *Service) recentFailures(ctx context.Context, condition string, va
 		return failureWindow{}, err
 	}
 	return window, nil
+}
+
+func (service *Service) logRateLimited(client ClientInfo) {
+	service.logger.Warn(
+		"login rate limited",
+		"request_id", client.RequestID,
+		"client_address", client.IP.String(),
+	)
+}
+
+// loginLockKey derives one bigint advisory-lock key from a namespaced value.
+func loginLockKey(namespace, value string) int64 {
+	digest := sha256.Sum256([]byte(namespace + value))
+	return int64(binary.BigEndian.Uint64(digest[:8]))
 }
 
 func windowRetryAfter(window failureWindow) time.Duration {
@@ -587,6 +757,7 @@ func windowRetryAfter(window failureWindow) time.Duration {
 }
 
 func truncateUserAgent(userAgent string) string {
+	userAgent = strings.ToValidUTF8(userAgent, "")
 	if len(userAgent) <= maxUserAgentBytes {
 		return userAgent
 	}

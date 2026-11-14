@@ -26,7 +26,7 @@ CREATE TABLE user_identities (
 CREATE INDEX user_identities_user_id_idx ON user_identities (user_id);
 
 CREATE TABLE roles (
-    name text PRIMARY KEY,
+    name text PRIMARY KEY CHECK (name ~ '^[A-Z][A-Z_]*$'),
     description text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );

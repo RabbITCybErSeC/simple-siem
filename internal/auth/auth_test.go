@@ -14,6 +14,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,6 +94,73 @@ func TestNormalizeEmail(t *testing.T) {
 				t.Errorf("NormalizeEmail(%q) = %q, want %q", test.email, got, test.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeDisplayName(t *testing.T) {
+	tests := []struct {
+		name    string
+		display string
+		want    string
+		wantErr bool
+	}{
+		{"surrounding spaces", " Alice ", "Alice", false},
+		{"empty", "", "", true},
+		{"spaces only", "   ", "", true},
+		{"200 runes", strings.Repeat("é", 200), strings.Repeat("é", 200), false},
+		{"201 runes", strings.Repeat("é", 201), "", true},
+		{"tab inside", "Ali\tce", "", true},
+		{"null inside", "Ali\x00ce", "", true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := NormalizeDisplayName(test.display)
+			if test.wantErr {
+				if !errors.Is(err, ErrInvalidDisplayName) {
+					t.Fatalf("NormalizeDisplayName(%q) error = %v, want ErrInvalidDisplayName", test.display, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeDisplayName(%q) error = %v, want nil", test.display, err)
+			}
+			if got != test.want {
+				t.Errorf("NormalizeDisplayName(%q) = %q, want %q", test.display, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCreateAdminRejectsInvalidDisplayName(t *testing.T) {
+	test := newTestService(t)
+	usersBefore := countRows(t, test.database, "users")
+	eventsBefore := countRows(t, test.database, "audit_events")
+
+	_, err := test.service.CreateAdmin(
+		context.Background(), testEmail, strings.Repeat("a", 201), testPassword,
+	)
+	if !errors.Is(err, ErrInvalidDisplayName) {
+		t.Fatalf("CreateAdmin with a 201-rune display name = %v, want ErrInvalidDisplayName", err)
+	}
+	if got := countRows(t, test.database, "users"); got != usersBefore {
+		t.Errorf("users count = %d, want %d", got, usersBefore)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d, want %d", got, eventsBefore)
+	}
+}
+
+func TestRolesRejectDelimiterInName(t *testing.T) {
+	test := newTestService(t)
+	err := test.database.Exec(
+		"INSERT INTO roles (name, description) VALUES ('READ,WRITE', 'invalid role')",
+	).Error
+	if err == nil {
+		t.Fatal("inserting a role named READ,WRITE succeeded, want a check constraint violation")
+	}
+	if !strings.Contains(err.Error(), "roles_name_check") {
+		t.Errorf("inserting READ,WRITE error = %v, want the roles_name_check violation", err)
 	}
 }
 
@@ -225,6 +293,34 @@ func TestCreateAdmin(t *testing.T) {
 	}
 }
 
+func TestCreateAdminStartsVersionsAtOne(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+
+	var storedUser struct {
+		Version int `gorm:"column:version"`
+	}
+	if err := test.database.Raw("SELECT version FROM users WHERE id = ?", user.ID).Scan(&storedUser).Error; err != nil {
+		t.Fatalf("read user version: %v", err)
+	}
+	if storedUser.Version != 1 {
+		t.Errorf("user version = %d, want 1", storedUser.Version)
+	}
+
+	var storedIdentity struct {
+		Version int `gorm:"column:version"`
+	}
+	err := test.database.Raw(
+		"SELECT version FROM user_identities WHERE user_id = ? AND provider = ?", user.ID, ProviderLocal,
+	).Scan(&storedIdentity).Error
+	if err != nil {
+		t.Fatalf("read identity version: %v", err)
+	}
+	if storedIdentity.Version != 1 {
+		t.Errorf("identity version = %d, want 1", storedIdentity.Version)
+	}
+}
+
 func TestCreateAdminRejectsDuplicateEmail(t *testing.T) {
 	test := newTestService(t)
 	test.createAdmin(t, testEmail)
@@ -338,6 +434,105 @@ func TestLoginRateLimitPerAddress(t *testing.T) {
 	}
 	if got := countRows(t, test.database, "sessions"); got != 0 {
 		t.Errorf("sessions count = %d, want 0", got)
+	}
+}
+
+func TestLoginRateLimitCountsConcurrentAttempts(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+
+	const burst = 20
+	var wait sync.WaitGroup
+	results := make([]error, burst)
+	for index := range results {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, results[index] = test.service.Login(
+				context.Background(),
+				LoginRequest{Email: testEmail, Password: "the wrong password"},
+				ClientInfo{IP: net.ParseIP("192.0.2.7"), UserAgent: "test-agent", RequestID: "request-burst"},
+			)
+		}()
+	}
+	wait.Wait()
+
+	var reached, limited int
+	for _, err := range results {
+		var rateLimited RateLimitedError
+		switch {
+		case errors.Is(err, ErrInvalidCredentials):
+			reached++
+		case errors.As(err, &rateLimited):
+			limited++
+		default:
+			t.Errorf("burst login error = %v, want ErrInvalidCredentials or RateLimitedError", err)
+		}
+	}
+	if reached > emailFailureLimit {
+		t.Errorf("burst logins = %d reached the hash, want at most %d", reached, emailFailureLimit)
+	}
+
+	var failed int64
+	err := test.database.Raw(
+		"SELECT count(*) FROM login_attempts WHERE NOT succeeded AND email_hash = ?", emailHash(testEmail),
+	).Scan(&failed).Error
+	if err != nil {
+		t.Fatalf("count failed attempts: %v", err)
+	}
+	if failed != int64(reached) {
+		t.Errorf(
+			"failed attempt rows = %d, want %d (the logins that reached the hash, %d limited)",
+			failed, reached, limited,
+		)
+	}
+}
+
+func TestLoginRateLimitedWhileLockHeld(t *testing.T) {
+	tests := []struct {
+		name string
+		keys []int64
+	}{
+		{"email lock", []int64{loginLockKey("login-email:", hex.EncodeToString(emailHash(testEmail)))}},
+		{"address lock", []int64{loginLockKey("login-ip:", "192.0.2.7")}},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			test := newTestService(t)
+			test.createAdmin(t, testEmail)
+
+			var loginErr error
+			err := test.database.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+				for _, key := range testCase.keys {
+					if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", key).Error; err != nil {
+						return fmt.Errorf("hold the lock: %w", err)
+					}
+				}
+				loginContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_, loginErr = test.service.Login(
+					loginContext,
+					LoginRequest{Email: testEmail, Password: testPassword},
+					testClient(),
+				)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("hold lock transaction: %v", err)
+			}
+
+			var rateLimited RateLimitedError
+			if !errors.As(loginErr, &rateLimited) {
+				t.Fatalf("Login while the %s is held = %v, want RateLimitedError", testCase.name, loginErr)
+			}
+			if rateLimited.RetryAfter != time.Second {
+				t.Errorf("RetryAfter = %v, want 1s", rateLimited.RetryAfter)
+			}
+			if got := countRows(t, test.database, "login_attempts"); got != 0 {
+				t.Errorf("login attempts = %d, want 0", got)
+			}
+		})
 	}
 }
 
@@ -734,6 +929,9 @@ func TestResetPassword(t *testing.T) {
 	if identity.PasswordHash == nil {
 		t.Fatal("identity password hash is nil after reset")
 	}
+	if identity.Version != 2 {
+		t.Errorf("identity version after reset = %d, want 2", identity.Version)
+	}
 	if strings.Contains(*identity.PasswordHash, newPassword) {
 		t.Errorf("identity password hash contains the password: %q", *identity.PasswordHash)
 	}
@@ -890,6 +1088,9 @@ func TestLoginSuccess(t *testing.T) {
 	if user = storedUser(t, test.database, user.ID); user.LastLoginAt == nil {
 		t.Error("users.last_login_at is nil after login")
 	}
+	if user.Version != 1 {
+		t.Errorf("user version after login = %d, want 1 (last_login_at does not bump it)", user.Version)
+	}
 	var identity Identity
 	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
 		t.Fatalf("read identity: %v", err)
@@ -948,6 +1149,193 @@ func TestLoginSuccess(t *testing.T) {
 		if strings.Contains(auditText, secret) {
 			t.Errorf("audit changes contain the secret %q: %s", secret, auditText)
 		}
+	}
+}
+
+func TestLoginAcceptsInvalidUTF8UserAgent(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+
+	client := testClient()
+	client.UserAgent = "foo\xff"
+	if _, err := test.service.Login(
+		context.Background(),
+		LoginRequest{Email: testEmail, Password: testPassword},
+		client,
+	); err != nil {
+		t.Fatalf("Login with a non-UTF-8 user agent: %v", err)
+	}
+
+	session := readSessionByUser(t, test.database, testEmail)
+	if session.UserAgent != "foo" {
+		t.Errorf("session user agent = %q, want foo", session.UserAgent)
+	}
+}
+
+func TestLoginConcurrentRehashBothSucceed(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	oldHash := oldPasswordHash(t, testPassword)
+	if err := test.database.Exec(
+		"UPDATE user_identities SET password_hash = ? WHERE user_id = ?", oldHash, user.ID,
+	).Error; err != nil {
+		t.Fatalf("store old password hash: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	test.service.provider = signalingProvider{provider: test.service.provider, entered: entered, release: release}
+
+	const logins = 2
+	var wait sync.WaitGroup
+	results := make([]error, logins)
+	login := func(index int) {
+		defer wait.Done()
+		_, results[index] = test.service.Login(
+			context.Background(),
+			LoginRequest{Email: testEmail, Password: testPassword},
+			testClient(),
+		)
+	}
+
+	// Start one login at a time so the rate-limit lock never contends; both
+	// wait in the provider until both have passed it, then hash together.
+	wait.Add(1)
+	go login(0)
+	<-entered
+	wait.Add(1)
+	go login(1)
+	<-entered
+	close(release)
+	wait.Wait()
+
+	for index, err := range results {
+		if err != nil {
+			t.Fatalf("concurrent login %d with a t=1 hash = %v, want success", index+1, err)
+		}
+	}
+	if got := countRows(t, test.database, "sessions"); got != logins {
+		t.Errorf("sessions count = %d, want %d", got, logins)
+	}
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identity.PasswordHash == nil || !strings.HasPrefix(*identity.PasswordHash, "$argon2id$v=19$m=19456,t=2,p=1$") {
+		t.Errorf("stored hash after concurrent rehash = %v, want t=2 parameters", identity.PasswordHash)
+	}
+}
+
+func TestLoginRejectsIdentityDeletedBeforeSession(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	test.service.provider = fixedProvider{identity: ExternalIdentity{
+		Provider:          ProviderLocal,
+		Subject:           user.ID,
+		CredentialVersion: identity.Version,
+	}}
+
+	deleteStarted := make(chan struct{})
+	releaseDelete := make(chan struct{})
+	deleteResult := make(chan error, 1)
+	go func() {
+		deleteResult <- test.database.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("DELETE FROM user_identities WHERE id = ?", identity.ID).Error; err != nil {
+				return err
+			}
+			close(deleteStarted)
+			<-releaseDelete
+			return nil
+		})
+	}()
+	<-deleteStarted
+
+	loginResult := make(chan error, 1)
+	go func() {
+		_, err := test.service.Login(
+			context.Background(),
+			LoginRequest{Email: testEmail, Password: testPassword},
+			testClient(),
+		)
+		loginResult <- err
+	}()
+
+	waitForLoginLockWait(t, test.database)
+	close(releaseDelete)
+	if err := <-deleteResult; err != nil {
+		t.Fatalf("delete identity: %v", err)
+	}
+
+	err := <-loginResult
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login with the identity deleted before the session = %v, want ErrInvalidCredentials", err)
+	}
+	if got := countRows(t, test.database, "sessions"); got != 0 {
+		t.Errorf("sessions count = %d, want 0", got)
+	}
+	events := authLoginEvents(t, test.database, user.ID)
+	if len(events) != 1 {
+		t.Fatalf("missing identity wrote %d audit events, want 1", len(events))
+	}
+	if events[0].EventOutcome != "FAILED" {
+		t.Errorf("missing identity audit outcome = %q, want FAILED", events[0].EventOutcome)
+	}
+	changes := storedChanges(t, events[0])
+	if changes["reason"] != "identity_missing" {
+		t.Errorf("missing identity audit reason = %v, want identity_missing", changes["reason"])
+	}
+	if got := countRows(t, test.database, "login_attempts"); got != 1 {
+		t.Errorf("login attempts = %d, want 1 (the attempt row is kept)", got)
+	}
+}
+
+func waitForLoginLockWait(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int64
+		err := db.Raw(`
+			SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting).Error
+		if err != nil {
+			t.Fatalf("read postgres activity: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("login did not wait on the identity lock")
+}
+
+func TestLoginDiscardsAttemptOnProviderError(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	eventsBefore := countRows(t, test.database, "audit_events")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	test.service.provider = cancelingProvider{cancel: cancel}
+
+	_, err := test.service.Login(
+		ctx,
+		LoginRequest{Email: testEmail, Password: testPassword},
+		testClient(),
+	)
+	if err == nil || errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login with a canceled context = %v, want a non-credential error", err)
+	}
+	if got := countRows(t, test.database, "login_attempts"); got != 0 {
+		t.Errorf("login attempts = %d after a canceled login, want 0", got)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after a canceled login, want %d", got, eventsBefore)
 	}
 }
 
@@ -1010,6 +1398,45 @@ func TestLoginRejectsBadCredentials(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsCredentialVersionChange(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	test.service.provider = fixedProvider{identity: ExternalIdentity{
+		Provider:          ProviderLocal,
+		Subject:           user.ID,
+		CredentialVersion: identity.Version - 1,
+	}}
+
+	_, err := test.service.Login(
+		context.Background(),
+		LoginRequest{Email: testEmail, Password: testPassword},
+		testClient(),
+	)
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login after a credential change = %v, want ErrInvalidCredentials", err)
+	}
+	if got := countRows(t, test.database, "sessions"); got != 0 {
+		t.Errorf("sessions count = %d, want 0", got)
+	}
+
+	events := authLoginEvents(t, test.database, user.ID)
+	if len(events) != 1 {
+		t.Fatalf("credential-change login wrote %d audit events, want 1", len(events))
+	}
+	if events[0].EventOutcome != "FAILED" {
+		t.Errorf("credential-change audit outcome = %q, want FAILED", events[0].EventOutcome)
+	}
+	changes := storedChanges(t, events[0])
+	if changes["reason"] != "credential_changed" {
+		t.Errorf("credential-change audit reason = %v, want credential_changed", changes["reason"])
+	}
+}
+
 func TestLoginRejectsDisabledUser(t *testing.T) {
 	test := newTestService(t)
 	user := test.createAdmin(t, testEmail)
@@ -1055,24 +1482,41 @@ func TestLoginRejectsOverlongPassword(t *testing.T) {
 	}
 }
 
+func TestLoginDoesNotRehashDisabledUser(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	oldHash := oldPasswordHash(t, testPassword)
+	if err := test.database.Exec(
+		"UPDATE user_identities SET password_hash = ? WHERE user_id = ?", oldHash, user.ID,
+	).Error; err != nil {
+		t.Fatalf("store old password hash: %v", err)
+	}
+	if err := test.database.Exec("UPDATE users SET status = 'DISABLED' WHERE id = ?", user.ID).Error; err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+
+	if _, err := test.service.Login(
+		context.Background(),
+		LoginRequest{Email: testEmail, Password: testPassword},
+		testClient(),
+	); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login for a disabled user with a t=1 hash = %v, want ErrInvalidCredentials", err)
+	}
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identity.PasswordHash == nil || *identity.PasswordHash != oldHash {
+		t.Errorf("stored hash changed for a disabled user: %v", identity.PasswordHash)
+	}
+}
+
 func TestLoginRehashesOldHash(t *testing.T) {
 	test := newTestService(t)
 	user := test.createAdmin(t, testEmail)
 
-	salt := make([]byte, saltLength)
-	if _, err := rand.Read(salt); err != nil {
-		t.Fatalf("generate salt: %v", err)
-	}
-	key := argon2.IDKey([]byte(testPassword), salt, 1, argonMemory, argonThreads, keyLength)
-	oldHash := fmt.Sprintf(
-		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version,
-		argonMemory,
-		1,
-		argonThreads,
-		base64.RawStdEncoding.EncodeToString(salt),
-		base64.RawStdEncoding.EncodeToString(key),
-	)
+	oldHash := oldPasswordHash(t, testPassword)
 	if err := test.database.Exec(
 		"UPDATE user_identities SET password_hash = ? WHERE user_id = ?", oldHash, user.ID,
 	).Error; err != nil {
@@ -1094,6 +1538,27 @@ func TestLoginRehashesOldHash(t *testing.T) {
 	if identity.PasswordHash == nil || !strings.HasPrefix(*identity.PasswordHash, "$argon2id$v=19$m=19456,t=2,p=1$") {
 		t.Errorf("stored hash after rehash = %v, want t=2 parameters", identity.PasswordHash)
 	}
+	if identity.Version != 2 {
+		t.Errorf("identity version after rehash = %d, want 2", identity.Version)
+	}
+}
+
+func oldPasswordHash(t *testing.T, password string) string {
+	t.Helper()
+	salt := make([]byte, saltLength)
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatalf("generate salt: %v", err)
+	}
+	key := argon2.IDKey([]byte(password), salt, 1, argonMemory, argonThreads, keyLength)
+	return fmt.Sprintf(
+		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version,
+		argonMemory,
+		1,
+		argonThreads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	)
 }
 
 func authLoginEvents(t *testing.T, db *gorm.DB, targetID string) []storedAuditEvent {
@@ -1147,6 +1612,47 @@ func TestTruncateUserAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+type cancelingProvider struct {
+	cancel context.CancelFunc
+}
+
+func (provider cancelingProvider) Name() string {
+	return ProviderLocal
+}
+
+func (provider cancelingProvider) Authenticate(context.Context, LoginRequest) (ExternalIdentity, error) {
+	provider.cancel()
+	return ExternalIdentity{}, context.Canceled
+}
+
+type signalingProvider struct {
+	provider IdentityProvider
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (provider signalingProvider) Name() string {
+	return provider.provider.Name()
+}
+
+func (provider signalingProvider) Authenticate(ctx context.Context, request LoginRequest) (ExternalIdentity, error) {
+	provider.entered <- struct{}{}
+	<-provider.release
+	return provider.provider.Authenticate(ctx, request)
+}
+
+type fixedProvider struct {
+	identity ExternalIdentity
+}
+
+func (provider fixedProvider) Name() string {
+	return ProviderLocal
+}
+
+func (provider fixedProvider) Authenticate(context.Context, LoginRequest) (ExternalIdentity, error) {
+	return provider.identity, nil
 }
 
 type storedSession struct {

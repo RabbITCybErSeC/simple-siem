@@ -281,7 +281,7 @@ func TestServeHTTPTimeoutCutsOffRequest(t *testing.T) {
 func TestAdminCreateFromStdin(t *testing.T) {
 	database, getenv := newAdminTestDatabase(t)
 
-	status, stdout, stderr := runAdminCommand(t, getenv, cliTestPassword, "create", "--email", "admin@example.com")
+	status, stdout, stderr := runAdminCommand(t, getenv, cliTestPassword, "create", "--email", " Admin@Example.com ")
 	if status != 0 {
 		t.Fatalf("admin create status = %d, want 0; stderr: %s", status, stderr)
 	}
@@ -395,6 +395,42 @@ func TestAdminCreateRejectsDuplicateEmail(t *testing.T) {
 	mustScan(t, database, &eventsAfter, "SELECT count(*) FROM audit_events")
 	if eventsAfter != eventsBefore {
 		t.Errorf("duplicate admin create wrote %d audit events, want 0", eventsAfter-eventsBefore)
+	}
+}
+
+func TestAdminCreateRejectsLongDisplayName(t *testing.T) {
+	database, getenv := newAdminTestDatabase(t)
+
+	status, _, stderr := runAdminCommand(t, getenv, cliTestPassword,
+		"create", "--email", "admin@example.com", "--display-name", strings.Repeat("a", 201))
+	if status != 1 {
+		t.Fatalf("admin create with a long display name status = %d, want 1", status)
+	}
+	if !strings.Contains(stderr, "display name must be 1 to 200") {
+		t.Errorf("stderr = %q, want the display name rule", stderr)
+	}
+
+	var users int64
+	mustScan(t, database, &users, "SELECT count(*) FROM users")
+	if users != 0 {
+		t.Errorf("admin create wrote %d users, want 0", users)
+	}
+}
+
+func TestAdminCreateCutsDefaultDisplayName(t *testing.T) {
+	database, getenv := newAdminTestDatabase(t)
+	localPart := strings.Repeat("a", 210)
+	email := localPart + "@example.com"
+
+	status, _, stderr := runAdminCommand(t, getenv, cliTestPassword, "create", "--email", email)
+	if status != 0 {
+		t.Fatalf("admin create status = %d, want 0; stderr: %s", status, stderr)
+	}
+
+	var displayName string
+	mustScan(t, database, &displayName, "SELECT display_name FROM users WHERE email = ?", email)
+	if displayName != strings.Repeat("a", 200) {
+		t.Errorf("display name = %q (%d runes), want 200 a's", displayName, len([]rune(displayName)))
 	}
 }
 

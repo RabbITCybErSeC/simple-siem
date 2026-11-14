@@ -25,7 +25,7 @@ type User struct {
 	LastLoginAt *time.Time `gorm:"column:last_login_at"`
 	CreatedAt   time.Time  `gorm:"column:created_at;default:now();autoCreateTime:false;->"`
 	UpdatedAt   time.Time  `gorm:"column:updated_at;default:now();autoUpdateTime:false;->"`
-	Version     int        `gorm:"column:version"`
+	Version     int        `gorm:"column:version;default:1"`
 }
 
 func (User) TableName() string {
@@ -43,7 +43,7 @@ type Identity struct {
 	LastUsedAt   *time.Time `gorm:"column:last_used_at"`
 	CreatedAt    time.Time  `gorm:"column:created_at;default:now();autoCreateTime:false;->"`
 	UpdatedAt    time.Time  `gorm:"column:updated_at;default:now();autoUpdateTime:false;->"`
-	Version      int        `gorm:"column:version"`
+	Version      int        `gorm:"column:version;default:1"`
 }
 
 func (Identity) TableName() string {
@@ -89,12 +89,14 @@ type LoginRequest struct {
 }
 
 type ExternalIdentity struct {
-	Provider string
-	Subject  string
+	Provider          string
+	Subject           string
+	CredentialVersion int
 }
 
 // IdentityProvider proves who a person is; the Service turns the result into a session.
 type IdentityProvider interface {
+	Name() string
 	Authenticate(ctx context.Context, request LoginRequest) (ExternalIdentity, error)
 }
 
@@ -129,6 +131,7 @@ var (
 	ErrUnauthenticated    = errors.New("authentication required")
 	ErrPasswordLength     = errors.New("password must be 12 to 128 characters")
 	ErrInvalidEmail       = errors.New("email must be a plain ASCII address of 3 to 254 characters")
+	ErrInvalidDisplayName = errors.New("display name must be 1 to 200 characters without control characters")
 	ErrUserExists         = errors.New("a user with this email already exists")
 	ErrUserNotFound       = errors.New("no user with this email")
 )

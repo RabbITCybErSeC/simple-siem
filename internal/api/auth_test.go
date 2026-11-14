@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -349,6 +350,40 @@ func TestLogout(t *testing.T) {
 	assertAuthenticationRequired(t, response)
 	if got := countAuditEvents(t, database); got != after {
 		t.Errorf("logout without a session wrote %d audit events, want 0", got-after)
+	}
+}
+
+func TestLogoutRaceNeverReturnsInternalError(t *testing.T) {
+	const requests = 10
+	for attempt := 0; attempt < 3; attempt++ {
+		router, service, _, _ := newAuthRouter(t)
+		createTestAdmin(t, service)
+		token := loginToken(t, router)
+
+		statuses := make([]int, requests)
+		var wait sync.WaitGroup
+		for index := range statuses {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				statuses[index] = send(router, http.MethodPost, "/api/v1/auth/logout", "", bearer(token)).Code
+			}()
+		}
+		wait.Wait()
+
+		noContent := 0
+		for _, status := range statuses {
+			switch status {
+			case http.StatusNoContent:
+				noContent++
+			case http.StatusUnauthorized:
+			default:
+				t.Fatalf("attempt %d: concurrent logout statuses = %v, want a 204 and the rest 401", attempt, statuses)
+			}
+		}
+		if noContent != 1 {
+			t.Fatalf("attempt %d: concurrent logout statuses = %v, want exactly one 204", attempt, statuses)
+		}
 	}
 }
 
