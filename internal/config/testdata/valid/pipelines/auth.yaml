@@ -18,7 +18,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
-      lookback: ${variables.lookback}
+      query_template: auth-logins
       user: ${variables.user}
 
 processors:

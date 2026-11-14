@@ -147,6 +147,13 @@ func TestRunConfigValidateSingularCounts(t *testing.T) {
       api_key: ${secret:ELASTIC_DEV_API_KEY}
     allowed_indexes: [auth-*]
 `,
+		"query_templates/auth-logins.yaml": `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+rawQuery:
+  query:
+    term: { event.category: authentication }
+`,
 		"pipelines/auth.yaml": `id: auth-events
 version: 0.1.0
 schedule:
@@ -156,6 +163,7 @@ fetchers:
     ref: elastic-dev
     inputs:
       index: auth-*
+      query_template: auth-logins
 processors:
   - id: to-udm
     type: converter

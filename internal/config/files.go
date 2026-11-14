@@ -42,14 +42,34 @@ const (
 	minFetcherMaxResults     = 1
 	maxFetcherMaxResults     = 1000000
 	defaultFetcherTimeField  = "@timestamp"
+
+	defaultFetchTimeField = "event.ingested"
+
+	defaultFetcherPageSize = 1000
+	minFetcherPageSize     = 1
+	maxFetcherPageSize     = 10000
+
+	defaultFetcherMaxBytes = 256 << 20
+	minFetcherMaxBytes     = 1 << 20
+	maxFetcherMaxBytes     = 2 << 30
+
+	defaultFetcherKeepAlive = time.Minute
+	minFetcherKeepAlive     = 10 * time.Second
+	maxFetcherKeepAlive     = 10 * time.Minute
+
+	fetcherTypeElasticsearch = "elasticsearch"
 )
 
 var (
-	identifierPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	indexPattern        = regexp.MustCompile(`^[a-z0-9*][a-z0-9._*-]*$`)
-	datasetPattern      = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
-	variableNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
-	versionPattern      = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	identifierPattern          = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	indexPattern               = regexp.MustCompile(`^[a-z0-9*][a-z0-9._*-]*$`)
+	datasetPattern             = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
+	variableNamePattern        = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+	versionPattern             = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	templatePlaceholderPattern = regexp.MustCompile(`^\$\{parameters\.([a-z][a-z0-9_]{0,62})\}$`)
+	fetchTimeFieldPattern      = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,255}$`)
+
+	reservedTemplateParameterNames = []string{"start", "end", "index"}
 )
 
 // LoadFiles loads and validates the file configuration in directory. Every
@@ -63,23 +83,29 @@ func LoadFiles(directory string, environment Environment, getenv func(string) st
 	fetchers, fetcherProblems := loadFetchers(directory)
 	problems = append(problems, fetcherProblems...)
 
+	templates, templateFileProblems := loadQueryTemplates(directory)
+	problems = append(problems, templateFileProblems...)
+	queryTemplates, templateProblems := validateQueryTemplates(templates)
+	problems = append(problems, templateProblems...)
+
 	pipelines, pipelineProblems := loadPipelines(directory)
 	problems = append(problems, pipelineProblems...)
 
 	problems = append(problems, checkSecrets(fetchers, getenv)...)
 	problems = append(problems, checkSecretPlacement(fetchers, pipelines)...)
 	problems = append(problems, validateFetchers(fetchers, environment)...)
-	problems = append(problems, validatePipelines(directory, pipelines, system, fetchers, systemLoaded)...)
+	problems = append(problems, validatePipelines(directory, pipelines, system, queryTemplates, fetchers, systemLoaded)...)
 
 	if err := errors.Join(problems...); err != nil {
 		return Files{}, err
 	}
 
 	return Files{
-		Directory: directory,
-		System:    system,
-		Fetchers:  fetchers,
-		Pipelines: pipelines,
+		Directory:      directory,
+		System:         system,
+		Fetchers:       fetchers,
+		QueryTemplates: queryTemplates,
+		Pipelines:      pipelines,
 	}, nil
 }
 
@@ -193,10 +219,14 @@ func loadFetchers(directory string) (map[string]FetcherInstance, []error) {
 			TLS:            file.TLS,
 			AllowedIndexes: file.AllowedIndexes,
 			Defaults: FetcherDefaults{
-				Index:      file.Defaults.Index,
-				Timeout:    Duration(defaultFetcherTimeout),
-				MaxResults: defaultFetcherMaxResults,
-				TimeField:  defaultFetcherTimeField,
+				Index:          file.Defaults.Index,
+				Timeout:        Duration(defaultFetcherTimeout),
+				MaxResults:     defaultFetcherMaxResults,
+				TimeField:      defaultFetcherTimeField,
+				FetchTimeField: defaultFetchTimeField,
+				PageSize:       defaultFetcherPageSize,
+				MaxBytes:       defaultFetcherMaxBytes,
+				KeepAlive:      Duration(defaultFetcherKeepAlive),
 			},
 		}
 		if file.Defaults.Timeout != nil {
@@ -208,41 +238,94 @@ func loadFetchers(directory string) (map[string]FetcherInstance, []error) {
 		if file.Defaults.TimeField != "" {
 			instance.Defaults.TimeField = file.Defaults.TimeField
 		}
+		if file.Defaults.FetchTimeField != nil {
+			instance.Defaults.FetchTimeField = *file.Defaults.FetchTimeField
+		}
+		if file.Defaults.PageSize != nil {
+			instance.Defaults.PageSize = *file.Defaults.PageSize
+		}
+		if file.Defaults.MaxBytes != nil {
+			instance.Defaults.MaxBytes = *file.Defaults.MaxBytes
+		}
+		if file.Defaults.KeepAlive != nil {
+			instance.Defaults.KeepAlive = *file.Defaults.KeepAlive
+		}
 		fetchers[id] = instance
 	}
 	return fetchers, problems
 }
 
-func loadPipelines(directory string) ([]Pipeline, []error) {
-	entries, err := os.ReadDir(filepath.Join(directory, "pipelines"))
+// yamlDirectoryFiles returns the .yaml files under directory/subdirectory and
+// reports .yml or case-mismatched extensions.
+func yamlDirectoryFiles(directory string, subdirectory string, kind string) ([]string, []error) {
+	entries, err := os.ReadDir(filepath.Join(directory, subdirectory))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, []error{fmt.Errorf("pipelines: %w", err)}
+		return nil, []error{fmt.Errorf("%s: %w", subdirectory, err)}
 	}
 
-	var pipelines []Pipeline
+	var names []string
 	var problems []error
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		name := filepath.Join("pipelines", entry.Name())
+		name := filepath.Join(subdirectory, entry.Name())
 		extension := filepath.Ext(entry.Name())
 		switch strings.ToLower(extension) {
 		case ".yml":
-			problems = append(problems, fileError(name, "extension", "pipeline files must use the .yaml extension"))
+			problems = append(problems, fileError(name, "extension", kind+" files must use the .yaml extension"))
 			continue
 		case ".yaml":
 			if extension != ".yaml" {
-				problems = append(problems, fileError(name, "extension", "pipeline files must use the .yaml extension"))
+				problems = append(problems, fileError(name, "extension", kind+" files must use the .yaml extension"))
 				continue
 			}
 		default:
 			continue
 		}
+		names = append(names, name)
+	}
+	return names, problems
+}
 
+func loadQueryTemplates(directory string) ([]QueryTemplate, []error) {
+	names, problems := yamlDirectoryFiles(directory, "query_templates", "query template")
+
+	var templates []QueryTemplate
+	for _, name := range names {
+		data, err := readConfigFile(directory, name)
+		if err != nil {
+			problems = append(problems, err)
+			continue
+		}
+
+		var file queryTemplateFile
+		if err := decodeStrict(data, &file); err != nil {
+			problems = append(problems, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+
+		templates = append(templates, QueryTemplate{
+			File:        name,
+			ID:          file.ID,
+			FetcherType: file.FetcherType,
+			Version:     file.Version,
+			Description: file.Description,
+			Parameters:  file.Parameters,
+			RawQuery:    file.RawQuery,
+		})
+	}
+	return templates, problems
+}
+
+func loadPipelines(directory string) ([]Pipeline, []error) {
+	names, problems := yamlDirectoryFiles(directory, "pipelines", "pipeline")
+
+	var pipelines []Pipeline
+	for _, name := range names {
 		data, err := readConfigFile(directory, name)
 		if err != nil {
 			problems = append(problems, err)
@@ -363,6 +446,22 @@ func validateFetchers(fetchers map[string]FetcherInstance, environment Environme
 			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.max_results",
 				fmt.Sprintf("must be between %d and %d", minFetcherMaxResults, maxFetcherMaxResults)))
 		}
+		if !fetchTimeFieldPattern.MatchString(defaults.FetchTimeField) {
+			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.fetch_time_field",
+				"must be 1 to 255 characters from A-Z, a-z, 0-9, _ . @ -"))
+		}
+		if defaults.PageSize < minFetcherPageSize || defaults.PageSize > maxFetcherPageSize {
+			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.page_size",
+				fmt.Sprintf("must be between %d and %d", minFetcherPageSize, maxFetcherPageSize)))
+		}
+		if defaults.MaxBytes < minFetcherMaxBytes || defaults.MaxBytes > maxFetcherMaxBytes {
+			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.max_bytes",
+				fmt.Sprintf("must be between %d (1 MiB) and %d (2 GiB) bytes", minFetcherMaxBytes, maxFetcherMaxBytes)))
+		}
+		if defaults.KeepAlive < Duration(minFetcherKeepAlive) || defaults.KeepAlive > Duration(maxFetcherKeepAlive) {
+			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.keep_alive",
+				fmt.Sprintf("must be between %s and %s", minFetcherKeepAlive, maxFetcherKeepAlive)))
+		}
 		if defaults.Index != "" {
 			if !validIndexPattern(defaults.Index) {
 				problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.index",
@@ -374,6 +473,121 @@ func validateFetchers(fetchers map[string]FetcherInstance, environment Environme
 		}
 	}
 	return problems
+}
+
+func validateQueryTemplates(templates []QueryTemplate) (map[string]QueryTemplate, []error) {
+	validated := make(map[string]QueryTemplate, len(templates))
+	templateFiles := make(map[string]string, len(templates))
+	var problems []error
+
+	for _, template := range templates {
+		if !identifierPattern.MatchString(template.ID) {
+			problems = append(problems, fileError(template.File, "id", "invalid query template id"))
+		}
+		if previous, exists := templateFiles[template.ID]; exists {
+			problems = append(problems, fileError(template.File, "id",
+				fmt.Sprintf("duplicate query template id %q, also used by %s", template.ID, previous)))
+		} else {
+			templateFiles[template.ID] = template.File
+		}
+		if template.FetcherType != fetcherTypeElasticsearch {
+			problems = append(problems, fileError(template.File, "fetcherType",
+				fmt.Sprintf("unsupported fetcher type %q", template.FetcherType)))
+		}
+		if !versionPattern.MatchString(template.Version) {
+			problems = append(problems, fileError(template.File, "version", "must be MAJOR.MINOR.PATCH"))
+		}
+		if template.RawQuery == nil {
+			problems = append(problems, fileError(template.File, "rawQuery", "must be a mapping"))
+		}
+
+		problems = append(problems, validateTemplateParameters(template)...)
+		problems = append(problems, validateTemplatePlaceholders(template)...)
+
+		if _, exists := validated[template.ID]; !exists {
+			validated[template.ID] = template
+		}
+	}
+	return validated, problems
+}
+
+func validateTemplateParameters(template QueryTemplate) []error {
+	var problems []error
+	for _, name := range slices.Sorted(maps.Keys(template.Parameters)) {
+		path := "parameters." + name
+		parameter := template.Parameters[name]
+		if !variableNamePattern.MatchString(name) {
+			problems = append(problems, fileError(template.File, path, "invalid parameter name"))
+		}
+		if !validTemplateParameterType(parameter.Type) {
+			problems = append(problems, fileError(template.File, path+".type", "must be string, int, bool or timestamp"))
+		}
+		if slices.Contains(reservedTemplateParameterNames, name) {
+			problems = append(problems, fileError(template.File, path, fmt.Sprintf("parameter name %q is reserved", name)))
+		}
+	}
+	return problems
+}
+
+func validTemplateParameterType(parameterType string) bool {
+	switch parameterType {
+	case "string", "int", "bool", "timestamp":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateTemplatePlaceholders(template QueryTemplate) []error {
+	used := make(map[string]string)
+	problems := collectTemplatePlaceholders(template.File, template.RawQuery, "rawQuery", used)
+
+	for _, name := range slices.Sorted(maps.Keys(used)) {
+		if _, declared := template.Parameters[name]; !declared {
+			problems = append(problems, fileError(template.File, used[name],
+				fmt.Sprintf("placeholder names undeclared parameter %q", name)))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(template.Parameters)) {
+		if _, found := used[name]; !found {
+			problems = append(problems, fileError(template.File, "parameters."+name,
+				fmt.Sprintf("parameter %q is not used in rawQuery", name)))
+		}
+	}
+	return problems
+}
+
+// collectTemplatePlaceholders walks the raw query and records where each
+// parameter placeholder appears.
+func collectTemplatePlaceholders(file string, value any, path string, used map[string]string) []error {
+	switch value := value.(type) {
+	case map[string]any:
+		var problems []error
+		for _, key := range slices.Sorted(maps.Keys(value)) {
+			if strings.Contains(key, "${") {
+				problems = append(problems, fileError(file, path, "placeholder in a mapping key"))
+				continue
+			}
+			problems = append(problems, collectTemplatePlaceholders(file, value[key], path+"."+key, used)...)
+		}
+		return problems
+	case []any:
+		var problems []error
+		for index, item := range value {
+			problems = append(problems, collectTemplatePlaceholders(file, item, fmt.Sprintf("%s[%d]", path, index), used)...)
+		}
+		return problems
+	case string:
+		if !strings.Contains(value, "${") {
+			return nil
+		}
+		match := templatePlaceholderPattern.FindStringSubmatch(value)
+		if match == nil {
+			return []error{fileError(file, path, "placeholder must be a whole string value of the form ${parameters.NAME}")}
+		}
+		used[match[1]] = path
+	}
+	return nil
 }
 
 func validateFetcherAddress(address string, environment Environment) error {
@@ -444,7 +658,7 @@ func (pipeline Pipeline) ResolveVariables(overrides map[string]string) (map[stri
 	return resolved, nil
 }
 
-func validatePipelines(directory string, pipelines []Pipeline, system System, fetchers map[string]FetcherInstance, systemLoaded bool) []error {
+func validatePipelines(directory string, pipelines []Pipeline, system System, templates map[string]QueryTemplate, fetchers map[string]FetcherInstance, systemLoaded bool) []error {
 	resolvedDirectory, err := filepath.EvalSymlinks(directory)
 	if err != nil {
 		resolvedDirectory = directory
@@ -460,7 +674,7 @@ func validatePipelines(directory string, pipelines []Pipeline, system System, fe
 		problems = append(problems, validatePipelineSchedule(pipeline)...)
 		problems = append(problems, validatePipelineVariables(pipeline)...)
 
-		stepIDs, stepProblems := validatePipelineFetchers(pipeline, fetchers)
+		stepIDs, stepProblems := validatePipelineFetchers(pipeline, fetchers, templates)
 		problems = append(problems, stepProblems...)
 
 		processorOutputs, processorProblems := validatePipelineProcessors(pipeline, resolvedDirectory, stepIDs)
@@ -525,7 +739,7 @@ func validatePipelineVariables(pipeline *Pipeline) []error {
 	return problems
 }
 
-func validatePipelineFetchers(pipeline *Pipeline, fetchers map[string]FetcherInstance) (map[string]bool, []error) {
+func validatePipelineFetchers(pipeline *Pipeline, fetchers map[string]FetcherInstance, templates map[string]QueryTemplate) (map[string]bool, []error) {
 	var problems []error
 	if len(pipeline.Fetchers) == 0 {
 		problems = append(problems, fileError(pipeline.File, "fetchers", "at least one fetcher step is required"))
@@ -574,8 +788,87 @@ func validatePipelineFetchers(pipeline *Pipeline, fetchers map[string]FetcherIns
 					fmt.Sprintf("index %q is not allowed by fetcher instance %q", input.Literal, step.Ref)))
 			}
 		}
+
+		if known && instance.Type == fetcherTypeElasticsearch {
+			problems = append(problems, validateStepTemplate(pipeline, step, prefix, instance, templates)...)
+		}
 	}
 	return stepIDs, problems
+}
+
+func validateStepTemplate(pipeline *Pipeline, step *FetcherStep, prefix string, instance FetcherInstance, templates map[string]QueryTemplate) []error {
+	templateInput, hasTemplate := step.Inputs["query_template"]
+	if !hasTemplate {
+		return []error{fileError(pipeline.File, prefix+"inputs.query_template", "a query template is required")}
+	}
+	if templateInput.Variable != "" {
+		return []error{fileError(pipeline.File, prefix+"inputs.query_template", "query_template must be a literal")}
+	}
+
+	template, found := templates[templateInput.Literal]
+	if !found {
+		return []error{fileError(pipeline.File, prefix+"inputs.query_template",
+			fmt.Sprintf("unknown query template %q", templateInput.Literal))}
+	}
+	if template.FetcherType != instance.Type {
+		return []error{fileError(pipeline.File, prefix+"inputs.query_template",
+			fmt.Sprintf("query template %q is for %s, but fetcher instance %q is %s",
+				template.ID, template.FetcherType, instance.ID, instance.Type))}
+	}
+
+	var problems []error
+	for _, inputName := range slices.Sorted(maps.Keys(step.Inputs)) {
+		if inputName == "index" || inputName == "query_template" {
+			continue
+		}
+		input := step.Inputs[inputName]
+		parameter, declared := template.Parameters[inputName]
+		path := prefix + "inputs." + inputName
+		if !declared {
+			problems = append(problems, fileError(pipeline.File, path,
+				fmt.Sprintf("input is not declared by query template %q", template.ID)))
+			continue
+		}
+		if input.Variable != "" {
+			variable, found := pipeline.Variables[input.Variable]
+			if found && variable.Type != parameter.Type {
+				problems = append(problems, fileError(pipeline.File, path,
+					fmt.Sprintf("variable %q has type %s, but parameter %q has type %s",
+						input.Variable, variable.Type, inputName, parameter.Type)))
+			}
+			continue
+		}
+		if !validTemplateParameterValue(parameter.Type, input.Literal) {
+			problems = append(problems, fileError(pipeline.File, path,
+				fmt.Sprintf("must parse as %s", parameter.Type)))
+		}
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(template.Parameters)) {
+		if _, supplied := step.Inputs[name]; template.Parameters[name].Required && !supplied {
+			problems = append(problems, fileError(pipeline.File, prefix+"inputs."+name,
+				fmt.Sprintf("query template %q requires parameter %q", template.ID, name)))
+		}
+	}
+	return problems
+}
+
+func validTemplateParameterValue(parameterType string, value string) bool {
+	switch parameterType {
+	case "string":
+		return true
+	case "int":
+		_, err := strconv.ParseInt(value, 10, 64)
+		return err == nil
+	case "bool":
+		_, err := strconv.ParseBool(value)
+		return err == nil
+	case "timestamp":
+		_, err := time.Parse(time.RFC3339, value)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 func validatePipelineProcessors(pipeline *Pipeline, resolvedDirectory string, stepIDs map[string]bool) (map[string]bool, []error) {
@@ -781,6 +1074,7 @@ func checkSecretPlacement(fetchers map[string]FetcherInstance, pipelines []Pipel
 		}
 		check("defaults.index", instance.Defaults.Index)
 		check("defaults.time_field", instance.Defaults.TimeField)
+		check("defaults.fetch_time_field", instance.Defaults.FetchTimeField)
 		for index, address := range instance.Addresses {
 			check(fmt.Sprintf("addresses[%d]", index), address)
 		}

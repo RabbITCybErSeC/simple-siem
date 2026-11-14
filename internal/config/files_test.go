@@ -94,6 +94,12 @@ func TestLoadFiles(t *testing.T) {
 				if len(files.Fetchers) != 2 {
 					t.Errorf("len(Fetchers) = %d, want 2", len(files.Fetchers))
 				}
+				if len(files.QueryTemplates) != 1 {
+					t.Errorf("len(QueryTemplates) = %d, want 1", len(files.QueryTemplates))
+				}
+				if template := files.QueryTemplates["auth-logins"]; template.ID != "auth-logins" {
+					t.Errorf("QueryTemplate.ID = %q, want %q", template.ID, "auth-logins")
+				}
 				if len(files.Pipelines) != 1 {
 					t.Fatalf("len(Pipelines) = %d, want 1", len(files.Pipelines))
 				}
@@ -153,9 +159,10 @@ func TestLoadFiles(t *testing.T) {
 		{
 			name: "missing system file does not cascade",
 			files: map[string]string{
-				"fetchers.yaml":       pipelineFetchers,
-				"pipelines/auth.yaml": minimalPipeline,
-				"mappings/auth.yaml":  "id: auth\n",
+				"fetchers.yaml":                    pipelineFetchers,
+				"pipelines/auth.yaml":              minimalPipeline,
+				"mappings/auth.yaml":               "id: auth\n",
+				"query_templates/auth-logins.yaml": pipelineQueryTemplate,
 			},
 			wantErrors:       []string{"system.yaml", "required"},
 			wantNoErrorTexts: []string{"allowed_lateness"},
@@ -163,10 +170,11 @@ func TestLoadFiles(t *testing.T) {
 		{
 			name: "system decode error does not cascade",
 			files: map[string]string{
-				"system.yaml":         minimalSystem + "scheduler: {}\n",
-				"fetchers.yaml":       pipelineFetchers,
-				"pipelines/auth.yaml": minimalPipeline,
-				"mappings/auth.yaml":  "id: auth\n",
+				"system.yaml":                      minimalSystem + "scheduler: {}\n",
+				"fetchers.yaml":                    pipelineFetchers,
+				"pipelines/auth.yaml":              minimalPipeline,
+				"mappings/auth.yaml":               "id: auth\n",
+				"query_templates/auth-logins.yaml": pipelineQueryTemplate,
 			},
 			wantErrors:       []string{"system.yaml", "unknown field"},
 			wantNoErrorTexts: []string{"allowed_lateness"},
@@ -220,6 +228,13 @@ func TestLoadFilesRejectsFIFO(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("create FIFO: %v", err)
 	}
+	templateFIFO := filepath.Join(directory, "query_templates", "fifo.yaml")
+	if err := os.MkdirAll(filepath.Dir(templateFIFO), 0o755); err != nil {
+		t.Fatalf("create query_templates directory: %v", err)
+	}
+	if err := syscall.Mkfifo(templateFIFO, 0o600); err != nil {
+		t.Fatalf("create query template FIFO: %v", err)
+	}
 
 	type loaded struct {
 		files Files
@@ -236,7 +251,7 @@ func TestLoadFilesRejectsFIFO(t *testing.T) {
 		if got.err == nil {
 			t.Fatal("LoadFiles() error = nil, want an error for a FIFO pipeline file")
 		}
-		for _, wantError := range []string{"pipelines/fifo.yaml", "regular file"} {
+		for _, wantError := range []string{"pipelines/fifo.yaml", "query_templates/fifo.yaml", "regular file"} {
 			if !strings.Contains(got.err.Error(), wantError) {
 				t.Errorf("LoadFiles() error = %v, want an error containing %q", got.err, wantError)
 			}
@@ -246,6 +261,300 @@ func TestLoadFilesRejectsFIFO(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("LoadFiles blocked on a FIFO")
+	}
+}
+
+const validQueryTemplate = `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+description: Authentication events, optionally for one user.
+parameters:
+  user:
+    type: string
+    required: false
+rawQuery:
+  query:
+    bool:
+      filter:
+        - term:
+            event.category: authentication
+        - term:
+            user.name: "${parameters.user}"
+`
+
+const pipelineQueryTemplate = `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+description: Authentication events for a pipeline.
+parameters:
+  user: { type: string, required: false }
+  batch: { type: int, required: false }
+  active: { type: bool, required: false }
+rawQuery:
+  query:
+    bool:
+      filter:
+        - term: { event.category: authentication }
+        - term: { user.name: "${parameters.user}" }
+        - term: { event.batch: "${parameters.batch}" }
+        - term: { event.active: "${parameters.active}" }
+`
+
+func queryTemplateConfig(t *testing.T, templates map[string]string) string {
+	t.Helper()
+	files := map[string]string{
+		"system.yaml":   minimalSystem,
+		"fetchers.yaml": emptyFetchers,
+	}
+	for name, content := range templates {
+		files[filepath.Join("query_templates", name)] = content
+	}
+	return writeConfig(t, files)
+}
+
+func TestQueryTemplates(t *testing.T) {
+	oversizedTemplate := "id: oversized\n#" + strings.Repeat("x", 1<<20) + "\n"
+
+	tests := []struct {
+		name       string
+		templates  map[string]string
+		prepare    func(t *testing.T) string
+		wantErrors []string
+		check      func(t *testing.T, files Files)
+	}{
+		{
+			name:      "valid template",
+			templates: map[string]string{"auth.yaml": validQueryTemplate},
+			check: func(t *testing.T, files Files) {
+				t.Helper()
+				template, ok := files.QueryTemplates["auth-logins"]
+				if !ok {
+					t.Fatalf("QueryTemplates = %+v, want auth-logins", files.QueryTemplates)
+				}
+				if template.File != "query_templates/auth.yaml" {
+					t.Errorf("File = %q, want query_templates/auth.yaml", template.File)
+				}
+				if template.FetcherType != "elasticsearch" {
+					t.Errorf("FetcherType = %q, want elasticsearch", template.FetcherType)
+				}
+				if template.Version != "0.1.0" {
+					t.Errorf("Version = %q, want 0.1.0", template.Version)
+				}
+				if template.Description != "Authentication events, optionally for one user." {
+					t.Errorf("Description = %q, want the template description", template.Description)
+				}
+				parameter, ok := template.Parameters["user"]
+				if !ok || parameter.Type != "string" || parameter.Required {
+					t.Errorf("Parameters[user] = %+v, want an optional string", parameter)
+				}
+				query, ok := template.RawQuery["query"].(map[string]any)
+				if !ok {
+					t.Fatalf("RawQuery[query] = %T, want a mapping", template.RawQuery["query"])
+				}
+				if _, ok := query["bool"]; !ok {
+					t.Errorf("RawQuery[query] = %+v, want a bool clause", query)
+				}
+			},
+		},
+		{
+			name: "required parameter",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				"required: false", "required: true")},
+			check: func(t *testing.T, files Files) {
+				t.Helper()
+				if parameter := files.QueryTemplates["auth-logins"].Parameters["user"]; !parameter.Required {
+					t.Errorf("Parameters[user] = %+v, want required", parameter)
+				}
+			},
+		},
+		{
+			name: "oversized template",
+			templates: map[string]string{
+				"auth.yaml": oversizedTemplate,
+			},
+			wantErrors: []string{"query_templates/auth.yaml", "1 MiB"},
+		},
+		{
+			name: "yml template file",
+			templates: map[string]string{
+				"auth.yml": validQueryTemplate,
+			},
+			wantErrors: []string{"query_templates/auth.yml", ".yaml"},
+		},
+		{
+			name: "uppercase yaml template file",
+			templates: map[string]string{
+				"auth.YAML": validQueryTemplate,
+			},
+			wantErrors: []string{"query_templates/auth.YAML", ".yaml"},
+		},
+		{
+			name: "non-yaml template files are ignored",
+			prepare: func(t *testing.T) string {
+				directory := queryTemplateConfig(t, nil)
+				writeFile(t, filepath.Join(directory, "query_templates", "notes.txt"), "not: [valid")
+				return directory
+			},
+			check: func(t *testing.T, files Files) {
+				t.Helper()
+				if len(files.QueryTemplates) != 0 {
+					t.Errorf("len(QueryTemplates) = %d, want 0", len(files.QueryTemplates))
+				}
+			},
+		},
+		{
+			name:       "unknown key",
+			templates:  map[string]string{"auth.yaml": validQueryTemplate + "unknown: true\n"},
+			wantErrors: []string{"query_templates/auth.yaml", "unknown"},
+		},
+		{
+			name: "invalid template id",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				"id: auth-logins", "id: Auth-logins")},
+			wantErrors: []string{"query_templates/auth.yaml", "id", "invalid query template id"},
+		},
+		{
+			name: "duplicate template id",
+			templates: map[string]string{
+				"auth.yaml":  validQueryTemplate,
+				"other.yaml": validQueryTemplate,
+			},
+			wantErrors: []string{"query_templates/other.yaml", "id", "duplicate query template id"},
+		},
+		{
+			name: "unsupported fetcher type",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				"fetcherType: elasticsearch", "fetcherType: opensearch")},
+			wantErrors: []string{"fetcherType", "unsupported fetcher type", "opensearch"},
+		},
+		{
+			name: "invalid version",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				"version: 0.1.0", `version: "0.1"`)},
+			wantErrors: []string{"version", "MAJOR.MINOR.PATCH"},
+		},
+		{
+			name: "missing raw query",
+			templates: map[string]string{"auth.yaml": `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+parameters: {}
+`},
+			wantErrors: []string{"rawQuery", "must be a mapping"},
+		},
+		{
+			name: "raw query is not a mapping",
+			templates: map[string]string{"auth.yaml": `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+rawQuery:
+  - query: {}
+`},
+			wantErrors: []string{"query_templates/auth.yaml", "mapping is expected"},
+		},
+		{
+			name: "invalid parameter name",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				"user:", "User:")},
+			wantErrors: []string{"parameters.User", "invalid parameter name"},
+		},
+		{
+			name: "invalid parameter type",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				"type: string", "type: duration")},
+			wantErrors: []string{"parameters.user.type", "string, int, bool or timestamp"},
+		},
+		{
+			name: "reserved parameter names",
+			templates: map[string]string{"auth.yaml": `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+parameters:
+  start: { type: timestamp, required: true }
+  end: { type: timestamp, required: true }
+  index: { type: string, required: true }
+rawQuery:
+  query:
+    bool:
+      filter:
+        - range: { "@timestamp": { gte: "${parameters.start}", lt: "${parameters.end}" } }
+        - term: { index.name: "${parameters.index}" }
+`},
+			wantErrors: []string{
+				"parameters.start", `"start" is reserved`,
+				"parameters.end", `"end" is reserved`,
+				"parameters.index", `"index" is reserved`,
+			},
+		},
+		{
+			name: "partial placeholder",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				`"${parameters.user}"`, `"user-${parameters.user}"`)},
+			wantErrors: []string{
+				"rawQuery.query.bool.filter[1].term.user.name",
+				"placeholder must be a whole string value",
+			},
+		},
+		{
+			name: "placeholder in a mapping key",
+			templates: map[string]string{"auth.yaml": `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+parameters:
+  user: { type: string, required: false }
+rawQuery:
+  query:
+    term:
+      "${parameters.user}": alice
+`},
+			wantErrors: []string{"rawQuery.query.term", "placeholder in a mapping key"},
+		},
+		{
+			name: "undeclared parameter",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				"${parameters.user}", "${parameters.host}")},
+			wantErrors: []string{
+				"rawQuery.query.bool.filter[1].term.user.name",
+				`undeclared parameter "host"`,
+			},
+		},
+		{
+			name: "unused parameter",
+			templates: map[string]string{"auth.yaml": strings.ReplaceAll(validQueryTemplate,
+				`user.name: "${parameters.user}"`, "user.name: alice")},
+			wantErrors: []string{"parameters.user", `"user" is not used`},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := ""
+			if test.prepare != nil {
+				directory = test.prepare(t)
+			} else {
+				directory = queryTemplateConfig(t, test.templates)
+			}
+
+			files, err := LoadFiles(directory, EnvironmentDevelopment, getenv(validSecrets))
+
+			for _, wantError := range test.wantErrors {
+				if err == nil || !strings.Contains(err.Error(), wantError) {
+					t.Fatalf("LoadFiles() error = %v, want an error containing %q", err, wantError)
+				}
+			}
+			if len(test.wantErrors) > 0 {
+				if !reflect.DeepEqual(files, Files{}) {
+					t.Fatalf("LoadFiles() = %+v, want the zero Files when validation fails", files)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadFiles() error = %v, want nil", err)
+			}
+			if test.check != nil {
+				test.check(t, files)
+			}
+		})
 	}
 }
 
@@ -653,6 +962,18 @@ func TestFetcherInstances(t *testing.T) {
 				if defaults.TimeField != "@timestamp" {
 					t.Errorf("TimeField = %q, want @timestamp", defaults.TimeField)
 				}
+				if defaults.FetchTimeField != "event.ingested" {
+					t.Errorf("FetchTimeField = %q, want event.ingested", defaults.FetchTimeField)
+				}
+				if defaults.PageSize != 1000 {
+					t.Errorf("PageSize = %d, want 1000", defaults.PageSize)
+				}
+				if defaults.MaxBytes != 268435456 {
+					t.Errorf("MaxBytes = %d, want 268435456", defaults.MaxBytes)
+				}
+				if defaults.KeepAlive != Duration(time.Minute) {
+					t.Errorf("KeepAlive = %s, want 1m", time.Duration(defaults.KeepAlive))
+				}
 			},
 		},
 		{
@@ -1027,6 +1348,164 @@ func TestFetcherInstances(t *testing.T) {
 			wantErrors: []string{"defaults.max_results", "1000000"},
 		},
 		{
+			name: "explicit fetch defaults applied",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      fetch_time_field: "@timestamp"
+      page_size: 500
+      max_bytes: 1048576
+      keep_alive: 10s
+    allowed_indexes: [auth-*]
+`,
+			check: func(t *testing.T, files Files) {
+				t.Helper()
+				defaults := files.Fetchers["elastic-dev"].Defaults
+				if defaults.FetchTimeField != "@timestamp" {
+					t.Errorf("FetchTimeField = %q, want @timestamp", defaults.FetchTimeField)
+				}
+				if defaults.PageSize != 500 {
+					t.Errorf("PageSize = %d, want 500", defaults.PageSize)
+				}
+				if defaults.MaxBytes != 1048576 {
+					t.Errorf("MaxBytes = %d, want 1048576", defaults.MaxBytes)
+				}
+				if defaults.KeepAlive != Duration(10*time.Second) {
+					t.Errorf("KeepAlive = %s, want 10s", time.Duration(defaults.KeepAlive))
+				}
+			},
+		},
+		{
+			name: "fetch time field too long",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      fetch_time_field: "` + strings.Repeat("a", 256) + `"
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.fetch_time_field", "255"},
+		},
+		{
+			name: "fetch time field with invalid characters",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      fetch_time_field: "event ingested"
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.fetch_time_field", "characters"},
+		},
+		{
+			name: "fetch time field explicitly empty",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      fetch_time_field: ""
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.fetch_time_field"},
+		},
+		{
+			name: "page size below the minimum",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      page_size: 0
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.page_size", "1"},
+		},
+		{
+			name: "page size above the maximum",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      page_size: 20000
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.page_size", "10000"},
+		},
+		{
+			name: "max bytes below the minimum",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      max_bytes: 1048575
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.max_bytes", "1048576"},
+		},
+		{
+			name: "max bytes above the maximum",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      max_bytes: 2147483649
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.max_bytes", "2147483648"},
+		},
+		{
+			name: "keep alive below the minimum",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      keep_alive: 9s
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.keep_alive", "10s"},
+		},
+		{
+			name: "keep alive above the maximum",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      keep_alive: 11m
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.keep_alive", "10m"},
+		},
+		{
 			name: "invalid instance id",
 			fetchers: `fetchers:
   Elastic-Prod:
@@ -1165,6 +1644,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
 processors:
   - id: to-udm
     type: converter
@@ -1191,7 +1671,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
-      lookback: ${variables.lookback}
+      query_template: auth-logins
       user: ${variables.user}
       batch: 10
       active: true
@@ -1210,9 +1690,10 @@ outputs:
 func pipelineConfig(t *testing.T, pipelines map[string]string) string {
 	t.Helper()
 	files := map[string]string{
-		"system.yaml":        minimalSystem,
-		"fetchers.yaml":      pipelineFetchers,
-		"mappings/auth.yaml": "id: auth\n",
+		"system.yaml":                      minimalSystem,
+		"fetchers.yaml":                    pipelineFetchers,
+		"mappings/auth.yaml":               "id: auth\n",
+		"query_templates/auth-logins.yaml": pipelineQueryTemplate,
 	}
 	for name, content := range pipelines {
 		files[filepath.Join("pipelines", name)] = content
@@ -1266,8 +1747,8 @@ func TestPipelines(t *testing.T) {
 				if inputs["index"].Literal != "auth-*" {
 					t.Errorf("index input = %+v, want literal auth-*", inputs["index"])
 				}
-				if inputs["lookback"].Variable != "lookback" {
-					t.Errorf("lookback input = %+v, want variable lookback", inputs["lookback"])
+				if inputs["user"].Variable != "user" {
+					t.Errorf("user input = %+v, want variable user", inputs["user"])
 				}
 				if inputs["batch"].Literal != "10" || inputs["active"].Literal != "true" {
 					t.Errorf("scalar inputs = %+v, want literal 10 and true", inputs)
@@ -1302,6 +1783,88 @@ func TestPipelines(t *testing.T) {
 			wantErrors: []string{"pipelines/auth.yaml", "fetchers[0].ref:", `unknown fetcher instance "elastic-missing"`},
 		},
 		{
+			name:       "missing query template",
+			pipeline:   strings.ReplaceAll(minimalPipeline, "\n      query_template: auth-logins", ""),
+			wantErrors: []string{"fetchers[0].inputs.query_template", "query template is required"},
+		},
+		{
+			name: "query template from a variable",
+			pipeline: strings.ReplaceAll(strings.ReplaceAll(minimalPipeline,
+				"query_template: auth-logins", "query_template: ${variables.template}"),
+				"version: 0.1.0", "version: 0.1.0\nvariables:\n  template:\n    type: string"),
+			wantErrors: []string{"fetchers[0].inputs.query_template", "must be a literal"},
+		},
+		{
+			name: "unknown query template",
+			pipeline: strings.ReplaceAll(minimalPipeline,
+				"query_template: auth-logins", "query_template: auth-missing"),
+			wantErrors: []string{
+				"fetchers[0].inputs.query_template",
+				`unknown query template "auth-missing"`,
+			},
+		},
+		{
+			name: "unknown input",
+			pipeline: strings.ReplaceAll(minimalPipeline,
+				"query_template: auth-logins", "query_template: auth-logins\n      host: example"),
+			wantErrors: []string{"fetchers[0].inputs.host", "not declared by query template"},
+		},
+		{
+			name: "missing required parameter",
+			prepare: func(t *testing.T) string {
+				directory := pipelineConfig(t, map[string]string{"auth.yaml": strings.ReplaceAll(minimalPipeline,
+					"query_template: auth-logins", "query_template: required-logins")})
+				writeFile(t, filepath.Join(directory, "query_templates", "required.yaml"), `id: required-logins
+fetcherType: elasticsearch
+version: 0.1.0
+parameters:
+  user: { type: string, required: true }
+rawQuery:
+  query:
+    term: { user.name: "${parameters.user}" }
+`)
+				return directory
+			},
+			wantErrors: []string{
+				"fetchers[0].inputs.user",
+				`query template "required-logins" requires parameter "user"`,
+			},
+		},
+		{
+			name: "literal does not parse as the parameter type",
+			pipeline: strings.ReplaceAll(minimalPipeline,
+				"query_template: auth-logins", "query_template: auth-logins\n      batch: lots"),
+			wantErrors: []string{"fetchers[0].inputs.batch", "must parse as int"},
+		},
+		{
+			name: "variable type does not match the parameter type",
+			pipeline: strings.ReplaceAll(validPipeline,
+				"  user:\n    type: string", "  user:\n    type: duration"),
+			wantErrors: []string{
+				"fetchers[0].inputs.user",
+				`variable "user" has type duration`,
+				`parameter "user" has type string`,
+			},
+		},
+		{
+			name: "timestamp literal parameter",
+			prepare: func(t *testing.T) string {
+				directory := pipelineConfig(t, map[string]string{"auth.yaml": strings.ReplaceAll(strings.ReplaceAll(minimalPipeline,
+					"query_template: auth-logins", "query_template: since-logins"),
+					"index: auth-*", "index: auth-*\n      since: 2026-11-14T10:00:00Z")})
+				writeFile(t, filepath.Join(directory, "query_templates", "since.yaml"), `id: since-logins
+fetcherType: elasticsearch
+version: 0.1.0
+parameters:
+  since: { type: timestamp, required: true }
+rawQuery:
+  query:
+    range: { "@timestamp": { gte: "${parameters.since}" } }
+`)
+				return directory
+			},
+		},
+		{
 			name: "no fetchers",
 			pipeline: `id: auth-events
 version: 0.1.0
@@ -1331,10 +1894,12 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
   - id: auth
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
 processors:
   - id: to-udm
     type: converter
@@ -1372,6 +1937,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
       user: user-${variables.user}
 processors:
   - id: to-udm
@@ -1399,6 +1965,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: ${variables.index}
+      query_template: auth-logins
 processors:
   - id: to-udm
     type: converter
@@ -1498,6 +2065,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
 processors: []
 outputs:
   auth_events:
@@ -1557,6 +2125,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
 processors:
   - id: to-udm
     type: converter
@@ -1588,6 +2157,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
 processors:
   - id: to-udm
     type: converter
@@ -1683,6 +2253,7 @@ fetchers:
     ref: elastic-prod
     inputs:
       index: auth-*
+      query_template: auth-logins
 processors:
   - id: to-udm
     type: converter

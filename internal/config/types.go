@@ -146,8 +146,8 @@ type QueryTemplate struct {
 }
 
 type TemplateParameter struct {
-	Type     string // string | int | bool | timestamp
-	Required bool
+	Type     string `yaml:"type"`     // string | int | bool | timestamp
+	Required bool   `yaml:"required"` //
 }
 
 type Pipeline struct {
@@ -292,12 +292,21 @@ type fetcherFile struct {
 		Timeout        *Duration `yaml:"timeout"`
 		MaxResults     *int      `yaml:"max_results"`
 		TimeField      string    `yaml:"time_field"`
-		FetchTimeField string    `yaml:"fetch_time_field"`
+		FetchTimeField *string   `yaml:"fetch_time_field"`
 		PageSize       *int      `yaml:"page_size"`
 		MaxBytes       *int64    `yaml:"max_bytes"`
 		KeepAlive      *Duration `yaml:"keep_alive"`
 	} `yaml:"defaults"`
 	AllowedIndexes []string `yaml:"allowed_indexes"`
+}
+
+type queryTemplateFile struct {
+	ID          string                       `yaml:"id"`
+	FetcherType string                       `yaml:"fetcherType"`
+	Version     string                       `yaml:"version"`
+	Description string                       `yaml:"description"`
+	Parameters  map[string]TemplateParameter `yaml:"parameters"`
+	RawQuery    map[string]any               `yaml:"rawQuery"`
 }
 
 type pipelineFile struct {
