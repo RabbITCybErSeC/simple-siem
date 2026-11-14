@@ -222,6 +222,10 @@ func (fetcherInstance *Fetcher) openPIT(ctx context.Context, index string) (stri
 	}
 
 	pitID := pitIDFromBody(body)
+	if failure := incompleteFailure(body); failure != nil {
+		fetcherInstance.closePIT(pitID)
+		return "", failure
+	}
 	if oversized || pitID == "" {
 		// A usable id may have arrived before the truncation or the syntax
 		// error; close it so the open context does not leak.
@@ -306,6 +310,9 @@ func (fetcherInstance *Fetcher) search(ctx context.Context, body []byte, bytesRe
 	var response searchResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
 		return result, &fetchFailure{code: fetcher.ErrorCodeMalformedResponse, message: "search: malformed response"}
+	}
+	if failure := response.failure(); failure != nil {
+		return result, failure
 	}
 	result.hits = response.Hits.Hits
 	result.pitID = response.PITID
@@ -402,13 +409,13 @@ func responseFailure(status int, body []byte) *fetchFailure {
 	case status >= http.StatusInternalServerError:
 		return &fetchFailure{code: fetcher.ErrorCodeBackendUnavailable, message: fmt.Sprintf("backend returned status %d", status), retryable: true}
 	case status >= http.StatusBadRequest:
-		errorType, reason, ok := decodeError(body)
+		errorType, ok := decodeErrorType(body)
 		if !ok {
 			return &fetchFailure{code: fetcher.ErrorCodeMalformedResponse,
 				message: fmt.Sprintf("backend returned status %d with an undecodable error body", status)}
 		}
 		return &fetchFailure{code: fetcher.ErrorCodeQueryRejected,
-			message: fmt.Sprintf("backend rejected the query (%d): %s: %s", status, errorType, reason)}
+			message: fmt.Sprintf("backend rejected the query (%d): %s", status, errorType)}
 	default:
 		return &fetchFailure{code: fetcher.ErrorCodeMalformedResponse, message: fmt.Sprintf("unexpected backend status %d", status)}
 	}
@@ -454,6 +461,32 @@ func byteLimitFailure() *fetchFailure {
 	}
 }
 
+// incompleteFailure decodes the completeness marker of a search or
+// point-in-time response body.
+func incompleteFailure(body []byte) *fetchFailure {
+	var completeness searchCompleteness
+	if err := json.Unmarshal(body, &completeness); err != nil {
+		return nil
+	}
+	return completeness.failure()
+}
+
+// failure returns the backend failure an incomplete response produces. Its
+// records must never be emitted, because the page misses shards.
+func (completeness searchCompleteness) failure() *fetchFailure {
+	switch {
+	case completeness.TimedOut:
+		return &fetchFailure{code: fetcher.ErrorCodeBackendUnavailable,
+			message: "search timed out", retryable: true}
+	case completeness.Shards.Failed > 0:
+		return &fetchFailure{code: fetcher.ErrorCodeBackendUnavailable, retryable: true,
+			message: fmt.Sprintf("search incomplete: %d of %d shards failed",
+				completeness.Shards.Failed, completeness.Shards.Total)}
+	default:
+		return nil
+	}
+}
+
 func isTLSError(err error) bool {
 	var certificateError *tls.CertificateVerificationError
 	if errors.As(err, &certificateError) {
@@ -475,23 +508,21 @@ func isTLSError(err error) bool {
 	return errors.As(err, &recordHeaderError)
 }
 
-func decodeError(body []byte) (errorType, reason string, ok bool) {
+// decodeErrorType returns Elasticsearch's error type. The reason text is never
+// read: it can echo field values.
+func decodeErrorType(body []byte) (errorType string, ok bool) {
 	var response errorResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return "", "", false
+		return "", false
 	}
-	if response.Error.Type == "" && response.Error.Reason == "" {
-		return "", "", false
+	if response.Error.Type == "" {
+		return "", false
 	}
 	errorType = response.Error.Type
 	if len(errorType) > maxErrorMessage {
 		errorType = errorType[:maxErrorMessage]
 	}
-	reason = response.Error.Reason
-	if len(reason) > maxErrorMessage {
-		reason = reason[:maxErrorMessage]
-	}
-	return errorType, reason, true
+	return errorType, true
 }
 
 func isSearchContextMissing(body []byte) bool {

@@ -101,6 +101,16 @@ type runWindow struct {
 	Gap   *fetchGap
 }
 
+// runStart is the state of a run after its row is inserted: the run result,
+// the window to fetch, the fetch watermark it started from, and the database
+// clock reading.
+type runStart struct {
+	result    RunResult
+	window    runWindow
+	watermark time.Time
+	now       time.Time
+}
+
 // fetchGap is the part of a backlog beyond max_catch_up that a run skips.
 type fetchGap struct {
 	Start time.Time

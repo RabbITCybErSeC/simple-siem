@@ -113,14 +113,20 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 	retention, lateness := outputDurations(runner.Files, shape.Output)
 	eventTimeSource := instance.Defaults.FetchTimeField == instance.Defaults.TimeField
 
-	result, window, now, err := runner.startRun(ctx, pipeline, shape, retention, lateness, eventTimeSource)
+	start, err := runner.startRun(ctx, pipeline, shape, retention, lateness, eventTimeSource)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("pipeline %q: %w", pipeline.ID, err)
 	}
+	result, window, now := start.result, start.window, start.now
+	timeout := time.Duration(pipeline.Schedule.Timeout)
+	runContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	failRun := func(cause error) (RunResult, error) {
-		result.Status = StatusFailed
-		result.Error = sanitizedError(cause)
+		result.Status, result.Error = failureStatus(ctx, runContext, timeout)
+		if result.Status == StatusFailed {
+			result.Error = sanitizedError(cause)
+		}
 		if err := runner.finishRun(ctx, result, nil, ""); err != nil {
 			return result, err
 		}
@@ -128,9 +134,10 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 	}
 
 	if !window.Start.Before(window.End) {
-		result.Status = StatusOK
-		if err := runner.commitWatermark(ctx, shape.Dataset, result.RunID, window.End); err != nil {
-			return failRun(err)
+		result.Status, result.Error = failureStatus(ctx, runContext, timeout)
+		if result.Status == StatusFailed {
+			result.Status = StatusOK
+			result.Error = ""
 		}
 		if err := runner.finishRun(ctx, result, nil, ""); err != nil {
 			return result, err
@@ -177,9 +184,6 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 	if maxQuarantineRatio <= 0 {
 		maxQuarantineRatio = defaultRunnerMaxQuarantineRatio
 	}
-
-	runContext, cancel := context.WithTimeout(ctx, time.Duration(pipeline.Schedule.Timeout))
-	defer cancel()
 
 	var batch runBatch
 	var failedClosed *quarantineError
@@ -233,7 +237,11 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 		return nil
 	}
 
-	fetchStatus, fetchErr := fetcherInstance.Fetch(runContext, request, emit)
+	var fetchStatus fetcher.FetchStatus
+	var fetchErr error
+	if runContext.Err() == nil {
+		fetchStatus, fetchErr = fetcherInstance.Fetch(runContext, request, emit)
+	}
 	var remainderErr error
 	if failedClosed == nil && runContext.Err() == nil && ctx.Err() == nil {
 		remainderErr = commitPending()
@@ -241,13 +249,10 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 
 	result.Truncated = fetchStatus.Truncated
 	fetchFailures := fetchErrorRows(fetchStatus.Errors)
+	contextStatus, contextMessage := failureStatus(ctx, runContext, timeout)
 	switch {
-	case errors.Is(ctx.Err(), context.Canceled):
-		result.Status = StatusCanceled
-		result.Error = "run canceled"
-	case runContext.Err() != nil:
-		result.Status = StatusTimedOut
-		result.Error = fmt.Sprintf("run timed out after %s", time.Duration(pipeline.Schedule.Timeout))
+	case contextStatus != StatusFailed:
+		result.Status, result.Error = contextStatus, contextMessage
 	case failedClosed != nil:
 		result.Status = StatusFailed
 		result.Error = failedClosed.Error()
@@ -265,8 +270,19 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 
 	if result.Status == StatusOK {
 		if err := runner.commitWatermark(runContext, shape.Dataset, result.RunID, window.End); err != nil {
-			result.Status = StatusFailed
-			result.Error = sanitizedError(err)
+			result.Status, result.Error = failureStatus(ctx, runContext, timeout)
+			if result.Status == StatusFailed {
+				result.Error = sanitizedError(err)
+			}
+		}
+	}
+
+	if result.Status == StatusPartial {
+		watermark, err := runner.fetchWatermark(ctx, shape.Dataset)
+		if err != nil {
+			runner.logger().Warn("pipeline run: read the fetch watermark", "dataset", shape.Dataset, "error", err)
+		} else if !watermark.After(start.watermark) {
+			result.Warnings = append(result.Warnings, "NO_PROGRESS")
 		}
 	}
 
@@ -284,61 +300,89 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 }
 
 // startRun registers the dataset, computes the window from its watermark, and
-// inserts the RUNNING run record against one database clock reading.
+// inserts the RUNNING run record against one database clock reading. Its writes
+// survive the run's cancellation: the lock is already held.
 func (runner *Runner) startRun(ctx context.Context, pipeline config.Pipeline, shape phaseOnePipeline,
-	retention, lateness time.Duration, eventTimeSource bool) (RunResult, runWindow, time.Time, error) {
-	var result RunResult
-	var window runWindow
-	var now time.Time
+	retention, lateness time.Duration, eventTimeSource bool) (runStart, error) {
+	var start runStart
 
 	// The store's watermark read uses its own connection, so registration has
 	// to commit before the run transaction starts.
-	err := runner.Database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		return runner.registerDataset(ctx, transaction, pipeline, shape, retention, lateness)
+	registerContext, cancelRegistration := detach(ctx)
+	err := runner.Database.WithContext(registerContext).Transaction(func(transaction *gorm.DB) error {
+		return runner.registerDataset(registerContext, transaction, pipeline, shape, retention, lateness)
 	})
+	cancelRegistration()
 	if err != nil {
-		return RunResult{}, runWindow{}, time.Time{}, err
+		return runStart{}, err
 	}
 
-	err = runner.Database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		if err := transaction.Raw("SELECT now()").Scan(&now).Error; err != nil {
+	startContext, cancel := detach(ctx)
+	defer cancel()
+
+	err = runner.Database.WithContext(startContext).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Raw("SELECT now()").Scan(&start.now).Error; err != nil {
 			return fmt.Errorf("read the database clock: %w", err)
 		}
-		watermark, err := runner.Store.Watermark(ctx, shape.Dataset)
+		watermark, err := runner.Store.Watermark(startContext, shape.Dataset)
 		if err != nil {
 			return err
 		}
-		window = computeWindow(now, watermark, pipeline.Schedule, retention, lateness, eventTimeSource)
+		start.watermark = watermark.FetchWatermark
+		start.window = computeWindow(start.now, watermark, pipeline.Schedule, retention, lateness, eventTimeSource)
+
+		// The lock proves no other run of this pipeline is alive, so every
+		// earlier RUNNING row belongs to a process that ended mid-run.
+		if err := markAbandonedRuns(transaction, pipeline.ID); err != nil {
+			return err
+		}
 
 		row := runRow{
 			PipelineID:  pipeline.ID,
 			Dataset:     shape.Dataset,
 			Status:      string(StatusRunning),
-			WindowStart: &window.Start,
-			WindowEnd:   &window.End,
+			WindowStart: &start.window.Start,
+			WindowEnd:   &start.window.End,
 			FetchErrors: []fetchErrorRow{},
 			Warnings:    []string{},
 		}
-		if window.Gap != nil {
-			row.GapStart = &window.Gap.Start
-			row.GapEnd = &window.Gap.End
+		if start.window.Gap != nil {
+			row.GapStart = &start.window.Gap.Start
+			row.GapEnd = &start.window.Gap.End
 		}
 		if err := transaction.Create(&row).Error; err != nil {
 			return fmt.Errorf("insert the run record: %w", err)
 		}
-		result = RunResult{
+		start.result = RunResult{
 			RunID:       row.ID,
 			Status:      StatusRunning,
-			WindowStart: window.Start,
-			WindowEnd:   window.End,
+			WindowStart: start.window.Start,
+			WindowEnd:   start.window.End,
 			Warnings:    []string{},
 		}
 		return nil
 	})
 	if err != nil {
-		return RunResult{}, runWindow{}, time.Time{}, err
+		return runStart{}, err
 	}
-	return result, window, now, nil
+	return start, nil
+}
+
+// markAbandonedRuns fails every earlier RUNNING row of the pipeline in the
+// transaction that inserts the new one.
+func markAbandonedRuns(transaction *gorm.DB, pipelineID string) error {
+	err := transaction.Model(&runRow{}).
+		Where("pipeline_id = ? AND status = ?", pipelineID, string(StatusRunning)).
+		Updates(map[string]any{
+			"status":      string(StatusFailed),
+			"error":       "abandoned: the process ended during the run",
+			"finished_at": gorm.Expr("now()"),
+			"version":     gorm.Expr("version + 1"),
+		}).Error
+	if err != nil {
+		return fmt.Errorf("mark abandoned runs: %w", err)
+	}
+	return nil
 }
 
 // recordSkipped writes the run record of a pipeline whose lock is held. It
@@ -347,6 +391,7 @@ func (runner *Runner) recordSkipped(ctx context.Context, pipeline config.Pipelin
 	const message = "another run of this pipeline is in progress"
 	retention, lateness := outputDurations(runner.Files, shape.Output)
 	result := RunResult{Status: StatusSkipped, Error: message, Warnings: []string{}}
+	finishedAt := time.Now().UTC()
 
 	var row runRow
 	err := runner.Database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -360,6 +405,7 @@ func (runner *Runner) recordSkipped(ctx context.Context, pipeline config.Pipelin
 			Error:       optionalText(message),
 			FetchErrors: []fetchErrorRow{},
 			Warnings:    []string{},
+			FinishedAt:  &finishedAt,
 		}
 		return transaction.Create(&row).Error
 	})
@@ -445,10 +491,19 @@ func (runner *Runner) commitWatermark(ctx context.Context, datasetName, runID st
 	return nil
 }
 
+// fetchWatermark reads the dataset's fetch watermark after the run, on a
+// context that survives the run ending.
+func (runner *Runner) fetchWatermark(ctx context.Context, datasetName string) (time.Time, error) {
+	readContext, cancel := detach(ctx)
+	defer cancel()
+	watermark, err := runner.Store.Watermark(readContext, datasetName)
+	return watermark.FetchWatermark, err
+}
+
 // expireDataset drops data beyond retention. A failure is a warning, not a run
 // failure: the batch commits stand.
 func (runner *Runner) expireDataset(ctx context.Context, datasetName string, now time.Time, result *RunResult) {
-	expireContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+	expireContext, cancel := detach(ctx)
 	defer cancel()
 
 	err := runner.Database.WithContext(expireContext).Transaction(func(transaction *gorm.DB) error {
@@ -463,7 +518,7 @@ func (runner *Runner) expireDataset(ctx context.Context, datasetName string, now
 // finishRun records the final status, counters, errors and finish time on a
 // fresh context so a canceled or timed-out run still lands.
 func (runner *Runner) finishRun(ctx context.Context, result RunResult, fetchFailures []fetchErrorRow, renderedQueryHash string) error {
-	finishContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+	finishContext, cancel := detach(ctx)
 	defer cancel()
 
 	warnings, err := json.Marshal(result.Warnings)
@@ -519,15 +574,17 @@ func computeWindow(now time.Time, watermark dataset.Watermark, schedule config.S
 			lookback = retention
 		}
 		window.Start = window.End.Add(-lookback)
-	} else {
-		window.Start = watermark.FetchWatermark.Add(-overlap)
+		return window
 	}
 
-	if window.End.Sub(window.Start) > time.Duration(schedule.MaxCatchUp) {
-		gapEnd := window.End.Add(-time.Duration(schedule.MaxCatchUp))
-		window.Gap = &fetchGap{Start: window.Start, End: gapEnd}
+	maxCatchUp := time.Duration(schedule.MaxCatchUp)
+	if window.End.Sub(watermark.FetchWatermark) > maxCatchUp {
+		gapEnd := window.End.Add(-maxCatchUp)
+		window.Gap = &fetchGap{Start: watermark.FetchWatermark, End: gapEnd}
 		window.Start = gapEnd
+		return window
 	}
+	window.Start = watermark.FetchWatermark.Add(-overlap)
 	return window
 }
 
@@ -628,4 +685,24 @@ func optionalText(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+// detach returns a context that survives the run ending, bounded by
+// finishTimeout. Every run-row write after the lock uses it.
+func detach(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+}
+
+// failureStatus is the one place a run's contexts decide its failed outcome: a
+// canceled parent is CANCELED, the run deadline is TIMED_OUT, and anything else
+// is a plain FAILED the caller fills in with its cause.
+func failureStatus(ctx, runContext context.Context, timeout time.Duration) (RunStatus, string) {
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return StatusCanceled, "run canceled"
+	case errors.Is(runContext.Err(), context.DeadlineExceeded):
+		return StatusTimedOut, fmt.Sprintf("run timed out after %s", timeout)
+	default:
+		return StatusFailed, ""
+	}
 }

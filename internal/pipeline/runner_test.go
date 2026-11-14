@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -250,7 +251,7 @@ func TestComputeWindow(t *testing.T) {
 			retention:      72 * time.Hour,
 			wantStart:      at(4, 5),
 			wantEnd:        at(10, 5),
-			wantGap:        &fetchGap{Start: at(0, 4), End: at(4, 5)},
+			wantGap:        &fetchGap{Start: at(0, 5), End: at(4, 5)},
 		},
 		{
 			name:           "window exactly at max catch up has no gap",
@@ -262,16 +263,26 @@ func TestComputeWindow(t *testing.T) {
 			wantEnd:        at(10, 5),
 		},
 		{
-			name:            "event-time lateness beyond max catch up is a gap",
+			name:            "event-time overlap longer than catch up is not a gap",
 			now:             at(10, 6),
 			fetchWatermark:  at(10, 0),
 			schedule:        config.Schedule{IngestDelay: config.Duration(time.Minute), Overlap: config.Duration(time.Minute), MaxCatchUp: config.Duration(5 * time.Minute)},
 			retention:       72 * time.Hour,
 			lateness:        10 * time.Minute,
 			eventTimeSource: true,
-			wantStart:       at(10, 0),
+			wantStart:       at(9, 50),
 			wantEnd:         at(10, 5),
-			wantGap:         &fetchGap{Start: at(9, 50), End: at(10, 0)},
+		},
+		{
+			name:            "lateness wider than catch up is not a gap",
+			now:             at(10, 6),
+			fetchWatermark:  at(10, 0),
+			schedule:        config.Schedule{IngestDelay: config.Duration(time.Minute), Overlap: config.Duration(time.Minute), MaxCatchUp: config.Duration(time.Hour)},
+			retention:       72 * time.Hour,
+			lateness:        2 * time.Hour,
+			eventTimeSource: true,
+			wantStart:       at(8, 0),
+			wantEnd:         at(10, 5),
 		},
 		{
 			name:           "watermark at the window end rereads the overlap",
@@ -532,6 +543,15 @@ func datasetFetchWatermark(t *testing.T, database *gorm.DB) time.Time {
 		t.Fatalf("read watermark: %v", err)
 	}
 	return watermark.FetchWatermark
+}
+
+func datasetVersion(t *testing.T, database *gorm.DB) int {
+	t.Helper()
+	var version int
+	if err := database.Raw("SELECT version FROM datasets WHERE name = ?", testDataset).Scan(&version).Error; err != nil {
+		t.Fatalf("read dataset version: %v", err)
+	}
+	return version
 }
 
 func countRunRows(t *testing.T, database *gorm.DB) int {
@@ -823,6 +843,62 @@ func TestRunCanceled(t *testing.T) {
 	}
 }
 
+func TestRunCanceledBeforeFetch(t *testing.T) {
+	fake := &scriptedFetcher{}
+	runner, database := newRunner(t, fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner.NewFetcher = func(config.FetcherInstance) (fetcher.Fetcher, error) {
+		cancel()
+		return fake, nil
+	}
+
+	result, err := runner.Run(ctx, testPipelineID)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Status != StatusCanceled {
+		t.Errorf("Status = %q, want CANCELED", result.Status)
+	}
+	if fake.calls != 0 {
+		t.Errorf("fetch calls = %d, want 0 after cancellation while building", fake.calls)
+	}
+	row := loadRunRow(t, database, result.RunID)
+	if row.Status != string(StatusCanceled) || row.FinishedAt == nil {
+		t.Errorf("row status/finished = %q/%v, want CANCELED with a finish time", row.Status, row.FinishedAt)
+	}
+}
+
+func TestFailureStatus(t *testing.T) {
+	timeout := 2 * time.Minute
+	live := context.Background()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	canceled, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		runContext context.Context
+		wantStatus RunStatus
+		wantError  string
+	}{
+		{name: "still running", ctx: live, runContext: live, wantStatus: StatusFailed},
+		{name: "run deadline", ctx: live, runContext: expired, wantStatus: StatusTimedOut, wantError: "run timed out after 2m0s"},
+		{name: "parent canceled", ctx: canceled, runContext: live, wantStatus: StatusCanceled, wantError: "run canceled"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, message := failureStatus(test.ctx, test.runContext, timeout)
+			if status != test.wantStatus || message != test.wantError {
+				t.Errorf("failureStatus() = %q, %q; want %q, %q",
+					status, message, test.wantStatus, test.wantError)
+			}
+		})
+	}
+}
+
 func TestRunConcurrentSkip(t *testing.T) {
 	fake := &scriptedFetcher{}
 	runner, database := newRunner(t, fake)
@@ -862,6 +938,84 @@ func TestRunConcurrentSkip(t *testing.T) {
 	if row.Status != string(StatusSkipped) || row.WindowStart != nil {
 		t.Errorf("row status/window start = %q/%v, want SKIPPED without a window", row.Status, row.WindowStart)
 	}
+	if row.FinishedAt == nil {
+		t.Error("FinishedAt = nil, want a SKIPPED row with a finish time")
+	}
+}
+
+func TestRunMarksAbandonedRunFailed(t *testing.T) {
+	fake := &scriptedFetcher{}
+	runner, database := newRunner(t, fake)
+	registerDatasetWithWatermark(t, database, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
+
+	abandoned := runRow{
+		PipelineID:  testPipelineID,
+		Dataset:     testDataset,
+		Status:      string(StatusRunning),
+		FetchErrors: []fetchErrorRow{},
+		Warnings:    []string{},
+	}
+	if err := database.Create(&abandoned).Error; err != nil {
+		t.Fatalf("insert the abandoned run: %v", err)
+	}
+
+	result, err := runner.Run(context.Background(), testPipelineID)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Status != StatusOK {
+		t.Errorf("Status = %q, want OK; error = %q", result.Status, result.Error)
+	}
+	row := loadRunRow(t, database, abandoned.ID)
+	if row.Status != string(StatusFailed) {
+		t.Errorf("abandoned row status = %q, want FAILED", row.Status)
+	}
+	const message = "abandoned: the process ended during the run"
+	if row.Error == nil || *row.Error != message {
+		t.Errorf("abandoned row error = %v, want %q", row.Error, message)
+	}
+	if row.FinishedAt == nil {
+		t.Error("abandoned row finished_at = nil, want a finish time")
+	}
+	if row.Version != 2 {
+		t.Errorf("abandoned row version = %d, want 2", row.Version)
+	}
+}
+
+func TestRunNoProgressWarning(t *testing.T) {
+	watermark := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	firstFetchTime := watermark.Add(-5 * time.Minute)
+	eventTime := time.Now().UTC().Add(-5 * time.Minute)
+	page := []fetcher.SourceRecord{
+		sourceRecord("old-1", firstFetchTime, loginPayload(t, eventTime)),
+		sourceRecord("old-2", firstFetchTime.Add(time.Minute), loginPayload(t, eventTime)),
+	}
+	fake := &scriptedFetcher{
+		pages:  [][]fetcher.SourceRecord{page},
+		status: fetcher.FetchStatus{Status: fetcher.StatusPartial, Truncated: true},
+	}
+	runner, database := newRunner(t, fake, func(files *config.Files) {
+		files.Pipelines[0].Schedule.Overlap = config.Duration(10 * time.Minute)
+	})
+	registerDatasetWithWatermark(t, database, watermark)
+
+	result, err := runner.Run(context.Background(), testPipelineID)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Status != StatusPartial {
+		t.Errorf("Status = %q, want PARTIAL", result.Status)
+	}
+	if !slices.Contains(result.Warnings, "NO_PROGRESS") {
+		t.Errorf("Warnings = %v, want NO_PROGRESS", result.Warnings)
+	}
+	row := loadRunRow(t, database, result.RunID)
+	if !slices.Contains(row.Warnings, "NO_PROGRESS") {
+		t.Errorf("row warnings = %v, want NO_PROGRESS", row.Warnings)
+	}
+	if got := datasetFetchWatermark(t, database); !got.Equal(watermark) {
+		t.Errorf("fetch watermark = %s, want the unchanged %s", got, watermark)
+	}
 }
 
 func TestRunRecordsGap(t *testing.T) {
@@ -884,8 +1038,8 @@ func TestRunRecordsGap(t *testing.T) {
 	if row.GapStart == nil || row.GapEnd == nil {
 		t.Fatalf("Gap = %v..%v, want a recorded gap", row.GapStart, row.GapEnd)
 	}
-	if !row.GapStart.Equal(watermark.Add(-time.Minute)) {
-		t.Errorf("GapStart = %s, want %s", row.GapStart, watermark.Add(-time.Minute))
+	if !row.GapStart.Equal(watermark) {
+		t.Errorf("GapStart = %s, want %s", row.GapStart, watermark)
 	}
 	if !row.GapEnd.Equal(fake.request.Window.End.Add(-6 * time.Hour)) {
 		t.Errorf("GapEnd = %s, want %s", row.GapEnd, fake.request.Window.End.Add(-6*time.Hour))
@@ -900,6 +1054,9 @@ func TestRunEmptyWindow(t *testing.T) {
 	fake := &scriptedFetcher{}
 	runner, database := newRunner(t, fake)
 	registerDatasetWithWatermark(t, database, watermark)
+	// RegisterDataset bumps the version once per run; an empty window must not
+	// add the second bump an empty batch would.
+	versionBefore := datasetVersion(t, database)
 
 	result, err := runner.Run(context.Background(), testPipelineID)
 	if err != nil {
@@ -913,6 +1070,9 @@ func TestRunEmptyWindow(t *testing.T) {
 	}
 	if got := datasetFetchWatermark(t, database); !got.Equal(watermark) {
 		t.Errorf("fetch watermark = %s, want the unchanged %s", got, watermark)
+	}
+	if got := datasetVersion(t, database); got != versionBefore+1 {
+		t.Errorf("dataset version = %d, want %d (registration only, no empty batch)", got, versionBefore+1)
 	}
 }
 
