@@ -28,6 +28,7 @@ const (
 	maxLoginPasswordRunes = 128
 	maxUserAgentBytes     = 512
 	maxDisplayNameRunes   = 200
+	maxListedSessions     = 100
 )
 
 type failureWindow struct {
@@ -39,6 +40,26 @@ type failureWindow struct {
 type createdSession struct {
 	ID                string    `gorm:"column:id"`
 	AbsoluteExpiresAt time.Time `gorm:"column:absolute_expires_at"`
+}
+
+// sessionRow is one live session. PostgreSQL returns inet as text, which
+// database/sql cannot scan into net.IP, so the address lands as a string.
+type sessionRow struct {
+	ID                string    `gorm:"column:id"`
+	CreatedAt         time.Time `gorm:"column:created_at"`
+	LastUsedAt        time.Time `gorm:"column:last_used_at"`
+	IdleExpiresAt     time.Time `gorm:"column:idle_expires_at"`
+	AbsoluteExpiresAt time.Time `gorm:"column:absolute_expires_at"`
+	ClientIP          *string   `gorm:"column:client_ip"`
+	UserAgent         string    `gorm:"column:user_agent"`
+	AuthProvider      string    `gorm:"column:auth_provider"`
+}
+
+// lockedIdentity is the identity row ChangePassword and UseResetToken lock to
+// check the credential version.
+type lockedIdentity struct {
+	ID      string `gorm:"column:id"`
+	Version int    `gorm:"column:version"`
 }
 
 type sessionActor struct {
@@ -277,73 +298,9 @@ func (service *Service) Login(ctx context.Context, request LoginRequest, client 
 	}
 	hashedEmail := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(request.Email))))
 
-	// The attempt is recorded before the count so concurrent logins see each
-	// other's rows. The email lock then the address lock serializes the
-	// decision without holding anything across password hashing; the order is
-	// fixed so two logins cannot deadlock. A contended lock is the attack case,
-	// so it ends the login instead of queueing on a pooled connection.
-	var attemptID string
-	var emailWindow, addressWindow failureWindow
-	limited := false
-	lockBusy := false
-	err = service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		lockKeys := []int64{
-			loginLockKey("login-email:", hex.EncodeToString(hashedEmail[:])),
-			loginLockKey("login-ip:", client.IP.String()),
-		}
-		for _, key := range lockKeys {
-			var acquired bool
-			if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", key).Scan(&acquired).Error; err != nil {
-				return fmt.Errorf("lock login rate limit: %w", err)
-			}
-			if !acquired {
-				lockBusy = true
-				return nil
-			}
-		}
-
-		attempt := LoginAttempt{EmailHash: hashedEmail[:], ClientIP: client.IP, Succeeded: false}
-		if err := tx.Create(&attempt).Error; err != nil {
-			return fmt.Errorf("record login attempt: %w", err)
-		}
-		attemptID = attempt.ID
-
-		var err error
-		emailWindow, err = recentFailures(tx, "email_hash = ?", hashedEmail[:])
-		if err != nil {
-			return fmt.Errorf("count failed logins for the email: %w", err)
-		}
-		addressWindow, err = recentFailures(tx, "client_ip = ?", client.IP.String())
-		if err != nil {
-			return fmt.Errorf("count failed logins for the address: %w", err)
-		}
-		if emailWindow.Attempts > emailFailureLimit || addressWindow.Attempts > addressFailureLimit {
-			limited = true
-			if err := tx.Exec("DELETE FROM login_attempts WHERE id = ?", attemptID).Error; err != nil {
-				return fmt.Errorf("discard rate-limited login attempt: %w", err)
-			}
-		}
-		return nil
-	})
+	attemptID, err := service.reserveAttempt(ctx, hashedEmail, client)
 	if err != nil {
 		return LoginResult{}, err
-	}
-	if lockBusy {
-		service.logRateLimited(client)
-		return LoginResult{}, RateLimitedError{RetryAfter: time.Second}
-	}
-	if limited {
-		retryAfter := time.Duration(0)
-		if emailWindow.Attempts > emailFailureLimit {
-			retryAfter = windowRetryAfter(emailWindow)
-		}
-		if addressWindow.Attempts > addressFailureLimit {
-			if addressRetryAfter := windowRetryAfter(addressWindow); addressRetryAfter > retryAfter {
-				retryAfter = addressRetryAfter
-			}
-		}
-		service.logRateLimited(client)
-		return LoginResult{}, RateLimitedError{RetryAfter: retryAfter}
 	}
 
 	// Only a real credential failure keeps the attempt row; every other
@@ -377,6 +334,282 @@ func (service *Service) Login(ctx context.Context, request LoginRequest, client 
 	}
 
 	return service.startSession(ctx, user, identity, attemptID, client)
+}
+
+// reserveAttempt records a pending failed attempt and refuses it when the
+// account or address is over its limit; see Login for why it runs first.
+func (service *Service) reserveAttempt(ctx context.Context, emailHash [32]byte, client ClientInfo) (attemptID string, err error) {
+	// The attempt is recorded before the count so concurrent logins see each
+	// other's rows. The email lock then the address lock serializes the
+	// decision without holding anything across password hashing; the order is
+	// fixed so two logins cannot deadlock. A contended lock is the attack case,
+	// so it ends the login instead of queueing on a pooled connection.
+	var emailWindow, addressWindow failureWindow
+	limited := false
+	lockBusy := false
+	err = service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		lockKeys := []int64{
+			loginLockKey("login-email:", hex.EncodeToString(emailHash[:])),
+			loginLockKey("login-ip:", client.IP.String()),
+		}
+		for _, key := range lockKeys {
+			var acquired bool
+			if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", key).Scan(&acquired).Error; err != nil {
+				return fmt.Errorf("lock login rate limit: %w", err)
+			}
+			if !acquired {
+				lockBusy = true
+				return nil
+			}
+		}
+
+		attempt := LoginAttempt{EmailHash: emailHash[:], ClientIP: client.IP, Succeeded: false}
+		if err := tx.Create(&attempt).Error; err != nil {
+			return fmt.Errorf("record login attempt: %w", err)
+		}
+		attemptID = attempt.ID
+
+		var countErr error
+		emailWindow, countErr = recentFailures(tx, "email_hash = ?", emailHash[:])
+		if countErr != nil {
+			return fmt.Errorf("count failed logins for the email: %w", countErr)
+		}
+		addressWindow, countErr = recentFailures(tx, "client_ip = ?", client.IP.String())
+		if countErr != nil {
+			return fmt.Errorf("count failed logins for the address: %w", countErr)
+		}
+		if emailWindow.Attempts > emailFailureLimit || addressWindow.Attempts > addressFailureLimit {
+			limited = true
+			if err := tx.Exec("DELETE FROM login_attempts WHERE id = ?", attemptID).Error; err != nil {
+				return fmt.Errorf("discard rate-limited login attempt: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if lockBusy {
+		service.logRateLimited(client)
+		return "", RateLimitedError{RetryAfter: time.Second}
+	}
+	if limited {
+		retryAfter := time.Duration(0)
+		if emailWindow.Attempts > emailFailureLimit {
+			retryAfter = windowRetryAfter(emailWindow)
+		}
+		if addressWindow.Attempts > addressFailureLimit {
+			if addressRetryAfter := windowRetryAfter(addressWindow); addressRetryAfter > retryAfter {
+				retryAfter = addressRetryAfter
+			}
+		}
+		service.logRateLimited(client)
+		return "", RateLimitedError{RetryAfter: retryAfter}
+	}
+	return attemptID, nil
+}
+
+// ChangePassword replaces the actor's local password, revokes their other
+// sessions and unused reset tokens, and audits the change.
+func (service *Service) ChangePassword(ctx context.Context, actor Actor, client ClientInfo, currentPassword, newPassword string) (revokedCount int64, err error) {
+	client.IP = normalizedIP(client.IP)
+	if err := ValidatePassword(newPassword); err != nil {
+		return 0, err
+	}
+	emailHash := sha256.Sum256([]byte(actor.Email))
+
+	// The password change shares the login budget, so a stolen session cannot
+	// brute-force the current password.
+	attemptID, err := service.reserveAttempt(ctx, emailHash, client)
+	if err != nil {
+		return 0, err
+	}
+
+	// Only a credential failure keeps the attempt row; every other error after
+	// the reservation discards it.
+	defer func() {
+		if err != nil && !errors.Is(err, ErrInvalidCredentials) {
+			service.discardLoginAttempt(ctx, attemptID)
+		}
+	}()
+
+	identity, err := service.provider.Authenticate(
+		ctx, LoginRequest{Email: actor.Email, Password: currentPassword},
+	)
+	if err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			return 0, service.recordFailedPasswordChange(ctx, actor, client, "invalid_current_password")
+		}
+		return 0, fmt.Errorf("authenticate password change: %w", err)
+	}
+
+	passwordHash, err := HashPassword(ctx, newPassword)
+	if err != nil {
+		return 0, fmt.Errorf("hash password: %w", err)
+	}
+
+	credentialRejected := false
+	err = service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Take the user row first, then the identity, the same order as Login
+		// and UseResetToken. FOR NO KEY UPDATE still serializes the writers
+		// but does not block a concurrent session insert.
+		user, err := loadUserForNoKeyUpdate(tx, actor.UserID)
+		if errors.Is(err, ErrUserNotFound) {
+			return ErrUnauthenticated
+		}
+		if err != nil {
+			return err
+		}
+		if user.Status != StatusActive {
+			return ErrUnauthenticated
+		}
+		var sessionExists bool
+		if err := tx.Raw(
+			"SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND user_id = ?)",
+			actor.SessionID, actor.UserID,
+		).Scan(&sessionExists).Error; err != nil {
+			return fmt.Errorf("check actor session: %w", err)
+		}
+		if !sessionExists {
+			return ErrUnauthenticated
+		}
+
+		var identityRow lockedIdentity
+		err = tx.Raw(
+			"SELECT id::text AS id, version FROM user_identities WHERE user_id = ? AND provider = ? FOR UPDATE",
+			actor.UserID, identity.Provider,
+		).Scan(&identityRow).Error
+		if err != nil {
+			return fmt.Errorf("lock local identity: %w", err)
+		}
+		if identityRow.ID == "" || identityRow.Version != identity.CredentialVersion {
+			credentialRejected = true
+			return recordFailedPasswordChangeEvent(tx, actor, client, "credential_changed")
+		}
+
+		if err := tx.Exec(
+			"UPDATE user_identities SET password_hash = ?, version = version + 1, updated_at = now() WHERE id = ?",
+			passwordHash, identityRow.ID,
+		).Error; err != nil {
+			return fmt.Errorf("update password hash: %w", err)
+		}
+
+		sessions := tx.Exec(
+			"DELETE FROM sessions WHERE user_id = ? AND id <> ?", actor.UserID, actor.SessionID,
+		)
+		if sessions.Error != nil {
+			return fmt.Errorf("delete sessions: %w", sessions.Error)
+		}
+		revokedCount = sessions.RowsAffected
+
+		if err := tx.Exec(
+			"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", actor.UserID,
+		).Error; err != nil {
+			return fmt.Errorf("delete reset tokens: %w", err)
+		}
+		if err := tx.Exec(
+			"UPDATE login_attempts SET succeeded = true WHERE id = ?", attemptID,
+		).Error; err != nil {
+			return fmt.Errorf("mark password change attempt succeeded: %w", err)
+		}
+
+		event := userAuditEvent(actor, client, "AUTHENTICATION")
+		event.EventName = "simple_siem.auth.password_changed"
+		event.TargetID = actor.UserID
+		event.Action = "change_password"
+		event.Changes = map[string]any{"revokedCount": revokedCount}
+		return audit.Record(tx, event)
+	})
+	if err != nil {
+		return 0, err
+	}
+	if credentialRejected {
+		return 0, ErrInvalidCredentials
+	}
+	return revokedCount, nil
+}
+
+// recordFailedPasswordChange audits a rejected current password and always
+// returns the credential error. The audit must survive a canceled request,
+// and its failure must not turn a credential failure into an infrastructure
+// error that discards the attempt row.
+func (service *Service) recordFailedPasswordChange(ctx context.Context, actor Actor, client ClientInfo, reason string) error {
+	err := service.database.WithContext(context.WithoutCancel(ctx)).Transaction(func(tx *gorm.DB) error {
+		return recordFailedPasswordChangeEvent(tx, actor, client, reason)
+	})
+	if err != nil {
+		service.logger.Error("record failed password change",
+			"request_id", client.RequestID,
+			"error", err,
+		)
+	}
+	return ErrInvalidCredentials
+}
+
+func recordFailedPasswordChangeEvent(tx *gorm.DB, actor Actor, client ClientInfo, reason string) error {
+	event := userAuditEvent(actor, client, "AUTHENTICATION")
+	event.EventName = "simple_siem.auth.password_change"
+	event.EventOutcome = "FAILED"
+	event.TargetID = actor.UserID
+	event.Action = "change_password"
+	event.Changes = map[string]any{"reason": reason}
+	return audit.Record(tx, event)
+}
+
+// ListSessions returns the actor's live sessions, newest first.
+func (service *Service) ListSessions(ctx context.Context, actor Actor) ([]SessionInfo, error) {
+	var rows []sessionRow
+	err := service.database.WithContext(ctx).Raw(`
+		SELECT id::text AS id, created_at, last_used_at, idle_expires_at, absolute_expires_at,
+		       host(client_ip) AS client_ip, user_agent, auth_provider
+		FROM sessions
+		WHERE user_id = ? AND idle_expires_at > now() AND absolute_expires_at > now()
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?`, actor.UserID, maxListedSessions,
+	).Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+
+	sessions := make([]SessionInfo, 0, len(rows))
+	for _, row := range rows {
+		info := SessionInfo{
+			ID:                row.ID,
+			CreatedAt:         row.CreatedAt,
+			LastUsedAt:        row.LastUsedAt,
+			IdleExpiresAt:     row.IdleExpiresAt,
+			AbsoluteExpiresAt: row.AbsoluteExpiresAt,
+			ClientIP:          row.ClientIP,
+			UserAgent:         row.UserAgent,
+			AuthProvider:      row.AuthProvider,
+			Current:           row.ID == actor.SessionID,
+		}
+		sessions = append(sessions, info)
+	}
+	return sessions, nil
+}
+
+// RevokeSession ends one of the actor's own sessions.
+func (service *Service) RevokeSession(ctx context.Context, actor Actor, client ClientInfo, sessionID string) error {
+	return service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Exec(
+			"DELETE FROM sessions WHERE id = ? AND user_id = ?", sessionID, actor.UserID,
+		)
+		if result.Error != nil {
+			return fmt.Errorf("delete session: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return ErrSessionNotFound
+		}
+
+		event := userAuditEvent(actor, client, "AUTHENTICATION")
+		event.EventName = "simple_siem.auth.session_revoked"
+		event.TargetType = "SESSION"
+		event.TargetID = sessionID
+		event.Action = "revoke_session"
+		event.Changes = map[string]any{"current": sessionID == actor.SessionID}
+		return audit.Record(tx, event)
+	})
 }
 
 // discardLoginAttempt removes the row of a login that ended in an

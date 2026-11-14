@@ -68,7 +68,7 @@ func Record(tx *gorm.DB, event Event) error {
 	if err != nil {
 		return err
 	}
-	event.Changes, event.Redactions = redact(changes)
+	event.Changes, event.Redactions = redact(changes, "changes")
 	if err := tx.Create(&event).Error; err != nil {
 		return fmt.Errorf("record audit event: %w", err)
 	}
@@ -231,13 +231,13 @@ func normalizeChanges(changes map[string]any) (map[string]any, error) {
 	}
 	encoded, err := json.Marshal(changes)
 	if err != nil {
-		return nil, fmt.Errorf("encode audit changes: %w", err)
+		return nil, fmt.Errorf("encode values: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.UseNumber()
 	var normalized map[string]any
 	if err := decoder.Decode(&normalized); err != nil {
-		return nil, fmt.Errorf("decode audit changes: %w", err)
+		return nil, fmt.Errorf("decode values: %w", err)
 	}
 	return normalized, nil
 }
@@ -266,9 +266,22 @@ func validate(event Event) error {
 	return nil
 }
 
-func redact(changes map[string]any) (map[string]any, []string) {
+// SensitivePaths returns the sorted paths of values' keys, at any depth, that
+// IsSensitiveKey matches; root prefixes every path.
+func SensitivePaths(values map[string]any, root string) ([]string, error) {
+	normalized, err := normalizeChanges(values)
+	if err != nil {
+		return nil, err
+	}
 	paths := []string{}
-	redacted := redactMap(changes, "changes", &paths)
+	redactMap(normalized, root, &paths)
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func redact(changes map[string]any, root string) (map[string]any, []string) {
+	paths := []string{}
+	redacted := redactMap(changes, root, &paths)
 	sort.Strings(paths)
 	return redacted, paths
 }
@@ -280,7 +293,7 @@ func redactMap(values map[string]any, path string, paths *[]string) map[string]a
 	redacted := make(map[string]any, len(values))
 	for key, value := range values {
 		keyPath := path + "." + key
-		if isSensitiveKey(key) {
+		if IsSensitiveKey(key) {
 			redacted[key] = redactedValue
 			*paths = append(*paths, keyPath)
 			continue
@@ -308,10 +321,14 @@ func redactValue(value any, path string, paths *[]string) any {
 	}
 }
 
-func isSensitiveKey(key string) bool {
+// IsSensitiveKey reports whether a map key names a secret; audit redacts such
+// values and the outbox rejects them.
+func IsSensitiveKey(key string) bool {
 	lowered := strings.ToLower(key)
 	identifier := strings.ReplaceAll(strings.ReplaceAll(lowered, "_", ""), "-", "")
-	if strings.HasSuffix(identifier, "ref") || strings.HasSuffix(identifier, "refid") {
+	// A key ending in href is a link, not a reference to a stored secret.
+	reference := strings.HasSuffix(identifier, "ref") || strings.HasSuffix(identifier, "refid")
+	if reference && !strings.HasSuffix(identifier, "href") {
 		return false
 	}
 	for _, part := range sensitiveKeyParts {

@@ -39,6 +39,7 @@ describe("API contract files", () => {
       "email",
       "displayName",
       "status",
+      "onCall",
       "roles",
       "createdAt",
       "updatedAt",

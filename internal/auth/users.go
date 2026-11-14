@@ -10,8 +10,11 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
+	"github.com/RabbITCybErSeC/simple-siem/internal/outbox"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -108,6 +111,62 @@ func (service *Service) ListUsers(ctx context.Context, filter UserFilter) ([]Use
 		users = append(users, UserWithRoles{User: row.User, Roles: splitNames(row.RoleNames)})
 	}
 	return users, total, nil
+}
+
+func (service *Service) Directory(ctx context.Context, filter DirectoryFilter) ([]DirectoryEntry, error) {
+	query := strings.TrimSpace(filter.Query)
+	if query != "" && len(filter.IDs) > 0 {
+		return nil, fmt.Errorf("%w: q and ids cannot be combined", ErrInvalidDirectoryFilter)
+	}
+	if filter.Query != "" && (query == "" || utf8.RuneCountInString(query) > MaxDirectoryQueryRunes) {
+		return nil, fmt.Errorf("%w: q must be 1 to %d characters", ErrInvalidDirectoryFilter, MaxDirectoryQueryRunes)
+	}
+	if query != "" && (!utf8.ValidString(query) || strings.ContainsFunc(query, unicode.IsControl)) {
+		return nil, fmt.Errorf("%w: q contains invalid characters", ErrInvalidDirectoryFilter)
+	}
+	if len(filter.IDs) > MaxDirectoryIDs {
+		return nil, fmt.Errorf("%w: ids accepts at most %d ids", ErrInvalidDirectoryFilter, MaxDirectoryIDs)
+	}
+	for _, id := range filter.IDs {
+		if !audit.ValidID(id) {
+			return nil, fmt.Errorf("%w: ids contains an invalid user id", ErrInvalidDirectoryFilter)
+		}
+	}
+	limit := filter.Limit
+	if limit == 0 {
+		limit = DefaultDirectoryLimit
+	}
+	if limit < 1 || limit > MaxDirectoryLimit {
+		return nil, fmt.Errorf("%w: limit must be 1 to %d", ErrInvalidDirectoryFilter, MaxDirectoryLimit)
+	}
+
+	database := service.database.WithContext(ctx)
+	entries := make([]DirectoryEntry, 0)
+	var err error
+	if len(filter.IDs) > 0 {
+		err = database.Raw(`
+			SELECT id::text AS id, display_name, status
+			FROM users
+			WHERE id IN ?
+			ORDER BY lower(display_name), id`, filter.IDs).Scan(&entries).Error
+	} else {
+		condition := " WHERE status = ?"
+		arguments := []any{StatusActive}
+		if query != "" {
+			condition += ` AND lower(display_name) LIKE lower(?) || '%' ESCAPE '\'`
+			arguments = append(arguments, escapeLike(query))
+		}
+		arguments = append(arguments, limit)
+		err = database.Raw(`
+			SELECT id::text AS id, display_name, status
+			FROM users`+condition+`
+			ORDER BY lower(display_name), id
+			LIMIT ?`, arguments...).Scan(&entries).Error
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list directory: %w", err)
+	}
+	return entries, nil
 }
 
 func (service *Service) GetUser(ctx context.Context, userID string) (UserWithRoles, error) {
@@ -309,6 +368,7 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 			Where("id = ? AND version = ?", user.ID, version).
 			Updates(map[string]any{
 				"status":     StatusDisabled,
+				"on_call":    false,
 				"updated_at": gorm.Expr("now()"),
 				"version":    gorm.Expr("version + 1"),
 			})
@@ -333,9 +393,18 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 		event.EventName = "simple_siem.user.disabled"
 		event.TargetID = user.ID
 		event.Action = "disable"
-		event.Changes = map[string]any{"revokedCount": sessions.RowsAffected}
+		event.Changes = map[string]any{
+			"revokedCount": sessions.RowsAffected,
+			"before":       map[string]any{"status": user.Status, "onCall": user.OnCall},
+			"after":        map[string]any{"status": StatusDisabled, "onCall": false},
+		}
 		if err := audit.Record(tx, event); err != nil {
 			return err
+		}
+		if user.OnCall {
+			if err := outbox.Record(tx, onCallEvent(actor, user, false, "user_disabled")); err != nil {
+				return err
+			}
 		}
 
 		disabled, err = loadUserWithRoles(tx, user.ID)
@@ -401,6 +470,56 @@ func (service *Service) EnableUser(ctx context.Context, actor Actor, client Clie
 		return UserWithRoles{}, err
 	}
 	return enabled, nil
+}
+
+func (service *Service) SetOnCall(ctx context.Context, actor Actor, client ClientInfo, userID string, onCall bool) (UserWithRoles, error) {
+	var updated UserWithRoles
+	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		user, err := lockTargetForMutation(tx, actor, userID)
+		if err != nil {
+			return err
+		}
+		if onCall && user.Status != StatusActive {
+			return fmt.Errorf("%w: only an active user can be on call", ErrStateConflict)
+		}
+		if user.OnCall == onCall {
+			updated, err = loadUserWithRoles(tx, user.ID)
+			return err
+		}
+
+		err = tx.Model(&User{}).
+			Where("id = ?", user.ID).
+			Updates(map[string]any{
+				"on_call":    onCall,
+				"updated_at": gorm.Expr("now()"),
+				"version":    gorm.Expr("version + 1"),
+			}).Error
+		if err != nil {
+			return fmt.Errorf("set on call: %w", err)
+		}
+
+		event := userAuditEvent(actor, client, "USER")
+		event.EventName = "simple_siem.user.on_call_changed"
+		event.TargetID = user.ID
+		event.Action = "set_on_call"
+		event.Changes = map[string]any{
+			"before": map[string]any{"onCall": user.OnCall},
+			"after":  map[string]any{"onCall": onCall},
+		}
+		if err := audit.Record(tx, event); err != nil {
+			return err
+		}
+		if err := outbox.Record(tx, onCallEvent(actor, user, onCall, "")); err != nil {
+			return err
+		}
+
+		updated, err = loadUserWithRoles(tx, user.ID)
+		return err
+	})
+	if err != nil {
+		return UserWithRoles{}, err
+	}
+	return updated, nil
 }
 
 func (service *Service) AssignRole(ctx context.Context, actor Actor, client ClientInfo, userID, role string) (UserWithRoles, error) {
@@ -611,10 +730,7 @@ func (service *Service) UseResetToken(ctx context.Context, token, password strin
 			return ErrInvalidResetToken
 		}
 
-		var identity struct {
-			ID      string `gorm:"column:id"`
-			Version int    `gorm:"column:version"`
-		}
+		var identity lockedIdentity
 		err = tx.Raw(
 			"SELECT id::text AS id, version FROM user_identities WHERE user_id = ? AND provider = ? FOR UPDATE",
 			lookup.UserID, ProviderLocal,
@@ -728,6 +844,14 @@ func splitNames(names string) []string {
 		return []string{}
 	}
 	return strings.Split(names, ",")
+}
+
+// escapeLike makes the three LIKE metacharacters match literally under
+// ESCAPE '\'.
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	return strings.ReplaceAll(value, `_`, `\_`)
 }
 
 // uniqueRoles collapses duplicates and sorts the result, so stored and audited
@@ -850,6 +974,26 @@ func otherActiveAdmins(database *gorm.DB, userID string) (int64, error) {
 		return 0, fmt.Errorf("count active admins: %w", err)
 	}
 	return count, nil
+}
+
+// onCallEvent builds the event every on-call change writes; reason is empty
+// unless the change needs an explanation.
+func onCallEvent(actor Actor, user User, onCall bool, reason string) outbox.Event {
+	payload := map[string]any{
+		"userId":      user.ID,
+		"displayName": user.DisplayName,
+		"onCall":      onCall,
+	}
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	return outbox.Event{
+		Type:      outbox.TypeUserOnCallChanged,
+		Version:   1,
+		Actor:     outbox.Actor{Type: outbox.ActorUser, ID: actor.UserID},
+		SubjectID: user.ID,
+		Payload:   payload,
+	}
 }
 
 // userAuditEvent fills the fields every admin mutation of a user shares.

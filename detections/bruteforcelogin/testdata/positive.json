@@ -1,0 +1,148 @@
+{
+  "window": {"start": "2026-05-11T10:00:00Z", "end": "2026-05-11T10:15:00Z"},
+  "datasets": {
+    "auth_events": [
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "1"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:01:00Z", "ingested_timestamp": "2026-05-11T10:01:03Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52114},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "2"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:01:30Z", "ingested_timestamp": "2026-05-11T10:01:33Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52115},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "3"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:02:00Z", "ingested_timestamp": "2026-05-11T10:02:03Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52116},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "4"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:02:30Z", "ingested_timestamp": "2026-05-11T10:02:33Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52117},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "5"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:03:00Z", "ingested_timestamp": "2026-05-11T10:03:03Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52118},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "6"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:03:30Z", "ingested_timestamp": "2026-05-11T10:03:33Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52119},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "7"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:04:00Z", "ingested_timestamp": "2026-05-11T10:04:03Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52120},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "8"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:04:30Z", "ingested_timestamp": "2026-05-11T10:04:33Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52121},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "9"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:05:00Z", "ingested_timestamp": "2026-05-11T10:05:03Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52122},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "10"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:05:30Z", "ingested_timestamp": "2026-05-11T10:05:33Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52123},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "11"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:06:00Z", "ingested_timestamp": "2026-05-11T10:06:03Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_failed_password", "description": "Failed password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52124},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "BLOCK"}
+        }
+      },
+      {
+        "sourceKey": {"fetcherInstanceId": "fixture", "index": "auth", "documentId": "12"},
+        "event": {
+          "metadata": {"event_timestamp": "2026-05-11T10:07:00Z", "ingested_timestamp": "2026-05-11T10:07:03Z", "event_type": "USER_LOGIN", "vendor_name": "OpenSSH", "product_name": "sshd", "product_event_type": "sshd_accepted_password", "description": "Accepted password for alice from 203.0.113.7"},
+          "principal": {"ip": ["203.0.113.7"], "port": 52125},
+          "target": {"user": {"userid": "alice"}, "hostname": "web01", "application": "sshd"},
+          "network": {"application_protocol": "SSH"},
+          "extensions": {"auth": {"mechanism": "USERNAME_PASSWORD"}},
+          "security_result": {"action": "ALLOW"}
+        }
+      }
+    ]
+  },
+  "expect": {
+    "proposals": [
+      {
+        "identity": {"target.user.userid": "alice", "target.hostname": "web01"},
+        "severity": "HIGH",
+        "evidenceCount": 12
+      }
+    ]
+  }
+}

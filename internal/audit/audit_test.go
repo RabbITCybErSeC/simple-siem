@@ -581,6 +581,24 @@ func TestRecordKeepsReferenceKeys(t *testing.T) {
 	}
 }
 
+func TestRecordRedactsHrefKeys(t *testing.T) {
+	db := databasetest.New(t)
+	event := validEvent("href-redaction")
+	event.Changes = map[string]any{"passwordResetHref": "https://example.com/r"}
+
+	if err := audit.Record(db, event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	stored := storedEventByTarget(t, db, event.TargetID)
+	changes := storedChanges(t, stored)
+	if got := changes["passwordResetHref"]; got != redactedValue {
+		t.Errorf("stored changes.passwordResetHref = %v, want %s", got, redactedValue)
+	}
+	if !slices.Contains(storedRedactions(t, stored), "changes.passwordResetHref") {
+		t.Errorf("stored redactions = %v, want changes.passwordResetHref", storedRedactions(t, stored))
+	}
+}
+
 func TestListFiltersByEachEqualityField(t *testing.T) {
 	db := databasetest.New(t)
 	matchActorID := "actor-filter"

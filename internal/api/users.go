@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
@@ -50,6 +52,104 @@ func (users userHandler) list(c *gin.Context) {
 		data = append(data, newUserResponse(user))
 	}
 	c.JSON(http.StatusOK, userListResponse{Data: data, Pagination: newPagination(page, pageSize, total)})
+}
+
+func (users userHandler) directory(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	query, ok := allowedQuery(c, "q", "ids", "limit")
+	if !ok {
+		return
+	}
+	filter, ok := parseDirectoryFilter(c, query)
+	if !ok {
+		return
+	}
+
+	entries, err := users.service.Directory(c.Request.Context(), filter)
+	if err != nil {
+		writeUserError(c, users.logger, err)
+		return
+	}
+	data := make([]directoryEntryResponse, 0, len(entries))
+	for _, entry := range entries {
+		data = append(data, directoryEntryResponse{
+			ID:          entry.ID,
+			DisplayName: entry.DisplayName,
+			Status:      entry.Status,
+		})
+	}
+	c.JSON(http.StatusOK, directoryListResponse{Data: data})
+}
+
+func (users userHandler) setOnCall(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	userID, ok := pathUUID(c, "userId", "user not found")
+	if !ok {
+		return
+	}
+	var request onCallRequest
+	if !decodeJSONBody(c, &request) {
+		return
+	}
+	if request.OnCall == nil {
+		invalidParameter(c, "onCall")
+		return
+	}
+
+	actor := c.MustGet(ActorKey).(auth.Actor)
+	user, err := users.service.SetOnCall(c.Request.Context(), actor, clientInfo(c), userID, *request.OnCall)
+	if err != nil {
+		writeUserError(c, users.logger, err)
+		return
+	}
+	c.JSON(http.StatusOK, newUserResponse(user))
+}
+
+// parseDirectoryFilter validates the directory parameters in the handler, so
+// each error names the parameter the caller has to fix.
+func parseDirectoryFilter(c *gin.Context, query url.Values) (auth.DirectoryFilter, bool) {
+	for _, name := range []string{"q", "ids", "limit"} {
+		if len(query[name]) > 1 {
+			invalidParameter(c, name)
+			return auth.DirectoryFilter{}, false
+		}
+	}
+
+	var filter auth.DirectoryFilter
+	if query.Has("q") {
+		filter.Query = strings.TrimSpace(query.Get("q"))
+		if filter.Query == "" || utf8.RuneCountInString(filter.Query) > auth.MaxDirectoryQueryRunes ||
+			!utf8.ValidString(filter.Query) || strings.ContainsFunc(filter.Query, unicode.IsControl) {
+			invalidParameter(c, "q")
+			return auth.DirectoryFilter{}, false
+		}
+	}
+	if query.Has("ids") {
+		filter.IDs = strings.Split(query.Get("ids"), ",")
+		if len(filter.IDs) > auth.MaxDirectoryIDs {
+			invalidParameter(c, "ids")
+			return auth.DirectoryFilter{}, false
+		}
+		for _, id := range filter.IDs {
+			if !audit.ValidID(id) {
+				invalidParameter(c, "ids")
+				return auth.DirectoryFilter{}, false
+			}
+		}
+	}
+	if filter.Query != "" && len(filter.IDs) > 0 {
+		writeError(c, http.StatusBadRequest, codeValidationError, "q and ids cannot be combined")
+		return auth.DirectoryFilter{}, false
+	}
+	if query.Has("limit") {
+		limit, err := strconv.Atoi(query.Get("limit"))
+		if err != nil || limit < 1 || limit > auth.MaxDirectoryLimit {
+			invalidParameter(c, "limit")
+			return auth.DirectoryFilter{}, false
+		}
+		filter.Limit = limit
+	}
+	return filter, true
 }
 
 func (users userHandler) create(c *gin.Context) {
@@ -325,6 +425,7 @@ func newUserResponse(user auth.UserWithRoles) userResponse {
 		Email:       user.User.Email,
 		DisplayName: user.User.DisplayName,
 		Status:      user.User.Status,
+		OnCall:      user.User.OnCall,
 		Roles:       roles,
 		CreatedAt:   user.User.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   user.User.UpdatedAt.UTC().Format(time.RFC3339),
@@ -348,7 +449,7 @@ func writeUserError(c *gin.Context, logger *slog.Logger, err error) {
 		invalidParameter(c, "page")
 	case errors.Is(err, auth.ErrUnknownRole), errors.Is(err, auth.ErrInvalidEmail),
 		errors.Is(err, auth.ErrInvalidDisplayName), errors.Is(err, auth.ErrPasswordLength),
-		errors.Is(err, auth.ErrInvalidStatus):
+		errors.Is(err, auth.ErrInvalidStatus), errors.Is(err, auth.ErrInvalidDirectoryFilter):
 		writeError(c, http.StatusBadRequest, codeValidationError, err.Error())
 	case errors.Is(err, auth.ErrInvalidResetToken):
 		writeError(c, http.StatusBadRequest, codeValidationError, "invalid or expired token")

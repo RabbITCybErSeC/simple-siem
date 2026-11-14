@@ -55,13 +55,11 @@ func Load(getenv func(string) string) (Config, error) {
 
 	var problems []error
 
-	if value := getenv(environmentVariable); value != "" {
-		settings.Environment = Environment(value)
-	}
-	switch settings.Environment {
-	case EnvironmentDevelopment, EnvironmentProduction:
-	default:
-		problems = append(problems, fmt.Errorf("%s must be %q or %q", environmentVariable, EnvironmentDevelopment, EnvironmentProduction))
+	environment, environmentError := ParseEnvironment(getenv(environmentVariable))
+	if environmentError != nil {
+		problems = append(problems, environmentError)
+	} else {
+		settings.Environment = environment
 	}
 
 	if settings.DatabaseURL == "" {

@@ -1,0 +1,36 @@
+id: brute-force-then-success
+version: 1.0.0
+name: Brute force followed by a successful login
+description: >
+  Many failed logons for one account on one host, then a success from the same
+  origin inside the window.
+owner: secops
+severity: HIGH
+tags: [attack.t1110]
+initialStatus: SHADOW          # status on first registration
+
+inputs:
+  - dataset: auth_events
+    eventTypes: [USER_LOGIN]
+    onStalledInput: wait       # wait | fail | run_partial (Phase 3)
+
+window:
+  size: 15m                    # range one run covers
+  every: 5m                    # schedule; used by the scheduler
+
+budgets:
+  timeout: 30s
+  maxRows: 1000000
+  maxProposals: 100
+  maxEvidencePerProposal: 1000
+
+alerting:                      # see timing-semantics.md, Alert Coalescing
+  mode: MERGE
+  identitySchemaVersion: 1
+  identityFields:
+    - path: target.user.userid
+      required: true
+    - path: target.hostname
+      fallback: target.ip
+  coalesceWindow: 2h
+  maxAlertSpan: 24h

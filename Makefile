@@ -30,10 +30,15 @@ WEB_PORT ?= 5173
 
 # Security stays on with HTTP basic auth so the seeder and fetcher exercise the
 # same path as production; .env may override the development-only password.
-ELASTICSEARCH_IMAGE := docker.elastic.co/elasticsearch/elasticsearch:9.1.0
-ELASTICSEARCH_CONTAINER := simple-siem-elasticsearch
-ELASTICSEARCH_VOLUME := simple-siem-elasticsearch
+ELASTICSEARCH_IMAGE ?= docker.elastic.co/elasticsearch/elasticsearch:9.1.0
+ELASTICSEARCH_CONTAINER ?= simple-siem-elasticsearch
+ELASTICSEARCH_VOLUME ?= simple-siem-elasticsearch
+ELASTICSEARCH_PORT ?= 9200
 ELASTICSEARCH_PASSWORD ?= simple_siem_dev
+ELASTICSEARCH_8_IMAGE ?= docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+ELASTICSEARCH_8_CONTAINER ?= simple-siem-elasticsearch-8
+ELASTICSEARCH_8_VOLUME ?= simple-siem-elasticsearch-8
+ELASTICSEARCH_8_PORT ?= 9201
 
 # Read the same values the containers receive, so RUN assembles one database
 # URL from them instead of duplicating the defaults.
@@ -51,7 +56,11 @@ API_HOST ?= $(NETWORK_GATEWAY)
 API_PORT ?= 8081
 API_PUBLISH ?= -p 127.0.0.1:8080:8080 -p $(NETWORK_GATEWAY):$(API_PORT):8080
 ELASTICSEARCH_HOST ?= $(NETWORK_GATEWAY)
-ELASTICSEARCH_PUBLISH ?= -p $(NETWORK_GATEWAY):9200:9200
+ELASTICSEARCH_PUBLISH ?= -p $(NETWORK_GATEWAY):$(ELASTICSEARCH_PORT):9200
+ELASTICSEARCH_8_PUBLISH ?= -p $(NETWORK_GATEWAY):$(ELASTICSEARCH_8_PORT):9200
+# The toolchain container reaches the published ports through the gateway.
+ELASTICSEARCH_URL := http://$(ELASTICSEARCH_HOST):$(ELASTICSEARCH_PORT)
+ELASTICSEARCH_8_URL := http://$(ELASTICSEARCH_HOST):$(ELASTICSEARCH_8_PORT)
 else
 POSTGRES_HOST ?= $(POSTGRES_CONTAINER)
 POSTGRES_PUBLISH ?=
@@ -59,10 +68,13 @@ API_HOST ?= $(DEV_CONTAINER)
 API_PORT ?= 8080
 API_PUBLISH ?= -p 127.0.0.1:8080:8080
 ELASTICSEARCH_HOST ?= $(ELASTICSEARCH_CONTAINER)
-ELASTICSEARCH_PUBLISH ?= -p 127.0.0.1:9200:9200
-endif
-
+ELASTICSEARCH_PUBLISH ?= -p 127.0.0.1:$(ELASTICSEARCH_PORT):9200
+ELASTICSEARCH_8_HOST ?= $(ELASTICSEARCH_8_CONTAINER)
+ELASTICSEARCH_8_PUBLISH ?= -p 127.0.0.1:$(ELASTICSEARCH_8_PORT):9200
+# Docker resolves container names on the network, so use the container port.
 ELASTICSEARCH_URL := http://$(ELASTICSEARCH_HOST):9200
+ELASTICSEARCH_8_URL := http://$(ELASTICSEARCH_8_HOST):9200
+endif
 
 DATABASE_URL := postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)?sslmode=disable
 
@@ -99,7 +111,7 @@ RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/
 PNPM_ENV = --env PNPM_CONFIG_STORE_DIR=/pnpm-store --env PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy
 WEB_RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src/web -v $(PNPM_STORE_VOLUME):/pnpm-store -v $(NODE_MODULES_VOLUME):/src/web/node_modules $(PNPM_ENV)
 
-.PHONY: toolchain network postgres test lint build e2e e2e-image run dev db-shell image debug down clean pnpm shadcn-mcp es seed-auth-logs
+.PHONY: toolchain network postgres test lint build e2e e2e-image run dev db-shell image debug down clean pnpm shadcn-mcp es es8 test-es test-es-run test-es8 seed-auth-logs
 
 # The stamp alone misses an image deleted outside make, so check the image first.
 toolchain:
@@ -123,27 +135,39 @@ postgres: network
 
 # Apple container does not initialize named-volume ownership, and the image
 # runs as uid 1000, so give a new data volume to that user before first start.
-es: network
+# start_elasticsearch(name,volume,image,publish)
+define start_elasticsearch
 	@set -e; \
-	if ! $(CONTAINER) start $(ELASTICSEARCH_CONTAINER) >/dev/null 2>&1; then \
-		if ! $(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) /bin/sh -c true >/dev/null 2>&1; then \
-			$(CONTAINER) run --rm --user root --entrypoint /bin/sh -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data $(ELASTICSEARCH_IMAGE) -c 'chown -R 1000:0 /usr/share/elasticsearch/data'; \
-			$(CONTAINER) run -d --name $(ELASTICSEARCH_CONTAINER) --network $(NETWORK) --memory 2g $(ELASTICSEARCH_PUBLISH) -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data --env discovery.type=single-node --env xpack.security.enabled=true --env xpack.security.http.ssl.enabled=false --env xpack.security.transport.ssl.enabled=false --env node.store.allow_mmap=false --env ES_JAVA_OPTS="-Xms1g -Xmx1g" --env ELASTIC_PASSWORD=$(ELASTICSEARCH_PASSWORD) $(ELASTICSEARCH_IMAGE); \
+	if ! $(CONTAINER) start $(1) >/dev/null 2>&1; then \
+		if ! $(CONTAINER) exec $(1) /bin/sh -c true >/dev/null 2>&1; then \
+			$(CONTAINER) run --rm --user root --entrypoint /bin/sh -v $(2):/usr/share/elasticsearch/data $(3) -c 'chown -R 1000:0 /usr/share/elasticsearch/data'; \
+			$(CONTAINER) run -d --name $(1) --network $(NETWORK) --memory 2g $(4) -v $(2):/usr/share/elasticsearch/data --env discovery.type=single-node --env xpack.security.enabled=true --env xpack.security.http.ssl.enabled=false --env xpack.security.transport.ssl.enabled=false --env node.store.allow_mmap=false --env ES_JAVA_OPTS="-Xms1g -Xmx1g" --env ELASTIC_PASSWORD=$(ELASTICSEARCH_PASSWORD) $(3); \
 		fi; \
 	fi
-	@for attempt in $$(seq 1 120); do \
-		code=$$($(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) curl -s -o /dev/null -w '%{http_code}' -u "elastic:$(ELASTICSEARCH_PASSWORD)" 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s' 2>/dev/null); \
+	@unauthorized=0; \
+	for attempt in $$(seq 1 120); do \
+		code=$$($(CONTAINER) exec $(1) curl -s -o /dev/null -w '%{http_code}' -u "elastic:$(ELASTICSEARCH_PASSWORD)" 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s' 2>/dev/null); \
 		if [ "$$code" = "401" ]; then \
-			echo "Elasticsearch rejected the password; the volume $(ELASTICSEARCH_VOLUME) was created with a different ELASTICSEARCH_PASSWORD" >&2; \
-			exit 1; \
+			unauthorized=1; \
 		fi; \
 		if [ "$$code" = "200" ]; then \
 			exit 0; \
 		fi; \
 		if [ $$attempt -lt 120 ]; then sleep 1; fi; \
 	done; \
-	echo "Elasticsearch did not become healthy within 120 seconds" >&2; \
+	if [ "$$unauthorized" = "1" ]; then \
+		echo "Elasticsearch rejected the password; the volume $(2) was created with a different ELASTICSEARCH_PASSWORD" >&2; \
+	else \
+		echo "Elasticsearch did not become healthy within 120 seconds" >&2; \
+	fi; \
 	exit 1
+endef
+
+es: network
+	$(call start_elasticsearch,$(ELASTICSEARCH_CONTAINER),$(ELASTICSEARCH_VOLUME),$(ELASTICSEARCH_IMAGE),$(ELASTICSEARCH_PUBLISH))
+
+es8: network
+	$(call start_elasticsearch,$(ELASTICSEARCH_8_CONTAINER),$(ELASTICSEARCH_8_VOLUME),$(ELASTICSEARCH_8_IMAGE),$(ELASTICSEARCH_8_PUBLISH))
 
 $(TOOLCHAIN_STAMP): Dockerfile
 	@mkdir -p $(dir $@)
@@ -163,6 +187,21 @@ $(E2E_STAMP): Dockerfile web/package.json
 test: postgres toolchain web/node_modules
 	$(RUN) $(TOOLCHAIN_IMAGE) go test $(or $(GO_TEST_ARGS),./...)
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm test'
+
+# The Elasticsearch integration suite is not part of plain `make test`: it
+# fails, never skips, when the backend is missing.
+test-es: es toolchain
+	$(MAKE) --no-print-directory test-es-run
+
+test-es-run:
+	$(RUN) $(TOOLCHAIN_IMAGE) go test -count=1 -tags elasticsearch ./internal/fetcher/... ./internal/pipeline/...
+
+test-es8: es8 toolchain
+	@set +e; \
+	$(MAKE) --no-print-directory ELASTICSEARCH_URL=$(ELASTICSEARCH_8_URL) test-es-run; \
+	status=$$?; \
+	$(CONTAINER) stop $(ELASTICSEARCH_8_CONTAINER) >/dev/null 2>&1 || true; \
+	exit $$status
 
 lint: network toolchain web/node_modules
 	$(RUN) $(TOOLCHAIN_IMAGE) golangci-lint run

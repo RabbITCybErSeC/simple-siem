@@ -135,11 +135,49 @@ type LoginResult struct {
 	Roles     []string
 }
 
+// SessionInfo is one live session of the current user, without token data.
+type SessionInfo struct {
+	ID                string
+	CreatedAt         time.Time
+	LastUsedAt        time.Time
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
+	ClientIP          *string
+	UserAgent         string
+	AuthProvider      string
+	Current           bool
+}
+
 // UserFilter narrows a user list; an empty status means every status.
 type UserFilter struct {
 	Status   string
 	Page     int
 	PageSize int
+}
+
+// Directory limits are exported so the HTTP handler validates the same
+// values the service accepts.
+const (
+	DefaultDirectoryLimit  = 20
+	MaxDirectoryQueryRunes = 100
+	MaxDirectoryIDs        = 50
+	MaxDirectoryLimit      = 50
+)
+
+// DirectoryFilter narrows the user directory. Query and IDs are mutually
+// exclusive; a zero Limit means the default page size.
+type DirectoryFilter struct {
+	Query string
+	IDs   []string
+	Limit int
+}
+
+// DirectoryEntry is one user in the directory, with only the fields a picker
+// needs.
+type DirectoryEntry struct {
+	ID          string `gorm:"column:id"`
+	DisplayName string `gorm:"column:display_name"`
+	Status      string `gorm:"column:status"`
 }
 
 // UserWithRoles is one user and the names of the roles assigned to them.
@@ -168,13 +206,14 @@ type UpdateUserRequest struct {
 }
 
 var (
-	ErrInvalidCredentials = errors.New("invalid email or password")
-	ErrUnauthenticated    = errors.New("authentication required")
-	ErrPasswordLength     = errors.New("password must be 12 to 128 characters")
-	ErrInvalidEmail       = errors.New("email must be a plain ASCII address of 3 to 254 characters")
-	ErrInvalidDisplayName = errors.New("display name must be 1 to 200 characters without control characters")
-	ErrUserExists         = errors.New("a user with this email already exists")
-	ErrUserNotFound       = errors.New("no user with this email")
+	ErrInvalidCredentials     = errors.New("invalid email or password")
+	ErrUnauthenticated        = errors.New("authentication required")
+	ErrPasswordLength         = errors.New("password must be 12 to 128 characters")
+	ErrInvalidEmail           = errors.New("email must be a plain ASCII address of 3 to 254 characters")
+	ErrInvalidDisplayName     = errors.New("display name must be 1 to 200 characters without control characters")
+	ErrUserExists             = errors.New("a user with this email already exists")
+	ErrUserNotFound           = errors.New("no user with this email")
+	ErrInvalidDirectoryFilter = errors.New("invalid directory filter")
 )
 
 var (
@@ -184,6 +223,7 @@ var (
 	ErrUnknownRole       = errors.New("unknown role")
 	ErrInvalidResetToken = errors.New("invalid or expired token")
 	ErrInvalidStatus     = errors.New("status must be ACTIVE, DISABLED, or INVITED")
+	ErrSessionNotFound   = errors.New("session not found")
 )
 
 // RateLimitedError is returned when too many logins failed recently.

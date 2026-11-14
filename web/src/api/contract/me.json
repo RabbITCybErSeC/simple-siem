@@ -3,6 +3,7 @@
   "displayName": "User Name",
   "email": "analyst@example.test",
   "id": "user_id",
+  "onCall": false,
   "roles": [
     "ADMIN"
   ],

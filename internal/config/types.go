@@ -69,10 +69,11 @@ func (ref SecretRef) Resolve(getenv func(string) string) (string, error) {
 
 // Files is the complete, validated file configuration.
 type Files struct {
-	Directory string
-	System    System
-	Fetchers  map[string]FetcherInstance // key = instance id
-	Pipelines []Pipeline                 // sorted by id
+	Directory      string
+	System         System
+	Fetchers       map[string]FetcherInstance // key = instance id
+	QueryTemplates map[string]QueryTemplate   // key = template id
+	Pipelines      []Pipeline                 // sorted by id
 }
 
 type System struct {
@@ -123,10 +124,30 @@ type FetcherTLS struct {
 }
 
 type FetcherDefaults struct {
-	Index      string   // optional; must pass IndexAllowed
-	Timeout    Duration // default 30s; <= 10m
-	MaxResults int      // default 10000; 1..1000000
-	TimeField  string   // default "@timestamp"
+	Index          string   // optional; must pass IndexAllowed
+	Timeout        Duration // default 30s; <= 10m
+	MaxResults     int      // default 10000; 1..1000000
+	TimeField      string   // default "@timestamp"
+	FetchTimeField string   // default "event.ingested"; field-name characters, max 255
+	PageSize       int      // default 1000; 1..10000
+	MaxBytes       int64    // default 256 MiB; 1 MiB..2 GiB
+	KeepAlive      Duration // default 1m; 10s..10m
+}
+
+// QueryTemplate is a validated query template file.
+type QueryTemplate struct {
+	File        string // path relative to the config directory
+	ID          string
+	FetcherType string
+	Version     string
+	Description string
+	Parameters  map[string]TemplateParameter
+	RawQuery    map[string]any
+}
+
+type TemplateParameter struct {
+	Type     string `yaml:"type"`     // string | int | bool | timestamp
+	Required bool   `yaml:"required"` //
 }
 
 type Pipeline struct {
@@ -143,6 +164,9 @@ type Pipeline struct {
 type Schedule struct {
 	Every         Duration // optional in Phase 1; > 0 when set
 	Timeout       Duration // required; > 0, <= 1h
+	IngestDelay   Duration // default 1m; 0..1h
+	Overlap       Duration // default 1m; 0..1h
+	MaxCatchUp    Duration // default 6h, at most the output retention; >= 1m
 	OverlapPolicy string   // skip (default) | queue | parallel
 }
 
@@ -267,12 +291,25 @@ type fetcherFile struct {
 	Auth      FetcherAuth `yaml:"auth"`
 	TLS       FetcherTLS  `yaml:"tls"`
 	Defaults  struct {
-		Index      string    `yaml:"index"`
-		Timeout    *Duration `yaml:"timeout"`
-		MaxResults *int      `yaml:"max_results"`
-		TimeField  string    `yaml:"time_field"`
+		Index          string    `yaml:"index"`
+		Timeout        *Duration `yaml:"timeout"`
+		MaxResults     *int      `yaml:"max_results"`
+		TimeField      string    `yaml:"time_field"`
+		FetchTimeField *string   `yaml:"fetch_time_field"`
+		PageSize       *int      `yaml:"page_size"`
+		MaxBytes       *int64    `yaml:"max_bytes"`
+		KeepAlive      *Duration `yaml:"keep_alive"`
 	} `yaml:"defaults"`
 	AllowedIndexes []string `yaml:"allowed_indexes"`
+}
+
+type queryTemplateFile struct {
+	ID          string                       `yaml:"id"`
+	FetcherType string                       `yaml:"fetcherType"`
+	Version     string                       `yaml:"version"`
+	Description string                       `yaml:"description"`
+	Parameters  map[string]TemplateParameter `yaml:"parameters"`
+	RawQuery    map[string]any               `yaml:"rawQuery"`
 }
 
 type pipelineFile struct {
@@ -281,6 +318,9 @@ type pipelineFile struct {
 	Schedule struct {
 		Every         *Duration `yaml:"every"`
 		Timeout       *Duration `yaml:"timeout"`
+		IngestDelay   *Duration `yaml:"ingest_delay"`
+		Overlap       *Duration `yaml:"overlap"`
+		MaxCatchUp    *Duration `yaml:"max_catch_up"`
 		OverlapPolicy string    `yaml:"overlap_policy"`
 	} `yaml:"schedule"`
 	Variables  map[string]Variable `yaml:"variables"`

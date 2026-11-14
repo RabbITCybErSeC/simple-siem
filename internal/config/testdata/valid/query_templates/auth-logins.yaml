@@ -1,0 +1,26 @@
+id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+description: Authentication events, optionally for one user.
+parameters:
+  user:
+    type: string
+    required: false
+  batch:
+    type: int
+    required: false
+  active:
+    type: bool
+    required: false
+rawQuery:
+  query:
+    bool:
+      filter:
+        - term:
+            event.category: authentication
+        - term:
+            user.name: "${parameters.user}"
+        - term:
+            event.batch: "${parameters.batch}"
+        - term:
+            event.active: "${parameters.active}"
