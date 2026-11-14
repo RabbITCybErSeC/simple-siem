@@ -155,6 +155,15 @@ type UserFilter struct {
 	PageSize int
 }
 
+// Directory limits are exported so the HTTP handler validates the same
+// values the service accepts.
+const (
+	DefaultDirectoryLimit  = 20
+	MaxDirectoryQueryRunes = 100
+	MaxDirectoryIDs        = 50
+	MaxDirectoryLimit      = 50
+)
+
 // DirectoryFilter narrows the user directory. Query and IDs are mutually
 // exclusive; a zero Limit means the default page size.
 type DirectoryFilter struct {

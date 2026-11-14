@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
@@ -107,17 +108,25 @@ func (users userHandler) setOnCall(c *gin.Context) {
 // parseDirectoryFilter validates the directory parameters in the handler, so
 // each error names the parameter the caller has to fix.
 func parseDirectoryFilter(c *gin.Context, query url.Values) (auth.DirectoryFilter, bool) {
+	for _, name := range []string{"q", "ids", "limit"} {
+		if len(query[name]) > 1 {
+			invalidParameter(c, name)
+			return auth.DirectoryFilter{}, false
+		}
+	}
+
 	var filter auth.DirectoryFilter
 	if query.Has("q") {
 		filter.Query = strings.TrimSpace(query.Get("q"))
-		if filter.Query == "" || utf8.RuneCountInString(filter.Query) > maxDirectoryQueryRunes {
+		if filter.Query == "" || utf8.RuneCountInString(filter.Query) > auth.MaxDirectoryQueryRunes ||
+			!utf8.ValidString(filter.Query) || strings.ContainsFunc(filter.Query, unicode.IsControl) {
 			invalidParameter(c, "q")
 			return auth.DirectoryFilter{}, false
 		}
 	}
 	if query.Has("ids") {
 		filter.IDs = strings.Split(query.Get("ids"), ",")
-		if len(filter.IDs) > maxDirectoryIDs {
+		if len(filter.IDs) > auth.MaxDirectoryIDs {
 			invalidParameter(c, "ids")
 			return auth.DirectoryFilter{}, false
 		}
@@ -134,7 +143,7 @@ func parseDirectoryFilter(c *gin.Context, query url.Values) (auth.DirectoryFilte
 	}
 	if query.Has("limit") {
 		limit, err := strconv.Atoi(query.Get("limit"))
-		if err != nil || limit < 1 || limit > maxDirectoryLimit {
+		if err != nil || limit < 1 || limit > auth.MaxDirectoryLimit {
 			invalidParameter(c, "limit")
 			return auth.DirectoryFilter{}, false
 		}

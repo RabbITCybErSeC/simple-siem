@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
@@ -18,14 +19,10 @@ import (
 )
 
 const (
-	defaultUserPageSize    = 50
-	defaultDirectoryLimit  = 20
-	maxDirectoryLimit      = 50
-	maxDirectoryIDs        = 50
-	maxDirectoryQueryRunes = 100
-	lastAdminLockName      = "simple-siem:last-admin"
-	resetTokenLifetime     = 24 * time.Hour
-	resetTokenLength       = 32
+	defaultUserPageSize = 50
+	lastAdminLockName   = "simple-siem:last-admin"
+	resetTokenLifetime  = 24 * time.Hour
+	resetTokenLength    = 32
 )
 
 // hashPasswordFunction is the hasher UseResetToken calls. It is a test seam:
@@ -120,11 +117,14 @@ func (service *Service) Directory(ctx context.Context, filter DirectoryFilter) (
 	if query != "" && len(filter.IDs) > 0 {
 		return nil, fmt.Errorf("%w: q and ids cannot be combined", ErrInvalidDirectoryFilter)
 	}
-	if filter.Query != "" && (query == "" || utf8.RuneCountInString(query) > maxDirectoryQueryRunes) {
-		return nil, fmt.Errorf("%w: q must be 1 to 100 characters", ErrInvalidDirectoryFilter)
+	if filter.Query != "" && (query == "" || utf8.RuneCountInString(query) > MaxDirectoryQueryRunes) {
+		return nil, fmt.Errorf("%w: q must be 1 to %d characters", ErrInvalidDirectoryFilter, MaxDirectoryQueryRunes)
 	}
-	if len(filter.IDs) > maxDirectoryIDs {
-		return nil, fmt.Errorf("%w: ids accepts at most 50 ids", ErrInvalidDirectoryFilter)
+	if query != "" && (!utf8.ValidString(query) || strings.ContainsFunc(query, unicode.IsControl)) {
+		return nil, fmt.Errorf("%w: q contains invalid characters", ErrInvalidDirectoryFilter)
+	}
+	if len(filter.IDs) > MaxDirectoryIDs {
+		return nil, fmt.Errorf("%w: ids accepts at most %d ids", ErrInvalidDirectoryFilter, MaxDirectoryIDs)
 	}
 	for _, id := range filter.IDs {
 		if !audit.ValidID(id) {
@@ -133,10 +133,10 @@ func (service *Service) Directory(ctx context.Context, filter DirectoryFilter) (
 	}
 	limit := filter.Limit
 	if limit == 0 {
-		limit = defaultDirectoryLimit
+		limit = DefaultDirectoryLimit
 	}
-	if limit < 1 || limit > maxDirectoryLimit {
-		return nil, fmt.Errorf("%w: limit must be 1 to 50", ErrInvalidDirectoryFilter)
+	if limit < 1 || limit > MaxDirectoryLimit {
+		return nil, fmt.Errorf("%w: limit must be 1 to %d", ErrInvalidDirectoryFilter, MaxDirectoryLimit)
 	}
 
 	database := service.database.WithContext(ctx)
@@ -152,8 +152,8 @@ func (service *Service) Directory(ctx context.Context, filter DirectoryFilter) (
 		condition := " WHERE status = ?"
 		arguments := []any{StatusActive}
 		if query != "" {
-			condition += ` AND lower(display_name) LIKE ? ESCAPE '\'`
-			arguments = append(arguments, escapeLike(strings.ToLower(query))+"%")
+			condition += ` AND lower(display_name) LIKE lower(?) || '%' ESCAPE '\'`
+			arguments = append(arguments, escapeLike(query))
 		}
 		arguments = append(arguments, limit)
 		err = database.Raw(`
@@ -392,9 +392,10 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 		event.EventName = "simple_siem.user.disabled"
 		event.TargetID = user.ID
 		event.Action = "disable"
-		event.Changes = map[string]any{"revokedCount": sessions.RowsAffected}
-		if user.OnCall {
-			event.Changes["onCall"] = map[string]any{"before": true, "after": false}
+		event.Changes = map[string]any{
+			"revokedCount": sessions.RowsAffected,
+			"before":       map[string]any{"status": user.Status, "onCall": user.OnCall},
+			"after":        map[string]any{"status": StatusDisabled, "onCall": false},
 		}
 		if err := audit.Record(tx, event); err != nil {
 			return err
@@ -480,18 +481,15 @@ func (service *Service) SetOnCall(ctx context.Context, actor Actor, client Clien
 			return err
 		}
 
-		result := tx.Model(&User{}).
+		err = tx.Model(&User{}).
 			Where("id = ?", user.ID).
 			Updates(map[string]any{
 				"on_call":    onCall,
 				"updated_at": gorm.Expr("now()"),
 				"version":    gorm.Expr("version + 1"),
-			})
-		if result.Error != nil {
-			return fmt.Errorf("set on call: %w", result.Error)
-		}
-		if result.RowsAffected == 0 {
-			return userMutationConflict(tx, user.ID)
+			}).Error
+		if err != nil {
+			return fmt.Errorf("set on call: %w", err)
 		}
 
 		event := userAuditEvent(actor, client, "USER")

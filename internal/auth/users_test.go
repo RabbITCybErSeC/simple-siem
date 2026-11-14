@@ -340,6 +340,23 @@ func TestDirectoryByIDsIncludesAnyStatus(t *testing.T) {
 	}
 }
 
+func TestDirectoryFoldsNonASCIICase(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	elodie := createUser(t, test.service, testActorFor(admin), CreateUserRequest{
+		Email: "elodie@example.com", DisplayName: "Élodie",
+	})
+	setUserStatus(t, test.database, elodie.User.ID, StatusActive)
+
+	entries, err := test.service.Directory(context.Background(), DirectoryFilter{Query: "él"})
+	if err != nil {
+		t.Fatalf("Directory(él): %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != elodie.User.ID || entries[0].DisplayName != "Élodie" {
+		t.Errorf("Directory(él) = %+v, want Élodie", entries)
+	}
+}
+
 func TestDirectoryRejectsInvalidFilters(t *testing.T) {
 	test := newTestService(t)
 	admin := test.createAdmin(t, testEmail)
@@ -358,6 +375,9 @@ func TestDirectoryRejectsInvalidFilters(t *testing.T) {
 		{"too many ids", DirectoryFilter{IDs: tooManyIDs}, "ids"},
 		{"101-rune query", DirectoryFilter{Query: strings.Repeat("a", 101)}, "q"},
 		{"blank query", DirectoryFilter{Query: "   "}, "q"},
+		{"NUL query", DirectoryFilter{Query: "ali\x00ce"}, "q"},
+		{"control query", DirectoryFilter{Query: "ali\x01ce"}, "q"},
+		{"invalid UTF-8 query", DirectoryFilter{Query: "ali\xffce"}, "q"},
 		{"limit 51", DirectoryFilter{Limit: 51}, "limit"},
 		{"negative limit", DirectoryFilter{Limit: -1}, "limit"},
 	}
@@ -948,8 +968,13 @@ func TestDisableUser(t *testing.T) {
 	if changes["revokedCount"] != float64(3) {
 		t.Errorf("disable audit revokedCount = %v, want 3", changes["revokedCount"])
 	}
-	if onCall, ok := changes["onCall"]; ok {
-		t.Errorf("disable audit of an off-call user has onCall = %v, want no key", onCall)
+	before, ok := changes["before"].(map[string]any)
+	if !ok || before["status"] != StatusActive || before["onCall"] != false {
+		t.Errorf("disable audit before = %v, want ACTIVE and onCall false", changes["before"])
+	}
+	after, ok := changes["after"].(map[string]any)
+	if !ok || after["status"] != StatusDisabled || after["onCall"] != false {
+		t.Errorf("disable audit after = %v, want DISABLED and onCall false", changes["after"])
 	}
 }
 
@@ -1150,12 +1175,13 @@ func TestDisableUserTakesUserOffCall(t *testing.T) {
 		t.Fatalf("DisableUser wrote %d audit events, want 1", len(events))
 	}
 	changes := storedChanges(t, events[0])
-	onCall, ok := changes["onCall"].(map[string]any)
-	if !ok {
-		t.Fatalf("disable audit onCall = %v, want a before/after object", changes["onCall"])
+	before, ok := changes["before"].(map[string]any)
+	if !ok || before["status"] != StatusActive || before["onCall"] != true {
+		t.Fatalf("disable audit before = %v, want ACTIVE and onCall true", changes["before"])
 	}
-	if onCall["before"] != true || onCall["after"] != false {
-		t.Errorf("disable audit onCall = %v, want before true and after false", onCall)
+	after, ok := changes["after"].(map[string]any)
+	if !ok || after["status"] != StatusDisabled || after["onCall"] != false {
+		t.Errorf("disable audit after = %v, want DISABLED and onCall false", changes["after"])
 	}
 }
 

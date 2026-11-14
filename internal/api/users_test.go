@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -255,8 +256,14 @@ func TestDirectory(t *testing.T) {
 		{"empty id part", "?ids=" + analyst.User.ID + ",", "ids"},
 		{"too many ids", "?ids=" + strings.Join(tooManyIDs, ","), "ids"},
 		{"q and ids", "?q=al&ids=" + analyst.User.ID, "q and ids"},
+		{"repeated q", "?q=al&q=an", "q"},
+		{"repeated ids", "?ids=" + analyst.User.ID + "&ids=" + alan.User.ID, "ids"},
+		{"repeated limit", "?limit=5&limit=6", "limit"},
 		{"empty q", "?q=", "q"},
 		{"long q", "?q=" + strings.Repeat("a", 101), "q"},
+		{"NUL q", "?q=ali%00ce", "q"},
+		{"control q", "?q=ali%01ce", "q"},
+		{"invalid UTF-8 q", "?q=ali%FFce", "q"},
 	}
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
@@ -277,6 +284,34 @@ func TestDirectory(t *testing.T) {
 		t.Fatalf("directory without case:read = %d, want 403: %s", response.Code, response.Body)
 	}
 	assertErrorCode(t, response, "FORBIDDEN", "permission denied")
+}
+
+func TestDirectoryEscapesBackslash(t *testing.T) {
+	router, service, _, _ := newAPIRouter(t)
+	admin, token := apiAdmin(t, router, service)
+	slash := apiCreateUser(t, service, admin, "slash@example.com", `\Backslash`)
+	apiActivateUser(t, service, admin, slash.User.ID, "backslash horse battery")
+
+	response := get(router, "/api/v1/directory/users?q="+url.QueryEscape(`\`), "", bearer(token))
+	if response.Code != http.StatusOK {
+		t.Fatalf("directory q with a backslash = %d, want 200: %s", response.Code, response.Body)
+	}
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	decodeJSON(t, response, &body)
+	if len(body.Data) != 1 || body.Data[0]["id"] != slash.User.ID {
+		t.Errorf("directory q with a backslash = %v, want only the backslash user", body.Data)
+	}
+
+	response = get(router, "/api/v1/directory/users?q="+url.QueryEscape(`abc\`), "", bearer(token))
+	if response.Code != http.StatusOK {
+		t.Fatalf("directory q with a trailing backslash = %d, want 200: %s", response.Code, response.Body)
+	}
+	decodeJSON(t, response, &body)
+	if len(body.Data) != 0 {
+		t.Errorf("directory q with a trailing backslash = %v, want no matches", body.Data)
+	}
 }
 
 func TestGetUser(t *testing.T) {

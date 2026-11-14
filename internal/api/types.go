@@ -10,13 +10,10 @@ import (
 )
 
 const (
-	defaultPageSize        = 50
-	maxUserPageSize        = 100
-	maxAuditPageSize       = 200
-	maxDirectoryQueryRunes = 100
-	maxDirectoryIDs        = 50
-	maxDirectoryLimit      = 50
-	maxRequestBodyBytes    = 4096
+	defaultPageSize     = 50
+	maxUserPageSize     = 100
+	maxAuditPageSize    = 200
+	maxRequestBodyBytes = 4096
 
 	codeVersionConflict = "VERSION_CONFLICT"
 	codeStateConflict   = "STATE_CONFLICT"
