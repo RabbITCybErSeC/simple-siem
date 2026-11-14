@@ -3,6 +3,7 @@ package web
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -38,10 +39,14 @@ func TestRemoteReferencePatterns(t *testing.T) {
 }
 
 func TestBuiltFrontendIsSelfContained(t *testing.T) {
+	if os.Getenv("SIMPLE_SIEM_CHECK_WEB_BUILD") != "1" {
+		t.Skip("built-frontend check runs in make build")
+	}
+
 	files := Files()
 	indexHTML, err := fs.ReadFile(files, "index.html")
 	if errors.Is(err, fs.ErrNotExist) {
-		t.Skip("frontend not built")
+		t.Fatal("frontend not built")
 	}
 	if err != nil {
 		t.Fatalf("read embedded index.html: %v", err)

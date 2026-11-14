@@ -1,10 +1,9 @@
-import { expect, test } from "./support/test.ts";
+import { expect, signIn, test } from "./support/test.ts";
 
 test("palette opens without a CSP violation and locks scroll", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -16,9 +15,8 @@ test("palette opens without a CSP violation and locks scroll", async ({
 
 test("the skip link is the first tab stop and moves focus into main", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -33,9 +31,8 @@ test("the skip link is the first tab stop and moves focus into main", async ({
 
 test("runs a theme command and returns focus to the skip link", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -52,8 +49,8 @@ test("runs a theme command and returns focus to the skip link", async ({
   await expect(skipLink).toBeFocused();
 });
 
-test("Go to Cases leaves focus on the Cases heading", async ({ page, api }) => {
-  api.signIn();
+test("Go to Cases leaves focus on the Cases heading", async ({ page }) => {
+  await signIn(page);
   await page.goto("/nope");
   await expect(
     page.getByRole("heading", { name: "Page not found" }),
@@ -74,9 +71,8 @@ test("Go to Cases leaves focus on the Cases heading", async ({ page, api }) => {
 
 test("Keyboard shortcuts leaves focus inside the shortcuts dialog", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -91,9 +87,8 @@ test("Keyboard shortcuts leaves focus inside the shortcuts dialog", async ({
 
 test("Escape closes the palette opened from the header and returns focus", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -112,9 +107,8 @@ test("Escape closes the palette opened from the header and returns focus", async
 
 test("the shortcuts dialog traps Tab and closes with Escape", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -134,9 +128,8 @@ test("the shortcuts dialog traps Tab and closes with Escape", async ({
 
 test("an unknown path shows the not-found page inside the shell", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/nope");
 
   await expect(
@@ -145,8 +138,8 @@ test("an unknown path shows the not-found page inside the shell", async ({
   await expect(page.getByRole("link", { name: "Go to Cases" })).toBeVisible();
 });
 
-test("keeps the sidebar collapsed after a reload", async ({ page, api }) => {
-  api.signIn();
+test("keeps the sidebar collapsed after a reload", async ({ page }) => {
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 

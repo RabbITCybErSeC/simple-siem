@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -264,7 +265,7 @@ describe("CommandPalette and shortcuts", () => {
   it("shows No results. for an unmatched query", async () => {
     const input = await openPalette();
 
-    fireEvent.change(input, { target: { value: "zzzz" } });
+    fireEvent.change(input, { target: { value: "vvvv" } });
 
     expect(await screen.findByText("No results.")).toBeInTheDocument();
   });
@@ -297,6 +298,20 @@ describe("CommandPalette and shortcuts", () => {
     expect(screen.getByText("Show keyboard shortcuts")).toBeInTheDocument();
     expect(screen.getByText("Ctrl")).toBeInTheDocument();
     expect(screen.getByText("⌘")).toBeInTheDocument();
+  });
+
+  it("lists the case list shortcuts in the dialog", async () => {
+    renderShell();
+    await screen.findByRole("heading", { name: "Cases" });
+
+    fireEvent.keyDown(document.body, { key: "?" });
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Keyboard shortcuts",
+    });
+    expect(within(dialog).getByText("Next case")).toBeInTheDocument();
+    expect(within(dialog).getByText("Previous case")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("Cases list")).toHaveLength(2);
   });
 
   it("does not stack the palette on the shortcuts dialog", async () => {
