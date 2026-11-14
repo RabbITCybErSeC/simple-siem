@@ -112,3 +112,49 @@ type datasetRow struct {
 func (datasetRow) TableName() string {
 	return "datasets"
 }
+
+// eventRow is one dataset_events row. source_key_hash is SourceKey.Hash, and
+// the extracted columns are the filter pushdown columns.
+type eventRow struct {
+	Dataset           string    `gorm:"column:dataset"`
+	EventTime         time.Time `gorm:"column:event_time"`
+	SourceKeyHash     []byte    `gorm:"column:source_key_hash"`
+	FetcherInstanceID string    `gorm:"column:fetcher_instance_id"`
+	SourceIndex       string    `gorm:"column:source_index"`
+	DocumentID        string    `gorm:"column:document_id"`
+	EventType         string    `gorm:"column:event_type"`
+	TargetUser        *string   `gorm:"column:target_user"`
+	TargetHost        *string   `gorm:"column:target_host"`
+	PrincipalIP       *string   `gorm:"column:principal_ip"`
+	Event             udm.Event `gorm:"column:event;serializer:json"`
+	PipelineRunID     string    `gorm:"column:pipeline_run_id"`
+	WrittenAt         time.Time `gorm:"column:written_at"`
+}
+
+func (eventRow) TableName() string {
+	return "dataset_events"
+}
+
+// quarantineRow is one dataset_quarantine row.
+type quarantineRow struct {
+	Dataset           string               `gorm:"column:dataset"`
+	FetcherInstanceID string               `gorm:"column:fetcher_instance_id"`
+	SourceIndex       string               `gorm:"column:source_index"`
+	DocumentID        string               `gorm:"column:document_id"`
+	Payload           []byte               `gorm:"column:payload"`
+	PayloadTruncated  bool                 `gorm:"column:payload_truncated"`
+	MappingID         *string              `gorm:"column:mapping_id"`
+	MappingVersion    *int                 `gorm:"column:mapping_version"`
+	Errors            []validationErrorRow `gorm:"column:errors;serializer:json"`
+	PipelineRunID     string               `gorm:"column:pipeline_run_id"`
+}
+
+func (quarantineRow) TableName() string {
+	return "dataset_quarantine"
+}
+
+// validationErrorRow is the errors column shape: [{path, message}].
+type validationErrorRow struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
