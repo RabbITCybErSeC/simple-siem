@@ -69,10 +69,11 @@ func (ref SecretRef) Resolve(getenv func(string) string) (string, error) {
 
 // Files is the complete, validated file configuration.
 type Files struct {
-	Directory string
-	System    System
-	Fetchers  map[string]FetcherInstance // key = instance id
-	Pipelines []Pipeline                 // sorted by id
+	Directory      string
+	System         System
+	Fetchers       map[string]FetcherInstance // key = instance id
+	QueryTemplates map[string]QueryTemplate   // key = template id
+	Pipelines      []Pipeline                 // sorted by id
 }
 
 type System struct {
@@ -123,10 +124,30 @@ type FetcherTLS struct {
 }
 
 type FetcherDefaults struct {
-	Index      string   // optional; must pass IndexAllowed
-	Timeout    Duration // default 30s; <= 10m
-	MaxResults int      // default 10000; 1..1000000
-	TimeField  string   // default "@timestamp"
+	Index          string   // optional; must pass IndexAllowed
+	Timeout        Duration // default 30s; <= 10m
+	MaxResults     int      // default 10000; 1..1000000
+	TimeField      string   // default "@timestamp"
+	FetchTimeField string   // default "event.ingested"; field-name characters, max 255
+	PageSize       int      // default 1000; 1..10000
+	MaxBytes       int64    // default 256 MiB; 1 MiB..2 GiB
+	KeepAlive      Duration // default 1m; 10s..10m
+}
+
+// QueryTemplate is a validated query template file.
+type QueryTemplate struct {
+	File        string // path relative to the config directory
+	ID          string
+	FetcherType string
+	Version     string
+	Description string
+	Parameters  map[string]TemplateParameter
+	RawQuery    map[string]any
+}
+
+type TemplateParameter struct {
+	Type     string // string | int | bool | timestamp
+	Required bool
 }
 
 type Pipeline struct {
@@ -267,10 +288,14 @@ type fetcherFile struct {
 	Auth      FetcherAuth `yaml:"auth"`
 	TLS       FetcherTLS  `yaml:"tls"`
 	Defaults  struct {
-		Index      string    `yaml:"index"`
-		Timeout    *Duration `yaml:"timeout"`
-		MaxResults *int      `yaml:"max_results"`
-		TimeField  string    `yaml:"time_field"`
+		Index          string    `yaml:"index"`
+		Timeout        *Duration `yaml:"timeout"`
+		MaxResults     *int      `yaml:"max_results"`
+		TimeField      string    `yaml:"time_field"`
+		FetchTimeField string    `yaml:"fetch_time_field"`
+		PageSize       *int      `yaml:"page_size"`
+		MaxBytes       *int64    `yaml:"max_bytes"`
+		KeepAlive      *Duration `yaml:"keep_alive"`
 	} `yaml:"defaults"`
 	AllowedIndexes []string `yaml:"allowed_indexes"`
 }
