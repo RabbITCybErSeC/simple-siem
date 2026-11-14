@@ -590,6 +590,28 @@ func TestRunCommandSucceeds(t *testing.T) {
 	}
 }
 
+func TestRunCommandAcceptsEqualsConfigDir(t *testing.T) {
+	_, environment := runCommandEnvironment(t)
+	now := time.Now().UTC()
+	fetchTime := now.Add(-2 * time.Minute)
+	server := newStubElasticsearch(t, map[string]any{
+		"@timestamp": now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+		"event":      map[string]any{"category": "authentication"},
+	}, fetchTime)
+
+	directory := runCommandConfig(t, server.URL)
+	status, stdout, stderr := runCLI(t,
+		[]string{"run", "--config-dir=" + directory, "auth-events"}, environment)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	result := decodeRunResult(t, stdout)
+	if result.Status != pipeline.StatusOK {
+		t.Errorf("result status = %q, want OK; error: %s", result.Status, result.Error)
+	}
+}
+
 func TestDetectCommandUsage(t *testing.T) {
 	tests := []struct {
 		name string
@@ -623,6 +645,21 @@ func TestDetectCommandUsage(t *testing.T) {
 	}
 }
 
+func TestDetectRejectsFractionalWindowEnd(t *testing.T) {
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--window-end", "2026-05-11T10:15:00.5Z"}, nil)
+
+	if status != 2 {
+		t.Fatalf("run() status = %d, want 2; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "whole second") {
+		t.Errorf("run() stderr = %q, want the whole-second usage error", stderr)
+	}
+}
+
 func TestDetectFixturePasses(t *testing.T) {
 	path := filepath.Join("..", "..", "detections", "bruteforcelogin", "testdata", "positive.json")
 
@@ -644,6 +681,21 @@ func TestDetectFixturePasses(t *testing.T) {
 	}
 	if result.Proposals[0].Severity != detection.SeverityHigh {
 		t.Errorf("proposal severity = %q, want HIGH", result.Proposals[0].Severity)
+	}
+}
+
+func TestDetectFixtureAcceptsEqualsFlagBeforeID(t *testing.T) {
+	path := filepath.Join("..", "..", "detections", "bruteforcelogin", "testdata", "positive.json")
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "--fixture=" + path, "brute-force-then-success"}, nil)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	result := decodeJSONLine[detection.FixtureResult](t, stdout)
+	if !result.Passed {
+		t.Fatalf("fixture passed = false, differences: %v", result.Differences)
 	}
 }
 

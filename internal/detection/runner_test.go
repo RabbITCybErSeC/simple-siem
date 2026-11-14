@@ -445,6 +445,36 @@ func TestRunWindowRecordsFailure(t *testing.T) {
 	}
 }
 
+func TestRunWindowRecordsCanceledRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logic := stubDetection(func(ctx context.Context, _ Window) ([]Proposal, error) {
+		cancel()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
+	fixture.markReady(t, "auth_events")
+
+	result, err := fixture.runner.RunWindow(ctx, fixture.registration, fixture.end)
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want the FAILED run recorded", err)
+	}
+
+	if result.Status != RunStatusFailed || !strings.Contains(result.Error, context.Canceled.Error()) {
+		t.Fatalf("RunWindow() result = %+v, want FAILED with context canceled", result)
+	}
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 1 || runs[0].Status != string(RunStatusFailed) {
+		t.Fatalf("detection_runs = %+v, want one FAILED row", runs)
+	}
+	if runs[0].Error == nil || !strings.Contains(*runs[0].Error, context.Canceled.Error()) {
+		t.Fatalf("run row error = %v, want the cancellation reason", runs[0].Error)
+	}
+	if count := countRows(t, fixture.database, &proposalRow{}); count != 0 {
+		t.Fatalf("detection_proposals rows = %d, want none", count)
+	}
+}
+
 func TestRunWindowRecordsPanic(t *testing.T) {
 	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) {
 		panic("kaboom")

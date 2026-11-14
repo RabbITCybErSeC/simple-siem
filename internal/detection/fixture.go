@@ -82,12 +82,19 @@ func EvaluateFixture(registration Registration, manifest config.DetectionManifes
 		return FixtureResult{}, err
 	}
 
+	inputs := declaredInputs(manifest)
+	for _, name := range slices.Sorted(maps.Keys(fixture.Datasets)) {
+		if _, declared := inputs[name]; !declared {
+			return FixtureResult{}, fmt.Errorf("fixture %s: dataset %q is not a declared input", path, name)
+		}
+	}
+
 	window := Window{
 		Start:    fixture.Window.Start,
 		End:      fixture.Window.End,
 		Revision: 1,
 		reader:   fixture.reader,
-		inputs:   declaredInputs(manifest),
+		inputs:   inputs,
 		budget:   newRowBudget(manifest.Budgets.MaxRows),
 	}
 	outcome := evaluate(context.Background(), manifest, registration.Logic, window)

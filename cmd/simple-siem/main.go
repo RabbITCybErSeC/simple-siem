@@ -254,7 +254,8 @@ func runPipeline(ctx context.Context, args []string, getenv func(string) string,
 
 // splitArguments separates flags from positional arguments so a flag may
 // follow them, which the standard flag package does not allow. valueFlags
-// names the flags that consume the next argument.
+// names the flags that consume the next argument in their bare form; a flag
+// written with an equals sign carries its own value.
 func splitArguments(args []string, valueFlags ...string) (options []string, positionals []string) {
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
@@ -266,8 +267,8 @@ func splitArguments(args []string, valueFlags ...string) (options []string, posi
 			continue
 		}
 		options = append(options, argument)
-		name, _, _ := strings.Cut(strings.TrimLeft(argument, "-"), "=")
-		if slices.Contains(valueFlags, name) && index+1 < len(args) {
+		name, _, hasValue := strings.Cut(strings.TrimLeft(argument, "-"), "=")
+		if !hasValue && slices.Contains(valueFlags, name) && index+1 < len(args) {
 			index++
 			options = append(options, args[index])
 		}
@@ -306,6 +307,10 @@ func runDetect(ctx context.Context, args []string, getenv func(string) string, s
 	windowEnd, err := time.Parse(time.RFC3339, *windowEndValue)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "invalid --window-end %q: %v\n", *windowEndValue, err)
+		return 2
+	}
+	if windowEnd.Nanosecond() != 0 {
+		_, _ = fmt.Fprintf(stderr, "invalid --window-end %q: not a whole second\n", *windowEndValue)
 		return 2
 	}
 	return runDetectWindow(ctx, registration, manifest, windowEnd, *directory, getenv, stdout, stderr)

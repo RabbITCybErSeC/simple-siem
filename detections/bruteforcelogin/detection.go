@@ -17,6 +17,10 @@ import (
 // a deploy (worker runtime, Phase 6).
 const failedAttemptsThreshold = 10
 
+// maxEvidence must match budgets.maxEvidencePerProposal in detection.yaml;
+// the logic cannot read the manifest, so the two are kept in step by hand.
+const maxEvidence = 1000
+
 //go:embed detection.yaml
 var manifest []byte
 
@@ -33,7 +37,8 @@ type attempts struct {
 }
 
 // Evaluate reports one proposal per burst of at least ten failed logons
-// followed by a success from the same origin.
+// followed by an ALLOW logon from the same origin. Any other action is
+// neither a failure nor a success.
 func (Detection) Evaluate(ctx context.Context, window detection.Window) ([]detection.Proposal, error) {
 	attemptsByKey := map[string]*attempts{}
 	var proposals []detection.Proposal
@@ -50,8 +55,12 @@ func (Detection) Evaluate(ctx context.Context, window detection.Window) ([]detec
 			attemptsByKey[key] = current
 		}
 
-		if event.SecurityResult.Action == udm.ActionBlock {
+		action := event.SecurityResult.Action
+		if action == udm.ActionBlock {
 			current.failures = append(current.failures, record)
+			continue
+		}
+		if action != udm.ActionAllow {
 			continue
 		}
 		if len(current.failures) < failedAttemptsThreshold {
@@ -77,8 +86,13 @@ func firstIP(origin udm.Noun) string {
 	return origin.IP[0]
 }
 
-// evidenceOf lists the failures of a burst followed by its success.
+// evidenceOf lists the most recent failures of a burst followed by its
+// success, capped so the proposal fits maxEvidence. The failure count and the
+// summary still carry the real total.
 func evidenceOf(failures []dataset.Record, success dataset.Record) []detection.Evidence {
+	if len(failures) > maxEvidence-1 {
+		failures = failures[len(failures)-(maxEvidence-1):]
+	}
 	evidence := make([]detection.Evidence, 0, len(failures)+1)
 	for _, failure := range failures {
 		evidence = append(evidence, detection.EvidenceOf(failure))

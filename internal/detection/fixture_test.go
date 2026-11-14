@@ -154,6 +154,27 @@ func TestLoadFixtureMissingFile(t *testing.T) {
 	}
 }
 
+func TestEvaluateFixtureRejectsUndeclaredDataset(t *testing.T) {
+	manifest := parseManifest(t)
+	body := strings.Replace(fixtureBody(""), `"auth_events"`, `"auth_event"`, 1)
+	path := writeFixtureFile(t, body)
+	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) {
+		return nil, nil
+	})
+
+	_, err := EvaluateFixture(Registration{Manifest: manifestYAML(t), Logic: logic}, manifest, path)
+
+	if err == nil {
+		t.Fatal("EvaluateFixture() error = nil, want the undeclared dataset rejection")
+	}
+	if !strings.Contains(err.Error(), "auth_event") {
+		t.Fatalf("EvaluateFixture() error = %q, want it to name auth_event", err)
+	}
+	if !strings.Contains(err.Error(), "not a declared input") {
+		t.Fatalf("EvaluateFixture() error = %q, want the undeclared input message", err)
+	}
+}
+
 func TestEvaluateFixturePasses(t *testing.T) {
 	manifest := parseManifest(t)
 	path := writeFixtureFile(t, fixtureBody(expectedProposalJSON))

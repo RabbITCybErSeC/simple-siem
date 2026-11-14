@@ -1,0 +1,19 @@
+{
+  "window": {"start": "2026-05-11T10:00:00Z", "end": "2026-05-11T10:15:00Z"},
+  "datasets": {
+    "auth_events": [
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"1"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:01:00Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"2"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:01:30Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"3"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:02:00Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"4"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:02:30Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"5"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:03:00Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"6"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:03:30Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"7"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:04:00Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"8"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:04:30Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"9"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:05:00Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"10"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:05:30Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"BLOCK"}}},
+      {"sourceKey":{"fetcherInstanceId":"fixture","index":"auth","documentId":"11"},"event":{"metadata":{"event_timestamp":"2026-05-11T10:06:00Z","event_type":"USER_LOGIN"},"principal":{"ip":["203.0.113.7"]},"target":{"user":{"userid":"alice"},"hostname":"web01"},"security_result":{"action":"UNKNOWN_ACTION"}}}
+    ]
+  },
+  "expect": {"proposals": []}
+}

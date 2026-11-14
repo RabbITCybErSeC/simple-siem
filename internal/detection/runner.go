@@ -22,6 +22,10 @@ var (
 	ErrInvalidWindow     = errors.New("invalid window")
 )
 
+// persistenceTimeout bounds the run and proposal transaction, which runs
+// without the caller's cancellation so a canceled run still leaves its row.
+const persistenceTimeout = 5 * time.Second
+
 // inactiveError prints exactly the registry warning while still matching
 // ErrDetectionInactive.
 type inactiveError struct {
@@ -120,7 +124,9 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 		Error:            optionalText(result.Error),
 		StartedAt:        startedAt,
 	}
-	err = runner.Database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+	persistContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistenceTimeout)
+	defer cancel()
+	err = runner.Database.WithContext(persistContext).Transaction(func(transaction *gorm.DB) error {
 		if err := transaction.Create(&run).Error; err != nil {
 			return fmt.Errorf("insert the run record: %w", err)
 		}
