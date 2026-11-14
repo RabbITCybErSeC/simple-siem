@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isTimeExpression, resolveRange } from "./timeRange";
 import type {
+  CaseDetailState,
   CaseQueueState,
   CaseTab,
   RefreshInterval,
@@ -13,6 +14,11 @@ export const defaultCaseQueueState: CaseQueueState = {
   field: "lastEventAt",
   sort: "lastEventAt:desc",
   refresh: "off",
+};
+
+export const defaultCaseDetailState: CaseDetailState = {
+  view: "overview",
+  layout: "split",
 };
 
 const tabSchema = z
@@ -32,6 +38,12 @@ const sortSchema = z
 const refreshSchema = z
   .enum(["off", "10s", "30s", "1m", "5m"])
   .catch(defaultCaseQueueState.refresh);
+const viewSchema = z
+  .enum(["overview", "alerts", "timeline", "activity"])
+  .catch(defaultCaseDetailState.view);
+const layoutSchema = z
+  .enum(["split", "full"])
+  .catch(defaultCaseDetailState.layout);
 
 const tabStatuses: Record<CaseTab, string | undefined> = {
   open: "OPEN",
@@ -59,6 +71,48 @@ export function parseCaseQueueState(params: URLSearchParams): CaseQueueState {
     sort: sortSchema.parse(params.get("sort")),
     refresh: refreshSchema.parse(params.get("refresh")),
   };
+}
+
+export function parseCaseDetailState(
+  params: URLSearchParams,
+): CaseDetailState {
+  return {
+    view: viewSchema.parse(params.get("view")),
+    layout: layoutSchema.parse(params.get("layout")),
+  };
+}
+
+export function parseCaseNumber(value: string | undefined): number | undefined {
+  if (value === undefined || !/^[1-9]\d*$/.test(value)) {
+    return undefined;
+  }
+  return Number(value);
+}
+
+export function caseQueuePath(queue: CaseQueueState): string {
+  return `/cases${caseQueueSearch(queue)}`;
+}
+
+export function caseDetailPath(
+  caseNumber: number,
+  queue: CaseQueueState,
+  detail: CaseDetailState,
+): string {
+  const detailParameters = new URLSearchParams();
+  if (detail.view !== defaultCaseDetailState.view) {
+    detailParameters.set("view", detail.view);
+  }
+  if (detail.layout !== defaultCaseDetailState.layout) {
+    detailParameters.set("layout", detail.layout);
+  }
+
+  const detailSearch = detailParameters.toString();
+  const queueSearch = caseQueueSearch(queue);
+  if (detailSearch === "") {
+    return `/cases/${caseNumber}${queueSearch}`;
+  }
+  const separator = queueSearch === "" ? "?" : "&";
+  return `/cases/${caseNumber}${queueSearch}${separator}${detailSearch}`;
 }
 
 export function caseQueueSearch(state: CaseQueueState): string {

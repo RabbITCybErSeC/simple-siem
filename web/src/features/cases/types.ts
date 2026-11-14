@@ -25,6 +25,14 @@ export interface CaseQueueState {
   refresh: RefreshInterval;
 }
 
+export type CaseDetailView = "overview" | "alerts" | "timeline" | "activity";
+export type CaseDetailLayout = "split" | "full";
+
+export interface CaseDetailState {
+  view: CaseDetailView;
+  layout: CaseDetailLayout;
+}
+
 export type CaseSeverity = "HIGH" | "MEDIUM" | "LOW";
 export type CaseOutcome = "MALICIOUS" | "ACCEPTED";
 

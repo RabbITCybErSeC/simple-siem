@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  caseDetailPath,
+  caseQueuePath,
   caseQueueSearch,
   countsParams,
+  defaultCaseDetailState,
   defaultCaseQueueState,
   histogramParams,
   listParams,
+  parseCaseDetailState,
+  parseCaseNumber,
   parseCaseQueueState,
   refreshMilliseconds,
 } from "./urlState";
-import type { CaseQueueState } from "./types";
+import type { CaseDetailState, CaseQueueState } from "./types";
 
 function parseState(
   values: string | Record<string, string>,
@@ -289,5 +294,105 @@ describe("refreshMilliseconds", () => {
       "1m": 60_000,
       "5m": 300_000,
     });
+  });
+});
+
+describe("parseCaseDetailState", () => {
+  it("returns the defaults for an empty query", () => {
+    expect(parseCaseDetailState(new URLSearchParams(""))).toEqual({
+      view: "overview",
+      layout: "split",
+    });
+  });
+
+  it("parses the section and the layout", () => {
+    expect(
+      parseCaseDetailState(new URLSearchParams("view=timeline&layout=full")),
+    ).toEqual({ view: "timeline", layout: "full" });
+  });
+
+  it("falls back alone when view is invalid", () => {
+    expect(
+      parseCaseDetailState(new URLSearchParams("view=bogus&layout=full")),
+    ).toEqual({ view: "overview", layout: "full" });
+  });
+
+  it("falls back alone when layout is invalid", () => {
+    expect(
+      parseCaseDetailState(new URLSearchParams("view=alerts&layout=bogus")),
+    ).toEqual({ view: "alerts", layout: "split" });
+  });
+
+  it("leaves the queue state alone", () => {
+    expect(parseState({ view: "timeline", layout: "full" })).toEqual(
+      defaultCaseQueueState,
+    );
+  });
+});
+
+describe("parseCaseNumber", () => {
+  it.each([
+    ["1", 1],
+    ["312", 312],
+    ["99999", 99999],
+  ])("accepts the digits %s", (value, number) => {
+    expect(parseCaseNumber(value)).toBe(number);
+  });
+
+  it.each([undefined, "", "0", "007", "-1", "12a", "1.5", " 12 "])(
+    "rejects %s",
+    (value) => {
+      expect(parseCaseNumber(value)).toBeUndefined();
+    },
+  );
+});
+
+describe("caseQueuePath", () => {
+  it("is /cases with the queue query", () => {
+    expect(caseQueuePath(defaultCaseQueueState)).toBe("/cases");
+    expect(caseQueuePath({ ...defaultCaseQueueState, tab: "closed" })).toBe(
+      "/cases?tab=closed",
+    );
+  });
+});
+
+describe("caseDetailPath", () => {
+  const queue: CaseQueueState = {
+    tab: "closed",
+    scope: "all",
+    range: { from: "2026-11-01T10:00:00Z", to: "2026-11-07T10:00:00Z" },
+    field: "closedAt",
+    sort: "createdAt:asc",
+    refresh: "30s",
+  };
+  const detail: CaseDetailState = { view: "timeline", layout: "full" };
+
+  it("is the case path with the default state", () => {
+    expect(
+      caseDetailPath(312, defaultCaseQueueState, defaultCaseDetailState),
+    ).toBe("/cases/312");
+  });
+
+  it("appends the queue parameters, then view, then layout", () => {
+    expect(caseDetailPath(312, queue, detail)).toBe(
+      "/cases/312?tab=closed&scope=all&from=2026-11-01T10:00:00Z&to=2026-11-07T10:00:00Z&field=closedAt&sort=createdAt:asc&refresh=30s&view=timeline&layout=full",
+    );
+  });
+
+  it("omits a default section", () => {
+    expect(
+      caseDetailPath(312, defaultCaseQueueState, {
+        ...defaultCaseDetailState,
+        layout: "full",
+      }),
+    ).toBe("/cases/312?layout=full");
+  });
+
+  it("round-trips the queue and detail state from the path", () => {
+    const path = caseDetailPath(312, queue, detail);
+    const search = path.slice(path.indexOf("?"));
+
+    expect(parseCaseQueueState(new URLSearchParams(search))).toEqual(queue);
+    expect(parseCaseDetailState(new URLSearchParams(search))).toEqual(detail);
   });
 });
