@@ -194,7 +194,7 @@ test-es: es toolchain
 	$(MAKE) --no-print-directory test-es-run
 
 test-es-run:
-	$(RUN) $(TOOLCHAIN_IMAGE) go test -tags elasticsearch ./internal/fetcher/...
+	$(RUN) $(TOOLCHAIN_IMAGE) go test -count=1 -tags elasticsearch ./internal/fetcher/...
 
 test-es8: es8 toolchain
 	@set +e; \
