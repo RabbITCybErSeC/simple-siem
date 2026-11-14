@@ -195,3 +195,50 @@ type Output struct {
 	Retention       *Duration `yaml:"retention"`        // default: system default_retention
 	AllowedLateness *Duration `yaml:"allowed_lateness"` // default: system default_allowed_lateness
 }
+
+type DetectionManifest struct {
+	ID            string            `yaml:"id"`
+	Version       string            `yaml:"version"`
+	Name          string            `yaml:"name"`
+	Description   string            `yaml:"description"`
+	Owner         string            `yaml:"owner"`
+	Severity      string            `yaml:"severity"`
+	Tags          []string          `yaml:"tags"`
+	InitialStatus string            `yaml:"initialStatus"`
+	Inputs        []DetectionInput  `yaml:"inputs"`
+	Window        DetectionWindow   `yaml:"window"`
+	Budgets       DetectionBudgets  `yaml:"budgets"`
+	Alerting      DetectionAlerting `yaml:"alerting"`
+}
+
+type DetectionInput struct {
+	Dataset        string   `yaml:"dataset"`
+	EventTypes     []string `yaml:"eventTypes"`
+	OnStalledInput string   `yaml:"onStalledInput"`
+}
+
+type DetectionWindow struct {
+	Size  Duration `yaml:"size"`
+	Every Duration `yaml:"every"`
+}
+
+type DetectionBudgets struct {
+	Timeout                Duration `yaml:"timeout"`
+	MaxRows                int      `yaml:"maxRows"`
+	MaxProposals           int      `yaml:"maxProposals"`
+	MaxEvidencePerProposal int      `yaml:"maxEvidencePerProposal"`
+}
+
+type DetectionAlerting struct {
+	Mode                  string          `yaml:"mode"`
+	IdentitySchemaVersion int             `yaml:"identitySchemaVersion"`
+	IdentityFields        []IdentityField `yaml:"identityFields"`
+	CoalesceWindow        Duration        `yaml:"coalesceWindow"`
+	MaxAlertSpan          Duration        `yaml:"maxAlertSpan"`
+}
+
+type IdentityField struct {
+	Path     string `yaml:"path"`
+	Required bool   `yaml:"required"`
+	Fallback string `yaml:"fallback"`
+}
