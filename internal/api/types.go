@@ -10,10 +10,13 @@ import (
 )
 
 const (
-	defaultPageSize     = 50
-	maxUserPageSize     = 100
-	maxAuditPageSize    = 200
-	maxRequestBodyBytes = 4096
+	defaultPageSize        = 50
+	maxUserPageSize        = 100
+	maxAuditPageSize       = 200
+	maxDirectoryQueryRunes = 100
+	maxDirectoryIDs        = 50
+	maxDirectoryLimit      = 50
+	maxRequestBodyBytes    = 4096
 
 	codeVersionConflict = "VERSION_CONFLICT"
 	codeStateConflict   = "STATE_CONFLICT"
@@ -124,6 +127,7 @@ type userResponse struct {
 	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName"`
 	Status      string   `json:"status"`
+	OnCall      bool     `json:"onCall"`
 	Roles       []string `json:"roles"`
 	CreatedAt   string   `json:"createdAt"`
 	UpdatedAt   string   `json:"updatedAt"`
@@ -151,6 +155,18 @@ type userListResponse struct {
 	Pagination pagination     `json:"pagination"`
 }
 
+// directoryEntryResponse is one person a picker can show: no email, roles, or
+// on-call state.
+type directoryEntryResponse struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Status      string `json:"status"`
+}
+
+type directoryListResponse struct {
+	Data []directoryEntryResponse `json:"data"`
+}
+
 type createUserRequest struct {
 	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName"`
@@ -167,6 +183,11 @@ type updateUserRequest struct {
 
 type versionRequest struct {
 	Version *int `json:"version"`
+}
+
+// onCallRequest keeps OnCall a pointer, so a missing field is a 400.
+type onCallRequest struct {
+	OnCall *bool `json:"onCall"`
 }
 
 type assignRoleRequest struct {
