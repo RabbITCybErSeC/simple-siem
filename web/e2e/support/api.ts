@@ -1,7 +1,11 @@
 // shortcut: network fixtures for /cases, use the real case API when case-core and case-close are on main.
 import type { Page, Request, Route } from "@playwright/test";
 import type { ErrorEnvelope } from "../../src/api/types.ts";
-import type { CaseSummary } from "../../src/features/cases/types.ts";
+import type {
+  CaseAssignee,
+  CaseSummary,
+} from "../../src/features/cases/types.ts";
+import type { CloseFailure } from "./cases.ts";
 import { CaseFixtureRoutes } from "./cases.ts";
 
 function errorEnvelope(code: string, message: string): ErrorEnvelope {
@@ -12,12 +16,27 @@ function errorEnvelope(code: string, message: string): ErrorEnvelope {
 // contract is checked; routes that exist on the server are let through.
 export class FixtureApi {
   private readonly page: Page;
+  private meRequest: Promise<CaseAssignee | null> | null = null;
 
   readonly violations: string[] = [];
-  readonly cases = new CaseFixtureRoutes(this.violations);
+  readonly cases: CaseFixtureRoutes;
 
   constructor(page: Page) {
     this.page = page;
+    this.cases = new CaseFixtureRoutes(this.violations);
+  }
+
+  async currentUser(): Promise<CaseAssignee> {
+    await this.ensureMe();
+    return this.cases.currentUser();
+  }
+
+  failNextClose(code: CloseFailure): void {
+    this.cases.failNextClose(code);
+  }
+
+  bumpVersion(caseId: string): void {
+    this.cases.bumpVersion(caseId);
   }
 
   async install(): Promise<void> {
@@ -40,6 +59,33 @@ export class FixtureApi {
     return this.cases.caseRequests();
   }
 
+  // The first /cases request learns the signed-in user from the real /me
+  // route, so the seeded user_1 is the analyst the page is signed in as.
+  private async ensureMe(): Promise<void> {
+    this.meRequest ??= this.fetchMe();
+    const me = await this.meRequest;
+    if (me !== null) {
+      this.cases.setMe(me);
+    }
+  }
+
+  private async fetchMe(): Promise<CaseAssignee | null> {
+    const response = await this.page.request.get("/api/v1/me", {
+      headers: { "X-Requested-With": "simple-siem" },
+    });
+    if (!response.ok()) {
+      return null;
+    }
+    const user = (await response.json()) as {
+      id?: unknown;
+      displayName?: unknown;
+    };
+    if (typeof user.id !== "string" || typeof user.displayName !== "string") {
+      return null;
+    }
+    return { id: user.id, displayName: user.displayName };
+  }
+
   private async handle(route: Route): Promise<void> {
     const request = route.request();
     const method = request.method();
@@ -60,6 +106,7 @@ export class FixtureApi {
         );
         return;
       }
+      await this.ensureMe();
       const url = new URL(request.url());
       await this.cases.handle(route, path, url.searchParams);
       return;

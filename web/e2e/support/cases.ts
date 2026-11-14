@@ -1,11 +1,33 @@
 // shortcut: case fixtures, use the real case API when case-core and case-close are on main.
 import type { Route } from "@playwright/test";
-import type { ErrorEnvelope } from "../../src/api/types.ts";
+import type {
+  CursorListResponse,
+  ErrorEnvelope,
+} from "../../src/api/types.ts";
+import type {
+  AlertDisposition,
+  AlertSummary,
+  AssignRequest,
+  BulkCloseRequest,
+  BulkCloseResponse,
+  BulkCloseStatus,
+  CaseAlertsResponse,
+  CaseDetail,
+  CaseTimelineResponse,
+  CloseRequest,
+  ClosureReason,
+  LinkedCase,
+  StoredClosureReason,
+  TimelineActivityEntry,
+  TimelineEntry,
+  TimelineEvidenceEntry,
+} from "../../src/features/cases/detail/types.ts";
 import type {
   CaseAssignee,
   CaseCounts,
   CaseHistogram,
   CaseListResponse,
+  CaseOutcome,
   CaseSeverity,
   CaseStatus,
   CaseSummary,
@@ -23,6 +45,11 @@ const MAX_BUCKETS = 60;
 const ALICE: CaseAssignee = { id: "user_1", displayName: "Alice Analyst" };
 const BOB: CaseAssignee = { id: "user_2", displayName: "Bob Responder" };
 
+export type CloseFailure =
+  | "VERSION_CONFLICT"
+  | "STATE_CONFLICT"
+  | "INTERNAL_ERROR";
+
 const TITLES = [
   "Brute force → success",
   "Impossible travel",
@@ -34,7 +61,7 @@ const TITLES = [
   "Unusual cloud API call",
 ];
 
-const CLOSURE_REASONS = [
+const CLOSURE_REASONS: ClosureReason[] = [
   "FALSE_POSITIVE",
   "BENIGN_TRUE_POSITIVE",
   "AUTHORIZED_ACTIVITY",
@@ -42,6 +69,37 @@ const CLOSURE_REASONS = [
   "INSUFFICIENT_EVIDENCE",
   "CONFIRMED_THREAT",
   "OTHER",
+];
+
+const LINKED_CASE_NUMBERS = [12, 213];
+const MARKUP_USERID = "<img src=x onerror=alert(1)>";
+
+const DETECTIONS = [
+  { id: "det_brute_force", title: "Brute force" },
+  { id: "det_impossible_travel", title: "Impossible travel" },
+  { id: "det_malware_beacon", title: "Malware beacon" },
+  { id: "det_dns_exfiltration", title: "DNS exfiltration" },
+  { id: "det_privilege_escalation", title: "Privilege escalation" },
+];
+
+const EVENT_TYPES = [
+  "USER_LOGIN",
+  "PROCESS_LAUNCH",
+  "NETWORK_CONNECTION",
+  "FILE_MODIFICATION",
+  "DNS_QUERY",
+];
+const USER_IDS = ["jdoe", "asmith", "bwilliams", "svc_backup"];
+const HOSTNAMES = ["WS-014", "WS-027", "SRV-DC-01", "LT-102"];
+const IP_ADDRESSES = ["10.12.4.18", "10.12.4.33", "192.0.2.54", "203.0.113.9"];
+const TARGET_HOSTNAMES = ["SRV-DC-01", "fileserver-2", "api.internal", "unknown-host"];
+const SECURITY_ACTIONS = ["ALLOW", "BLOCK", "QUARANTINE", "MONITOR"];
+
+const CONCLUSIONS = [
+  "Validated with the asset owner; no further action.",
+  "Handled during the incident response exercise.",
+  "Duplicate of an earlier case; closed as duplicate.",
+  "Log source was misconfigured; corrected.",
 ];
 
 const TIME_FIELD_NAMES = new Set([
@@ -93,11 +151,88 @@ const HISTOGRAM_PARAMETERS = [
   "splitBy",
 ];
 
-const ALLOWED_PARAMETERS: Record<string, string[]> = {
-  "/api/v1/cases": LIST_PARAMETERS,
-  "/api/v1/cases/counts": COUNT_PARAMETERS,
-  "/api/v1/cases/histogram": HISTOGRAM_PARAMETERS,
-};
+const ALERT_PARAMETERS = ["cursor", "limit"];
+const TIMELINE_PARAMETERS = ["kind", "cursor", "limit"];
+const NO_PARAMETERS: string[] = [];
+
+type CaseRoute =
+  | { name: "list" }
+  | { name: "counts" }
+  | { name: "histogram" }
+  | { name: "bulk-close" }
+  | { name: "detail"; caseRef: string }
+  | { name: "alerts"; caseId: string }
+  | { name: "timeline"; caseId: string }
+  | { name: "assign"; caseId: string }
+  | { name: "close"; caseId: string };
+
+function matchCaseRoute(method: string, path: string): CaseRoute | null {
+  if (method === "GET" && path === "/api/v1/cases") {
+    return { name: "list" };
+  }
+  if (method === "GET" && path === "/api/v1/cases/counts") {
+    return { name: "counts" };
+  }
+  if (method === "GET" && path === "/api/v1/cases/histogram") {
+    return { name: "histogram" };
+  }
+  if (method === "POST" && path === "/api/v1/cases/bulk-close") {
+    return { name: "bulk-close" };
+  }
+
+  const nested = /^\/api\/v1\/cases\/([^/]+)\/(alerts|timeline|close)$/.exec(
+    path,
+  );
+  if (nested !== null) {
+    const caseId = nested[1];
+    const action = nested[2];
+    if (action === "alerts" && method === "GET") {
+      return { name: "alerts", caseId };
+    }
+    if (action === "timeline" && method === "GET") {
+      return { name: "timeline", caseId };
+    }
+    if (action === "close" && method === "POST") {
+      return { name: "close", caseId };
+    }
+    return null;
+  }
+
+  const single = /^\/api\/v1\/cases\/([^/]+)$/.exec(path);
+  if (single !== null) {
+    if (method === "GET") {
+      return { name: "detail", caseRef: single[1] };
+    }
+    if (method === "PATCH") {
+      return { name: "assign", caseId: single[1] };
+    }
+  }
+  return null;
+}
+
+function allowedParameters(route: CaseRoute): string[] {
+  switch (route.name) {
+    case "list":
+      return LIST_PARAMETERS;
+    case "counts":
+      return COUNT_PARAMETERS;
+    case "histogram":
+      return HISTOGRAM_PARAMETERS;
+    case "alerts":
+      return ALERT_PARAMETERS;
+    case "timeline":
+      return TIMELINE_PARAMETERS;
+    default:
+      return NO_PARAMETERS;
+  }
+}
+
+interface CaseHistory {
+  closedBy: CaseAssignee | null;
+  conclusion: string | null;
+  alerts: AlertSummary[] | null;
+  timeline: TimelineEntry[] | null;
+}
 
 class InvalidQueryError extends Error {}
 
@@ -377,6 +512,121 @@ function decodeCursor(cursor: string): number {
   return Number(decoded);
 }
 
+function parseCursor(value: string | null): number {
+  return value === null ? 0 : decodeCursor(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseOutcome(value: unknown): CaseOutcome {
+  if (value === "MALICIOUS" || value === "ACCEPTED") {
+    return value;
+  }
+  throw new InvalidQueryError();
+}
+
+const CLOSURE_REASON_NAMES = new Set<string>(CLOSURE_REASONS);
+
+function parseClosureReason(value: unknown): ClosureReason {
+  if (typeof value !== "string" || !CLOSURE_REASON_NAMES.has(value)) {
+    throw new InvalidQueryError();
+  }
+  return value as ClosureReason;
+}
+
+function parseConclusion(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new InvalidQueryError();
+  }
+  const conclusion = value.trim();
+  if (conclusion.length < 1 || conclusion.length > 10_000) {
+    throw new InvalidQueryError();
+  }
+  return conclusion;
+}
+
+function parseVersion(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new InvalidQueryError();
+  }
+  return value;
+}
+
+function parseDisposition(value: unknown): AlertDisposition {
+  if (!isRecord(value) || typeof value.alertId !== "string") {
+    throw new InvalidQueryError();
+  }
+  if (value.alertId === "") {
+    throw new InvalidQueryError();
+  }
+  return {
+    alertId: value.alertId,
+    outcome: parseOutcome(value.outcome),
+    closureReason: parseClosureReason(value.closureReason),
+  };
+}
+
+function parseAlertDispositions(value: unknown): AlertDisposition[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new InvalidQueryError();
+  }
+  return value.map(parseDisposition);
+}
+
+function parseAssignRequest(body: unknown): AssignRequest {
+  if (!isRecord(body)) {
+    throw new InvalidQueryError();
+  }
+  const assigneeId = body.assigneeId;
+  if (assigneeId !== null && typeof assigneeId !== "string") {
+    throw new InvalidQueryError();
+  }
+  return { assigneeId, version: parseVersion(body.version) };
+}
+
+function parseCloseRequest(body: unknown): CloseRequest {
+  if (!isRecord(body)) {
+    throw new InvalidQueryError();
+  }
+  return {
+    outcome: parseOutcome(body.outcome),
+    closureReason: parseClosureReason(body.closureReason),
+    conclusion: parseConclusion(body.conclusion),
+    alertDispositions: parseAlertDispositions(body.alertDispositions),
+    version: parseVersion(body.version),
+  };
+}
+
+function parseBulkCloseRequest(body: unknown): BulkCloseRequest {
+  if (!isRecord(body) || !Array.isArray(body.cases)) {
+    throw new InvalidQueryError();
+  }
+  if (body.cases.length < 1 || body.cases.length > 100) {
+    throw new InvalidQueryError();
+  }
+  const cases = body.cases.map((value) => {
+    if (
+      !isRecord(value) ||
+      typeof value.id !== "string" ||
+      value.id === ""
+    ) {
+      throw new InvalidQueryError();
+    }
+    return { id: value.id, version: parseVersion(value.version) };
+  });
+  return {
+    cases,
+    outcome: parseOutcome(body.outcome),
+    closureReason: parseClosureReason(body.closureReason),
+    conclusion: parseConclusion(body.conclusion),
+  };
+}
+
 function inRange(
   item: CaseSummary,
   timeField: TimeField,
@@ -448,12 +698,66 @@ function parseInterval(value: string | null): Interval | "auto" {
   return interval;
 }
 
+function pick<T>(values: T[], random: () => number): T {
+  return values[Math.floor(random() * values.length)];
+}
+
+function buildUdm(
+  caseNumber: number,
+  sequence: number,
+  at: number,
+): Record<string, unknown> {
+  const random = mulberry32(caseNumber * 1000 + sequence);
+  const userid =
+    caseNumber === 7 && sequence === 1
+      ? MARKUP_USERID
+      : pick(USER_IDS, random);
+  return {
+    metadata: {
+      event_type: pick(EVENT_TYPES, random),
+      event_timestamp: iso(at),
+    },
+    principal: {
+      user: { userid },
+      hostname: pick(HOSTNAMES, random),
+      ip: [pick(IP_ADDRESSES, random)],
+    },
+    target: { hostname: pick(TARGET_HOSTNAMES, random) },
+    security_result: [{ action: pick(SECURITY_ACTIONS, random) }],
+  };
+}
+
+function compareTimelineEntries(
+  left: TimelineEntry,
+  right: TimelineEntry,
+): number {
+  const difference = Date.parse(left.at) - Date.parse(right.at);
+  return difference !== 0 ? difference : left.id.localeCompare(right.id);
+}
+
+function latestActivityAt(fallback: string, entries: TimelineEntry[]): string {
+  let latest = fallback;
+  for (const entry of entries) {
+    if (
+      entry.kind === "ACTIVITY" &&
+      Date.parse(entry.at) > Date.parse(latest)
+    ) {
+      latest = entry.at;
+    }
+  }
+  return latest;
+}
+
 export class CaseFixtureRoutes {
   readonly violations: string[];
   private readonly cases: CaseSummary[] = generateCases();
   private readonly requests: string[] = [];
   private now = FIXTURE_NOW;
   private nextCaseNumber = CASE_COUNT + 1;
+  private me: CaseAssignee = ALICE;
+  private readonly histories = new Map<string, CaseHistory>();
+  private readonly activityIds = new Map<string, number>();
+  private pendingCloseFailure: CloseFailure | null = null;
 
   constructor(violations: string[]) {
     this.violations = violations;
@@ -469,7 +773,7 @@ export class CaseFixtureRoutes {
       severity: "MEDIUM",
       outcome: null,
       closureReason: null,
-      assignee: ALICE,
+      assignee: this.me,
       firstEventAt: now,
       lastEventAt: now,
       createdAt: now,
@@ -481,6 +785,27 @@ export class CaseFixtureRoutes {
     };
     this.cases.push(added);
     return added;
+  }
+
+  private findCaseById(id: string): CaseSummary | undefined {
+    return this.cases.find((item) => item.id === id);
+  }
+
+  private findCaseByRef(caseRef: string): CaseSummary | undefined {
+    if (/^\d+$/.test(caseRef)) {
+      return this.cases.find(
+        (item) => item.caseNumber === Number(caseRef),
+      );
+    }
+    return this.findCaseById(caseRef);
+  }
+
+  private requireCase(id: string): CaseSummary {
+    const found = this.findCaseById(id);
+    if (found === undefined) {
+      throw new Error(`no fixture case ${id}`);
+    }
+    return found;
   }
 
   updateCase(id: string, partial: Partial<CaseSummary>): CaseSummary {
@@ -505,6 +830,56 @@ export class CaseFixtureRoutes {
     this.now = date;
   }
 
+  currentUser(): CaseAssignee {
+    return this.me;
+  }
+
+  // The seeded data calls the analyst user_1; the page signs in as a real
+  // user, so the fixture adopts the real id and display name for user_1.
+  setMe(me: CaseAssignee): void {
+    if (me.id === this.me.id) {
+      return;
+    }
+    this.me = me;
+    for (const item of this.cases) {
+      if (item.assignee?.id === ALICE.id) {
+        item.assignee = me;
+      }
+    }
+    for (const history of this.histories.values()) {
+      if (history.closedBy?.id === ALICE.id) {
+        history.closedBy = me;
+      }
+      for (const entry of history.timeline ?? []) {
+        if (entry.kind !== "ACTIVITY" || entry.actor?.id !== ALICE.id) {
+          continue;
+        }
+        entry.actor = me;
+        if (
+          entry.action === "ASSIGNED" &&
+          isRecord(entry.details.assignee) &&
+          entry.details.assignee.id === ALICE.id
+        ) {
+          entry.details = { ...entry.details, assignee: me };
+        }
+      }
+    }
+  }
+
+  failNextClose(code: CloseFailure): void {
+    this.pendingCloseFailure = code;
+  }
+
+  private takeCloseFailure(): CloseFailure | null {
+    const failure = this.pendingCloseFailure;
+    this.pendingCloseFailure = null;
+    return failure;
+  }
+
+  bumpVersion(id: string): void {
+    this.requireCase(id).version += 1;
+  }
+
   caseRequests(): string[] {
     return this.requests;
   }
@@ -518,29 +893,48 @@ export class CaseFixtureRoutes {
       searchParams.size === 0 ? path : `${path}?${searchParams.toString()}`,
     );
 
-    const allowed = ALLOWED_PARAMETERS[path];
-    if (allowed === undefined) {
-      this.violations.push(
-        `${route.request().method()} ${path}: no fixture for this route`,
-      );
+    const method = route.request().method();
+    const matched = matchCaseRoute(method, path);
+    if (matched === null) {
+      this.violations.push(`${method} ${path}: no fixture for this route`);
       await this.respond(route, 404, errorEnvelope("NOT_FOUND", "Not found"));
       return;
     }
-    if (!this.checkParameters(route, path, searchParams, allowed)) {
+    if (
+      !this.checkParameters(route, path, searchParams, allowedParameters(matched))
+    ) {
       await this.respond(route, 400, VALIDATION_ERROR);
       return;
     }
 
     try {
-      switch (path) {
-        case "/api/v1/cases":
+      switch (matched.name) {
+        case "list":
           await this.list(route, searchParams);
           return;
-        case "/api/v1/cases/counts":
+        case "counts":
           await this.counts(route, searchParams);
           return;
-        default:
+        case "histogram":
           await this.histogram(route, searchParams);
+          return;
+        case "detail":
+          await this.detail(route, matched.caseRef);
+          return;
+        case "alerts":
+          await this.alerts(route, matched.caseId, searchParams);
+          return;
+        case "timeline":
+          await this.timeline(route, matched.caseId, searchParams);
+          return;
+        case "assign":
+          await this.assign(route, matched.caseId);
+          return;
+        case "close":
+          await this.close(route, matched.caseId);
+          return;
+        case "bulk-close":
+          await this.bulkClose(route);
           return;
       }
     } catch (error) {
@@ -570,6 +964,359 @@ export class CaseFixtureRoutes {
     return valid;
   }
 
+  private resolveAssignee(id: string): CaseAssignee | undefined {
+    if (id === this.me.id || id === ALICE.id) {
+      return this.me;
+    }
+    if (id === BOB.id) {
+      return BOB;
+    }
+    return undefined;
+  }
+
+  private async notFound(route: Route): Promise<void> {
+    await this.respond(route, 404, errorEnvelope("NOT_FOUND", "Not found"));
+  }
+
+  private readBody(route: Route): unknown {
+    try {
+      return route.request().postDataJSON() as unknown;
+    } catch {
+      throw new InvalidQueryError();
+    }
+  }
+
+  private cursorPage<T>(
+    items: T[],
+    limit: number,
+    offset: number,
+  ): CursorListResponse<T> {
+    const data = items.slice(offset, offset + limit);
+    const nextOffset = offset + data.length;
+    return {
+      data,
+      pagination: {
+        limit,
+        nextCursor:
+          nextOffset < items.length ? encodeCursor(nextOffset) : null,
+      },
+    };
+  }
+
+  private async respondCloseFailure(
+    route: Route,
+    failure: CloseFailure,
+  ): Promise<void> {
+    if (failure === "INTERNAL_ERROR") {
+      await this.respond(
+        route,
+        500,
+        errorEnvelope("INTERNAL_ERROR", "Internal error"),
+      );
+      return;
+    }
+    if (failure === "VERSION_CONFLICT") {
+      await this.respondVersionConflict(route);
+      return;
+    }
+    await this.respondStateConflict(route);
+  }
+
+  private async respondVersionConflict(route: Route): Promise<void> {
+    await this.respond(
+      route,
+      409,
+      errorEnvelope("VERSION_CONFLICT", "Version conflict"),
+    );
+  }
+
+  private async respondStateConflict(route: Route): Promise<void> {
+    await this.respond(
+      route,
+      409,
+      errorEnvelope("STATE_CONFLICT", "State conflict"),
+    );
+  }
+
+  private detailFor(item: CaseSummary): CaseDetail {
+    const history = this.historyFor(item);
+    const timeline = this.timelineFor(item);
+    return {
+      ...item,
+      lastActivityAt: latestActivityAt(item.lastEventAt, timeline),
+      closedBy: history.closedBy,
+      conclusion: history.conclusion,
+      alertCount: this.alertsFor(item).length,
+      linkedCases: this.linkedCasesFor(item),
+      mergedInto: null,
+    };
+  }
+
+  private linkedCasesFor(item: CaseSummary): LinkedCase[] {
+    if (!LINKED_CASE_NUMBERS.includes(item.caseNumber)) {
+      return [];
+    }
+    const otherNumber = LINKED_CASE_NUMBERS.find(
+      (number) => number !== item.caseNumber,
+    );
+    if (otherNumber === undefined) {
+      return [];
+    }
+    const other = this.cases.find(
+      (candidate) => candidate.caseNumber === otherNumber,
+    );
+    if (other === undefined) {
+      return [];
+    }
+    return [
+      {
+        id: other.id,
+        caseNumber: other.caseNumber,
+        title: other.title,
+        status: other.status,
+      },
+    ];
+  }
+
+  private historyFor(item: CaseSummary): CaseHistory {
+    const existing = this.histories.get(item.id);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const closed = item.status === "CLOSED";
+    const history: CaseHistory = {
+      closedBy: closed ? (item.assignee ?? this.me) : null,
+      conclusion: closed
+        ? CONCLUSIONS[item.caseNumber % CONCLUSIONS.length]
+        : null,
+      alerts: null,
+      timeline: null,
+    };
+    this.histories.set(item.id, history);
+    return history;
+  }
+
+  private alertsFor(item: CaseSummary): AlertSummary[] {
+    const history = this.historyFor(item);
+    if (history.alerts === null) {
+      history.alerts = this.generateAlerts(item);
+    }
+    return history.alerts;
+  }
+
+  private generateAlerts(item: CaseSummary): AlertSummary[] {
+    const random = mulberry32(item.caseNumber * 100 + 1);
+    const count = 1 + Math.floor(random() * 4);
+    const first = Date.parse(item.firstEventAt);
+    const last = Date.parse(item.lastEventAt);
+    const span = Math.max(last - first, 1);
+    const closed = item.status === "CLOSED";
+    const alerts: AlertSummary[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const start = first + Math.floor((span * (index + random())) / count);
+      const end = Math.min(
+        last,
+        start + Math.floor(random() * (last - start + 1)),
+      );
+      const detection = pick(DETECTIONS, random);
+      const evidenceCount = 1 + Math.floor(random() * 250);
+      alerts.push({
+        id: `alert_${item.caseNumber}_${index + 1}`,
+        title: detection.title,
+        severity: severityFor(random()),
+        status: closed ? "CLOSED" : "OPEN",
+        detectionId: detection.id,
+        detectionVersion: "0.1.0",
+        evidenceCount,
+        occurrenceCount: 1 + Math.floor(random() * evidenceCount),
+        firstEventAt: iso(start),
+        lastEventAt: iso(end),
+        outcome: closed ? item.outcome : null,
+        closureReason: closed
+          ? (item.closureReason as StoredClosureReason | null)
+          : null,
+      });
+    }
+    return alerts;
+  }
+
+  private historyTimeline(item: CaseSummary): TimelineEntry[] {
+    const history = this.historyFor(item);
+    if (history.timeline === null) {
+      history.timeline = this.generateTimeline(item, this.alertsFor(item));
+    }
+    return history.timeline;
+  }
+
+  private timelineFor(item: CaseSummary): TimelineEntry[] {
+    return [...this.historyTimeline(item)].sort(compareTimelineEntries);
+  }
+
+  private generateTimeline(
+    item: CaseSummary,
+    alerts: AlertSummary[],
+  ): TimelineEntry[] {
+    const random = mulberry32(item.caseNumber * 100 + 2);
+    const count = 3 + Math.floor(random() * 28);
+    const first = Date.parse(item.firstEventAt);
+    const last = Date.parse(item.lastEventAt);
+    const span = Math.max(last - first, 1);
+    const entries: TimelineEntry[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const at = first + Math.floor((span * (index + random())) / count);
+      const alert = pick(alerts, random);
+      const entry: TimelineEvidenceEntry = {
+        id: `tl_${item.caseNumber}_evt_${index + 1}`,
+        kind: "EVIDENCE",
+        at: iso(at),
+        alertId: alert.id,
+        sourceId: `evt-${item.caseNumber}-${index + 1}`,
+        udm: buildUdm(item.caseNumber, index + 1, at),
+      };
+      entries.push(entry);
+    }
+    entries.push(...this.seedActivity(item, alerts));
+    return entries;
+  }
+
+  private seedActivity(
+    item: CaseSummary,
+    alerts: AlertSummary[],
+  ): TimelineActivityEntry[] {
+    const entries: TimelineActivityEntry[] = [
+      {
+        id: `tl_${item.caseNumber}_created`,
+        kind: "ACTIVITY",
+        at: item.createdAt,
+        actor: null,
+        action: "CASE_CREATED",
+        details: {},
+      },
+    ];
+    alerts.forEach((alert, index) => {
+      entries.push({
+        id: `tl_${item.caseNumber}_alert_${index + 1}`,
+        kind: "ACTIVITY",
+        at: alert.firstEventAt,
+        actor: null,
+        action: "ALERT_ADDED",
+        details: { alertId: alert.id },
+      });
+    });
+    const createdAt = Date.parse(item.createdAt);
+    if (item.assignee !== null) {
+      entries.push({
+        id: `tl_${item.caseNumber}_assigned`,
+        kind: "ACTIVITY",
+        at: iso(createdAt + 60_000),
+        actor: this.me,
+        action: "ASSIGNED",
+        details: { assignee: item.assignee },
+      });
+    }
+    if (item.status === "IN_PROGRESS") {
+      entries.push({
+        id: `tl_${item.caseNumber}_status`,
+        kind: "ACTIVITY",
+        at: iso(createdAt + 120_000),
+        actor: this.me,
+        action: "STATUS_CHANGED",
+        details: { from: "OPEN", to: "IN_PROGRESS" },
+      });
+    }
+    if (item.status === "CLOSED" && item.closedAt !== null) {
+      entries.push({
+        id: `tl_${item.caseNumber}_closed`,
+        kind: "ACTIVITY",
+        at: item.closedAt,
+        actor: this.historyFor(item).closedBy,
+        action: "CLOSED",
+        details: {
+          outcome: item.outcome,
+          closureReason: item.closureReason,
+        },
+      });
+    }
+    return entries;
+  }
+
+  private appendAssignActivity(
+    item: CaseSummary,
+    assignee: CaseAssignee | null,
+    previousStatus: CaseStatus,
+  ): void {
+    if (assignee === null) {
+      this.appendActivity(item, {
+        action: "UNASSIGNED",
+        actor: this.me,
+        details: {},
+      });
+    } else {
+      this.appendActivity(item, {
+        action: "ASSIGNED",
+        actor: this.me,
+        details: { assignee },
+      });
+    }
+    if (previousStatus !== item.status) {
+      this.appendActivity(item, {
+        action: "STATUS_CHANGED",
+        actor: this.me,
+        details: { from: previousStatus, to: item.status },
+      });
+    }
+  }
+
+  private appendActivity(
+    item: CaseSummary,
+    entry: {
+      action: string;
+      actor: CaseAssignee | null;
+      details: Record<string, unknown>;
+    },
+  ): void {
+    const count = (this.activityIds.get(item.id) ?? 0) + 1;
+    this.activityIds.set(item.id, count);
+    this.historyTimeline(item).push({
+      id: `tl_${item.caseNumber}_write_${String(count).padStart(2, "0")}`,
+      kind: "ACTIVITY",
+      at: this.now.toISOString(),
+      actor: entry.actor,
+      action: entry.action,
+      details: entry.details,
+    });
+  }
+
+  private applyClose(
+    item: CaseSummary,
+    outcome: CaseOutcome,
+    closureReason: ClosureReason,
+    conclusion: string,
+    dispositions: AlertDisposition[],
+  ): void {
+    item.status = "CLOSED";
+    item.outcome = outcome;
+    item.closureReason = closureReason;
+    item.closedAt = this.now.toISOString();
+    item.version += 1;
+    const history = this.historyFor(item);
+    history.closedBy = this.me;
+    history.conclusion = conclusion;
+    for (const alert of this.alertsFor(item)) {
+      const disposition = dispositions.find(
+        (candidate) => candidate.alertId === alert.id,
+      );
+      alert.status = "CLOSED";
+      alert.outcome = disposition?.outcome ?? outcome;
+      alert.closureReason = disposition?.closureReason ?? closureReason;
+    }
+    this.appendActivity(item, {
+      action: "CLOSED",
+      actor: this.me,
+      details: { outcome, closureReason },
+    });
+  }
+
   private async list(
     route: Route,
     searchParams: URLSearchParams,
@@ -581,8 +1328,7 @@ export class CaseFixtureRoutes {
     const from = parseOptionalTime(searchParams.get("from"), this.now);
     const to = parseOptionalTime(searchParams.get("to"), this.now);
     const limit = parseLimit(searchParams.get("limit"));
-    const cursor = searchParams.get("cursor");
-    const offset = cursor === null ? 0 : decodeCursor(cursor);
+    const offset = parseCursor(searchParams.get("cursor"));
     if (from !== null && to !== null && from > to) {
       throw new InvalidQueryError();
     }
@@ -602,6 +1348,174 @@ export class CaseFixtureRoutes {
           nextOffset < matching.length ? encodeCursor(nextOffset) : null,
       },
     };
+    await this.respond(route, 200, response);
+  }
+
+  private async detail(route: Route, caseRef: string): Promise<void> {
+    const item = this.findCaseByRef(caseRef);
+    if (item === undefined) {
+      await this.notFound(route);
+      return;
+    }
+    await this.respond(route, 200, this.detailFor(item));
+  }
+
+  private async alerts(
+    route: Route,
+    caseId: string,
+    searchParams: URLSearchParams,
+  ): Promise<void> {
+    const item = this.findCaseById(caseId);
+    if (item === undefined) {
+      await this.notFound(route);
+      return;
+    }
+    const response: CaseAlertsResponse = this.cursorPage(
+      this.alertsFor(item),
+      parseLimit(searchParams.get("limit")),
+      parseCursor(searchParams.get("cursor")),
+    );
+    await this.respond(route, 200, response);
+  }
+
+  private async timeline(
+    route: Route,
+    caseId: string,
+    searchParams: URLSearchParams,
+  ): Promise<void> {
+    const item = this.findCaseById(caseId);
+    if (item === undefined) {
+      await this.notFound(route);
+      return;
+    }
+    const kind = searchParams.get("kind");
+    if (kind !== null && kind !== "EVIDENCE" && kind !== "ACTIVITY") {
+      throw new InvalidQueryError();
+    }
+    const entries = this.timelineFor(item).filter(
+      (entry) => kind === null || entry.kind === kind,
+    );
+    const response: CaseTimelineResponse = this.cursorPage(
+      entries,
+      parseLimit(searchParams.get("limit")),
+      parseCursor(searchParams.get("cursor")),
+    );
+    await this.respond(route, 200, response);
+  }
+
+  private async assign(route: Route, caseId: string): Promise<void> {
+    const request = parseAssignRequest(this.readBody(route));
+    const item = this.findCaseById(caseId);
+    if (item === undefined) {
+      await this.notFound(route);
+      return;
+    }
+
+    let assignee: CaseAssignee | null;
+    if (request.assigneeId === null) {
+      assignee = null;
+    } else {
+      const resolved = this.resolveAssignee(request.assigneeId);
+      if (resolved === undefined) {
+        await this.respond(route, 400, VALIDATION_ERROR);
+        return;
+      }
+      assignee = resolved;
+    }
+
+    if (request.version !== item.version) {
+      await this.respondVersionConflict(route);
+      return;
+    }
+    if (item.status === "CLOSED") {
+      await this.respondStateConflict(route);
+      return;
+    }
+
+    const previousStatus = item.status;
+    item.assignee = assignee;
+    if (assignee !== null && item.status === "OPEN") {
+      item.status = "IN_PROGRESS";
+    }
+    item.version += 1;
+    this.appendAssignActivity(item, assignee, previousStatus);
+    await this.respond(route, 200, this.detailFor(item));
+  }
+
+  private async close(route: Route, caseId: string): Promise<void> {
+    const failure = this.takeCloseFailure();
+    if (failure !== null) {
+      await this.respondCloseFailure(route, failure);
+      return;
+    }
+
+    const request = parseCloseRequest(this.readBody(route));
+    const item = this.findCaseById(caseId);
+    if (item === undefined) {
+      await this.notFound(route);
+      return;
+    }
+    const alerts = this.alertsFor(item);
+    const dispositions = request.alertDispositions ?? [];
+    for (const disposition of dispositions) {
+      if (!alerts.some((alert) => alert.id === disposition.alertId)) {
+        throw new InvalidQueryError();
+      }
+    }
+
+    if (request.version !== item.version) {
+      await this.respondVersionConflict(route);
+      return;
+    }
+    if (item.status === "CLOSED") {
+      await this.respondStateConflict(route);
+      return;
+    }
+
+    this.applyClose(
+      item,
+      request.outcome,
+      request.closureReason,
+      request.conclusion,
+      dispositions,
+    );
+    await this.respond(route, 200, this.detailFor(item));
+  }
+
+  private async bulkClose(route: Route): Promise<void> {
+    const failure = this.takeCloseFailure();
+    if (failure !== null) {
+      await this.respondCloseFailure(route, failure);
+      return;
+    }
+
+    const request = parseBulkCloseRequest(this.readBody(route));
+    const results: { caseId: string; status: BulkCloseStatus }[] = [];
+    for (const requested of request.cases) {
+      const item = this.findCaseById(requested.id);
+      if (item === undefined) {
+        results.push({ caseId: requested.id, status: "NOT_FOUND" });
+        continue;
+      }
+      if (requested.version !== item.version) {
+        results.push({ caseId: item.id, status: "VERSION_CONFLICT" });
+        continue;
+      }
+      if (item.status === "CLOSED") {
+        results.push({ caseId: item.id, status: "STATE_CONFLICT" });
+        continue;
+      }
+      this.applyClose(
+        item,
+        request.outcome,
+        request.closureReason,
+        request.conclusion,
+        [],
+      );
+      results.push({ caseId: item.id, status: "CLOSED" });
+    }
+
+    const response: BulkCloseResponse = { results };
     await this.respond(route, 200, response);
   }
 
@@ -639,7 +1553,7 @@ export class CaseFixtureRoutes {
       },
       scope: {
         mine: capped(
-          scoped.filter((item) => item.assignee?.id === ALICE.id).length,
+          scoped.filter((item) => item.assignee?.id === this.me.id).length,
         ),
         unassigned: capped(
           scoped.filter((item) => item.assignee === null).length,
@@ -722,7 +1636,7 @@ export class CaseFixtureRoutes {
     if (statuses !== null && !statuses.includes(item.status)) {
       return false;
     }
-    if (scope === "mine" && item.assignee?.id !== ALICE.id) {
+    if (scope === "mine" && item.assignee?.id !== this.me.id) {
       return false;
     }
     if (scope === "unassigned" && item.assignee !== null) {

@@ -85,9 +85,10 @@ test("lists my open cases newest first and pages with the cursor", async ({
   expect(first.body.pagination.limit).toBe(10);
   expect(first.body.pagination.nextCursor).not.toBeNull();
   expect(first.body.data).toHaveLength(10);
+  const me = await api.currentUser();
   for (const item of first.body.data) {
     expect(item.status).toBe("OPEN");
-    expect(item.assignee?.id).toBe("user_1");
+    expect(item.assignee?.id).toBe(me.id);
   }
   expectNewestFirst(first.body.data);
 
@@ -124,7 +125,7 @@ test("lists my open cases newest first and pages with the cursor", async ({
   ).toISOString();
   const oldOpen = all.find((item) => item.lastEventAt === oldLastEventAt);
   expect(oldOpen?.status).toBe("OPEN");
-  expect(oldOpen?.assignee?.id).toBe("user_1");
+  expect(oldOpen?.assignee?.id).toBe(me.id);
   expect(api.caseRequests()).toContain(
     "/api/v1/cases?status=OPEN&scope=mine&limit=10",
   );
@@ -253,7 +254,8 @@ test("adds and updates a case in the fixture", async ({ page, api }) => {
   const added = api.addCase({ title: "New arrival" });
   expect(added.caseNumber).toBe(301);
   expect(added.status).toBe("OPEN");
-  expect(added.assignee?.id).toBe("user_1");
+  const me = await api.currentUser();
+  expect(added.assignee?.id).toBe(me.id);
 
   const first = await fetchJson<CaseListResponse>(
     page,
