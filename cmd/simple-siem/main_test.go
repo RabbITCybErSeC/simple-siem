@@ -18,11 +18,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/detections"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
+	"github.com/RabbITCybErSeC/simple-siem/internal/dataset"
+	"github.com/RabbITCybErSeC/simple-siem/internal/detection"
 	"github.com/RabbITCybErSeC/simple-siem/internal/pipeline"
+	"github.com/RabbITCybErSeC/simple-siem/internal/udm"
 	"github.com/RabbITCybErSeC/simple-siem/internal/version"
 	"gorm.io/gorm"
 )
@@ -268,6 +272,106 @@ func TestRunConfigValidateReportsEveryProblem(t *testing.T) {
 	}
 }
 
+func TestRunConfigValidateInactiveDetectionWarning(t *testing.T) {
+	directory := inactiveDetectionConfig(t)
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", directory},
+		map[string]string{
+			"SIMPLE_SIEM_ENV":        "development",
+			"ELASTICSEARCH_USERNAME": "elastic",
+			"ELASTICSEARCH_PASSWORD": "test-password",
+		})
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	if want := "config valid: 1 fetcher instance, 1 pipeline, 1 dataset\n"; stdout != want {
+		t.Errorf("run() stdout = %q, want %q", stdout, want)
+	}
+	wantWarning := "warning: detection brute-force-then-success inactive: input dataset auth_events not configured\n"
+	if stderr != wantWarning {
+		t.Errorf("run() stderr = %q, want %q", stderr, wantWarning)
+	}
+}
+
+func TestRunConfigValidateRejectsBrokenDetection(t *testing.T) {
+	previous := detections.All
+	detections.All = []detection.Registration{{
+		Manifest: []byte("id: [\n"),
+		Logic:    noopTestDetection{},
+	}}
+	t.Cleanup(func() { detections.All = previous })
+	directory := runCommandConfig(t, "http://127.0.0.1:1")
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", directory},
+		map[string]string{
+			"SIMPLE_SIEM_ENV":        "development",
+			"ELASTICSEARCH_USERNAME": "elastic",
+			"ELASTICSEARCH_PASSWORD": "test-password",
+		})
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "detection manifest") {
+		t.Errorf("run() stderr = %q, want the manifest validation error", stderr)
+	}
+}
+
+// noopTestDetection stands in for compiled detection logic in CLI tests.
+type noopTestDetection struct{}
+
+func (noopTestDetection) Evaluate(context.Context, detection.Window) ([]detection.Proposal, error) {
+	return nil, nil
+}
+
+// inactiveDetectionConfig writes a valid configuration whose only pipeline
+// writes other_events, so the compiled example detection is inactive.
+func inactiveDetectionConfig(t *testing.T) string {
+	t.Helper()
+	return writeConfigDirectory(t, map[string]string{
+		"system.yaml": "version: \"0.1\"\n",
+		"fetchers.yaml": `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [http://127.0.0.1:1]
+    auth:
+      username: ${secret:ELASTICSEARCH_USERNAME}
+      password: ${secret:ELASTICSEARCH_PASSWORD}
+    allowed_indexes: [auth-*]
+`,
+		"query_templates/auth-events.yaml": `id: auth-events
+fetcherType: elasticsearch
+version: 0.1.0
+rawQuery:
+  query:
+    term: { event.category: authentication }
+`,
+		"mappings/auth.yaml": runTestMapping,
+		"pipelines/auth-events.yaml": `id: auth-events
+version: 0.1.0
+schedule: {timeout: 2m}
+fetchers:
+  - id: auth
+    ref: elastic-dev
+    inputs: {index: auth-*, query_template: auth-events}
+processors:
+  - id: to-udm
+    type: converter
+    from: auth.records
+    mappings: [mappings/auth.yaml]
+    output: udm.other_events
+outputs:
+  other_events: {from: udm.other_events}
+`,
+	})
+}
+
 func TestRunConfigUsage(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -486,6 +590,215 @@ func TestRunCommandSucceeds(t *testing.T) {
 	}
 }
 
+func TestDetectCommandUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no detection", args: []string{"detect"}},
+		{name: "two detections", args: []string{"detect", "one", "two", "--fixture", "fixture.json"}},
+		{name: "no mode", args: []string{"detect", "brute-force-then-success"}},
+		{
+			name: "both modes",
+			args: []string{"detect", "brute-force-then-success", "--fixture", "fixture.json", "--window-end", "2026-05-11T10:15:00Z"},
+		},
+		{name: "unknown flag", args: []string{"detect", "--no-such-flag", "brute-force-then-success", "--fixture", "fixture.json"}},
+		{name: "invalid window end", args: []string{"detect", "brute-force-then-success", "--window-end", "yesterday"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, stdout, stderr := runCLI(t, test.args, nil)
+
+			if status != 2 {
+				t.Fatalf("run() status = %d, want 2; stderr: %s", status, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("run() stdout = %q, want empty", stdout)
+			}
+			if stderr == "" {
+				t.Error("run() stderr is empty, want a usage or flag error")
+			}
+		})
+	}
+}
+
+func TestDetectFixturePasses(t *testing.T) {
+	path := filepath.Join("..", "..", "detections", "bruteforcelogin", "testdata", "positive.json")
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--fixture", path}, nil)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("run() stderr = %q, want empty", stderr)
+	}
+	result := decodeJSONLine[detection.FixtureResult](t, stdout)
+	if !result.Passed {
+		t.Fatalf("fixture passed = false, differences: %v", result.Differences)
+	}
+	if len(result.Proposals) != 1 {
+		t.Fatalf("fixture proposals = %d, want 1", len(result.Proposals))
+	}
+	if result.Proposals[0].Severity != detection.SeverityHigh {
+		t.Errorf("proposal severity = %q, want HIGH", result.Proposals[0].Severity)
+	}
+}
+
+func TestDetectFixtureMismatch(t *testing.T) {
+	source := filepath.Join("..", "..", "detections", "bruteforcelogin", "testdata", "positive.json")
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read positive fixture: %v", err)
+	}
+	body := strings.Replace(string(data), `"evidenceCount": 12`, `"evidenceCount": 11`, 1)
+	if body == string(data) {
+		t.Fatal("positive fixture has no evidenceCount 12 to replace")
+	}
+	path := filepath.Join(t.TempDir(), "mismatch.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write mismatch fixture: %v", err)
+	}
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--fixture", path}, nil)
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("run() stderr = %q, want empty", stderr)
+	}
+	result := decodeJSONLine[detection.FixtureResult](t, stdout)
+	if result.Passed {
+		t.Fatal("fixture passed = true, want a mismatch")
+	}
+	if differences := strings.Join(result.Differences, "\n"); !strings.Contains(differences, "evidence count") {
+		t.Errorf("fixture differences = %q, want the evidence count difference", differences)
+	}
+}
+
+func TestDetectFixtureLoadError(t *testing.T) {
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--fixture", "no-such-fixture.json"}, nil)
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "no-such-fixture.json") {
+		t.Errorf("run() stderr = %q, want it to name the fixture", stderr)
+	}
+}
+
+func TestDetectUnknownDetection(t *testing.T) {
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "missing", "--fixture", "fixture.json"}, nil)
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, `unknown detection "missing"`) {
+		t.Errorf("run() stderr = %q, want it to name the unknown detection", stderr)
+	}
+}
+
+func TestDetectWindowRecordsRun(t *testing.T) {
+	testDatabase, environment := runCommandEnvironment(t)
+	directory := runCommandConfig(t, "http://127.0.0.1:1")
+	end := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	seedDetectionWindow(t, testDatabase, end.Add(-15*time.Minute), end)
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--window-end", end.Format(time.RFC3339), "--config-dir", directory},
+		environment)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	result := decodeJSONLine[detection.RunResult](t, stdout)
+	if result.Status != detection.RunStatusOK || result.Error != "" {
+		t.Fatalf("detect result = %+v, want OK", result)
+	}
+	if result.RunID == "" || result.Revision != 1 || result.RowsRead != 12 || result.Proposals != 1 {
+		t.Errorf("detect result = %+v, want a run id, revision 1, 12 rows, 1 proposal", result)
+	}
+	if !result.WindowStart.Equal(end.Add(-15*time.Minute)) || !result.WindowEnd.Equal(end) {
+		t.Errorf("detect window = [%s, %s), want [%s, %s)", result.WindowStart, result.WindowEnd, end.Add(-15*time.Minute), end)
+	}
+
+	var runs, proposals int
+	if err := testDatabase.Raw("SELECT count(*) FROM detection_runs").Scan(&runs).Error; err != nil {
+		t.Fatalf("count detection runs: %v", err)
+	}
+	if err := testDatabase.Raw("SELECT count(*) FROM detection_proposals").Scan(&proposals).Error; err != nil {
+		t.Fatalf("count detection proposals: %v", err)
+	}
+	if runs != 1 || proposals != 1 {
+		t.Errorf("detection runs/proposals = %d/%d, want 1/1", runs, proposals)
+	}
+	var severity string
+	if err := testDatabase.Raw("SELECT severity FROM detection_proposals").Scan(&severity).Error; err != nil {
+		t.Fatalf("read proposal severity: %v", err)
+	}
+	if severity != string(detection.SeverityHigh) {
+		t.Errorf("proposal severity = %q, want HIGH", severity)
+	}
+}
+
+func TestDetectWindowInputNotReady(t *testing.T) {
+	_, environment := runCommandEnvironment(t)
+	directory := runCommandConfig(t, "http://127.0.0.1:1")
+	end := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--window-end", end.Format(time.RFC3339), "--config-dir", directory},
+		environment)
+
+	if status != 3 {
+		t.Fatalf("run() status = %d, want 3; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "input is not ready") || !strings.Contains(stderr, "auth_events") {
+		t.Errorf("run() stderr = %q, want the not-ready message naming auth_events", stderr)
+	}
+}
+
+func TestDetectInactiveDetection(t *testing.T) {
+	directory := inactiveDetectionConfig(t)
+	end := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	environment := map[string]string{
+		"SIMPLE_SIEM_ENV":          "development",
+		"SIMPLE_SIEM_DATABASE_URL": "postgres://unused:unused@127.0.0.1:1/unused?sslmode=disable",
+		"ELASTICSEARCH_USERNAME":   "elastic",
+		"ELASTICSEARCH_PASSWORD":   "test-password",
+	}
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--window-end", end.Format(time.RFC3339), "--config-dir", directory},
+		environment)
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	wantWarning := "detection brute-force-then-success inactive: input dataset auth_events not configured\n"
+	if stderr != wantWarning {
+		t.Errorf("run() stderr = %q, want %q", stderr, wantWarning)
+	}
+}
+
 func TestRunConfigValidateRejectsPhaseOneShape(t *testing.T) {
 	directory := writeConfigDirectory(t, map[string]string{
 		"system.yaml": "version: \"0.1\"\n",
@@ -546,7 +859,7 @@ outputs:
 }
 
 func TestExampleConfigLoads(t *testing.T) {
-	files, err := loadFileConfig("../../config", config.EnvironmentDevelopment, func(name string) string {
+	files, registry, err := loadFileConfig("../../config", config.EnvironmentDevelopment, func(name string) string {
 		switch name {
 		case "ELASTICSEARCH_USERNAME":
 			return "elastic"
@@ -573,6 +886,12 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if _, ok := pipeline.Outputs["auth_events"]; !ok {
 		t.Errorf("outputs = %#v, want auth_events", pipeline.Outputs)
+	}
+	if _, ok := registry.Manifests["brute-force-then-success"]; !ok {
+		t.Errorf("registry = %#v, want the example detection", registry.Manifests)
+	}
+	if len(registry.Inactive) != 0 {
+		t.Errorf("inactive detections = %v, want none", registry.Inactive)
 	}
 }
 
@@ -676,16 +995,73 @@ func writeStubJSON(t *testing.T, writer http.ResponseWriter, value any) {
 	}
 }
 
-func decodeRunResult(t *testing.T, stdout string) pipeline.RunResult {
+func decodeJSONLine[T any](t *testing.T, stdout string) T {
 	t.Helper()
 	if strings.Count(stdout, "\n") != 1 || !strings.HasSuffix(stdout, "\n") {
 		t.Fatalf("run() stdout = %q, want exactly one JSON line", stdout)
 	}
-	var result pipeline.RunResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode run result %q: %v", stdout, err)
+	var value T
+	if err := json.Unmarshal([]byte(stdout), &value); err != nil {
+		t.Fatalf("decode JSON line %q: %v", stdout, err)
 	}
-	return result
+	return value
+}
+
+func decodeRunResult(t *testing.T, stdout string) pipeline.RunResult {
+	t.Helper()
+	return decodeJSONLine[pipeline.RunResult](t, stdout)
+}
+
+// seedDetectionWindow migrates the test database and writes eleven failed
+// logons followed by a success for alice on web01, so the example detection
+// proposes one alert.
+func seedDetectionWindow(t *testing.T, testDatabase *gorm.DB, start, end time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Migrate(ctx, testDatabase); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+	store := dataset.NewPostgresStore(testDatabase)
+	err := testDatabase.Transaction(func(transaction *gorm.DB) error {
+		return store.RegisterDataset(ctx, transaction, dataset.Dataset{
+			Name:            "auth_events",
+			PipelineID:      "auth-events",
+			Retention:       72 * time.Hour,
+			AllowedLateness: 0,
+		})
+	})
+	if err != nil {
+		t.Fatalf("register auth_events: %v", err)
+	}
+
+	records := make([]dataset.Record, 0, 12)
+	for index := 0; index < 12; index++ {
+		action := udm.ActionBlock
+		if index == 11 {
+			action = udm.ActionAllow
+		}
+		eventTime := start.Add(time.Minute + time.Duration(index)*30*time.Second)
+		records = append(records, dataset.Record{
+			Key:       dataset.SourceKey{FetcherInstanceID: "seed", Index: "auth", DocumentID: fmt.Sprintf("%d", index+1)},
+			EventTime: eventTime,
+			Event: udm.Event{
+				Metadata:       udm.Metadata{EventTimestamp: eventTime, EventType: udm.EventTypeUserLogin},
+				Principal:      udm.Noun{IP: []string{"203.0.113.7"}},
+				Target:         udm.Noun{User: udm.User{UserID: "alice"}, Hostname: "web01"},
+				SecurityResult: udm.SecurityResult{Action: action},
+			},
+		})
+	}
+	err = testDatabase.Transaction(func(transaction *gorm.DB) error {
+		return store.WriteBatch(ctx, transaction, "auth_events", dataset.Batch{
+			RunID:          "seed",
+			Records:        records,
+			FetchWatermark: end,
+		})
+	})
+	if err != nil {
+		t.Fatalf("write auth_events window: %v", err)
+	}
 }
 
 func runRowStatus(t *testing.T, testDatabase *gorm.DB, runID string) string {

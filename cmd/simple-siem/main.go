@@ -18,11 +18,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/detections"
 	"github.com/RabbITCybErSeC/simple-siem/internal/api"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/dataset"
+	"github.com/RabbITCybErSeC/simple-siem/internal/detection"
 	"github.com/RabbITCybErSeC/simple-siem/internal/fetcher"
 	"github.com/RabbITCybErSeC/simple-siem/internal/fetcher/elasticsearch"
 	"github.com/RabbITCybErSeC/simple-siem/internal/pipeline"
@@ -41,14 +43,17 @@ commands:
   admin    create or recover admin accounts
   config   validate the file configuration
   run      run one pipeline once
+  detect   run one detection window or fixture
   version  print the version`
 
 	serveUsage   = "usage: simple-siem serve [--migrate=true|false]"
 	migrateUsage = "usage: simple-siem migrate"
 	adminUsage   = `usage: simple-siem admin create --email <email> [--display-name <name>] [--password-file <path>]
 usage: simple-siem admin reset-password --email <email> [--password-file <path>]`
-	configUsage  = "usage: simple-siem config validate [--config-dir DIR]"
-	runUsage     = "usage: simple-siem run <pipeline-id> [--config-dir DIR]"
+	configUsage = "usage: simple-siem config validate [--config-dir DIR]"
+	runUsage    = "usage: simple-siem run <pipeline-id> [--config-dir DIR]"
+	detectUsage = `usage: simple-siem detect <detection-id> --window-end <RFC3339> [--config-dir DIR]
+usage: simple-siem detect <detection-id> --fixture <path>`
 	versionUsage = "usage: simple-siem version"
 
 	defaultDisplayNameRunes = 200
@@ -86,6 +91,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return runConfig(args[1:], getenv, stdout, stderr)
 	case "run":
 		return runPipeline(ctx, args[1:], getenv, stdout, stderr)
+	case "detect":
+		return runDetect(ctx, args[1:], getenv, stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:
@@ -95,17 +102,17 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 }
 
 // loadFileConfig loads and validates the file configuration, including the
-// Phase 1 pipeline shape, every mapping, and the Elasticsearch dialect of
-// every query template. Every command that loads file configuration must use
-// it.
-func loadFileConfig(directory string, environment config.Environment, getenv func(string) string) (config.Files, error) {
+// Phase 1 pipeline shape, every mapping, the Elasticsearch dialect of every
+// query template, and every compiled detection against the loaded pipelines.
+// Every command that loads file configuration must use it.
+func loadFileConfig(directory string, environment config.Environment, getenv func(string) string) (config.Files, detection.Registry, error) {
 	files, err := config.LoadFiles(directory, environment, getenv)
 	if err != nil {
-		return config.Files{}, err
+		return config.Files{}, detection.Registry{}, err
 	}
 
 	if err := pipeline.ValidateFiles(files); err != nil {
-		return config.Files{}, err
+		return config.Files{}, detection.Registry{}, err
 	}
 
 	var templateProblems []error
@@ -116,9 +123,14 @@ func loadFileConfig(directory string, environment config.Environment, getenv fun
 		}
 	}
 	if err := errors.Join(templateProblems...); err != nil {
-		return config.Files{}, err
+		return config.Files{}, detection.Registry{}, err
 	}
-	return files, nil
+
+	registry, err := detection.ValidateRegistrations(detections.All, files)
+	if err != nil {
+		return config.Files{}, detection.Registry{}, err
+	}
+	return files, registry, nil
 }
 
 func runConfig(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
@@ -139,10 +151,14 @@ func runConfig(args []string, getenv func(string) string, stdout, stderr io.Writ
 		return 2
 	}
 
-	files, err := loadFileConfig(*directory, environment, getenv)
+	files, registry, err := loadFileConfig(*directory, environment, getenv)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
+	}
+
+	for _, id := range slices.Sorted(maps.Keys(registry.Inactive)) {
+		_, _ = fmt.Fprintf(stderr, "warning: %s\n", registry.Inactive[id])
 	}
 
 	datasets := 0
@@ -167,7 +183,7 @@ func countLabel(count int, singular string) string {
 func runPipeline(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("run", stderr, runUsage)
 	directory := flags.String("config-dir", "config", "configuration directory")
-	options, positionals := splitRunArguments(args)
+	options, positionals := splitArguments(args, "config-dir")
 	if err := flags.Parse(options); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -185,7 +201,7 @@ func runPipeline(ctx context.Context, args []string, getenv func(string) string,
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
-	files, err := loadFileConfig(*directory, settings.Environment, getenv)
+	files, _, err := loadFileConfig(*directory, settings.Environment, getenv)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
@@ -224,12 +240,9 @@ func runPipeline(ctx context.Context, args []string, getenv func(string) string,
 		return 1
 	}
 
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, err)
-		return 1
+	if status := writeJSONLine(stdout, stderr, result); status != 0 {
+		return status
 	}
-	_, _ = fmt.Fprintln(stdout, string(encoded))
 
 	switch result.Status {
 	case pipeline.StatusOK, pipeline.StatusPartial, pipeline.StatusSkipped:
@@ -239,9 +252,10 @@ func runPipeline(ctx context.Context, args []string, getenv func(string) string,
 	}
 }
 
-// splitRunArguments separates flags from the pipeline id so --config-dir may
-// follow the id, which the standard flag package does not allow.
-func splitRunArguments(args []string) (options []string, positionals []string) {
+// splitArguments separates flags from positional arguments so a flag may
+// follow them, which the standard flag package does not allow. valueFlags
+// names the flags that consume the next argument.
+func splitArguments(args []string, valueFlags ...string) (options []string, positionals []string) {
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		if argument == "--" {
@@ -252,12 +266,146 @@ func splitRunArguments(args []string) (options []string, positionals []string) {
 			continue
 		}
 		options = append(options, argument)
-		if (argument == "--config-dir" || argument == "-config-dir") && index+1 < len(args) {
+		name, _, _ := strings.Cut(strings.TrimLeft(argument, "-"), "=")
+		if slices.Contains(valueFlags, name) && index+1 < len(args) {
 			index++
 			options = append(options, args[index])
 		}
 	}
 	return options, positionals
+}
+
+// runDetect evaluates one detection window or fixture and prints one JSON
+// result line.
+func runDetect(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("detect", stderr, detectUsage)
+	windowEndValue := flags.String("window-end", "", "end of the window in RFC 3339")
+	fixturePath := flags.String("fixture", "", "fixture file to evaluate")
+	directory := flags.String("config-dir", "config", "configuration directory")
+	options, positionals := splitArguments(args, "window-end", "fixture", "config-dir")
+	if err := flags.Parse(options); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(positionals) != 1 || (*windowEndValue == "") == (*fixturePath == "") {
+		flags.Usage()
+		return 2
+	}
+
+	registration, manifest, known := findCompiledDetection(positionals[0])
+	if !known {
+		_, _ = fmt.Fprintf(stderr, "unknown detection %q\n", positionals[0])
+		return 1
+	}
+	if *fixturePath != "" {
+		return runDetectFixture(registration, manifest, *fixturePath, stdout, stderr)
+	}
+
+	windowEnd, err := time.Parse(time.RFC3339, *windowEndValue)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid --window-end %q: %v\n", *windowEndValue, err)
+		return 2
+	}
+	return runDetectWindow(ctx, registration, manifest, windowEnd, *directory, getenv, stdout, stderr)
+}
+
+// findCompiledDetection resolves one id from detections.All to its
+// registration and parsed manifest.
+func findCompiledDetection(id string) (detection.Registration, config.DetectionManifest, bool) {
+	for _, registration := range detections.All {
+		manifest, err := config.ParseDetectionManifest(registration.Manifest)
+		if err != nil {
+			continue
+		}
+		if manifest.ID == id {
+			return registration, manifest, true
+		}
+	}
+	return detection.Registration{}, config.DetectionManifest{}, false
+}
+
+// runDetectFixture evaluates a fixture without a database or file config.
+func runDetectFixture(registration detection.Registration, manifest config.DetectionManifest, path string, stdout, stderr io.Writer) int {
+	result, err := detection.EvaluateFixture(registration, manifest, path)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if status := writeJSONLine(stdout, stderr, result); status != 0 {
+		return status
+	}
+	if !result.Passed {
+		return 1
+	}
+	return 0
+}
+
+// runDetectWindow runs one window with the database and file configuration.
+func runDetectWindow(ctx context.Context, registration detection.Registration, manifest config.DetectionManifest,
+	windowEnd time.Time, directory string, getenv func(string) string, stdout, stderr io.Writer) int {
+	settings, err := config.Load(getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	_, registry, err := loadFileConfig(directory, settings.Environment, getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if warning, inactive := registry.Inactive[manifest.ID]; inactive {
+		_, _ = fmt.Fprintln(stderr, warning)
+		return 1
+	}
+
+	logger := slog.New(slog.NewJSONHandler(stderr, nil))
+	slog.SetDefault(logger)
+	db, err := database.Open(ctx, settings)
+	if err != nil {
+		logger.Error("open database", "error", err)
+		return 1
+	}
+	defer closeDatabase(db, logger)
+	if _, err := database.Migrate(ctx, db); err != nil {
+		logger.Error("migrate database", "error", err)
+		return 1
+	}
+
+	runner := &detection.Runner{
+		Database: db,
+		Store:    dataset.NewPostgresStore(db),
+		Registry: registry,
+		Logger:   logger,
+	}
+	result, err := runner.RunWindow(ctx, registration, windowEnd)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		if errors.Is(err, detection.ErrInputNotReady) {
+			return 3
+		}
+		return 1
+	}
+	if status := writeJSONLine(stdout, stderr, result); status != 0 {
+		return status
+	}
+	if result.Status == detection.RunStatusOK {
+		return 0
+	}
+	return 1
+}
+
+// writeJSONLine prints one JSON result line and keeps encoding errors off
+// stdout.
+func writeJSONLine(stdout, stderr io.Writer, value any) int {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, string(encoded))
+	return 0
 }
 
 func runAdmin(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, logger *slog.Logger) int {
