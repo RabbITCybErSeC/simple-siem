@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -514,6 +515,9 @@ func TestLoginRateLimitPerEmail(t *testing.T) {
 	logged := test.logs.String()
 	if !strings.Contains(logged, "login rate limited") {
 		t.Errorf("logs do not contain the rate-limit warning: %s", logged)
+	}
+	if !strings.Contains(logged, `"request_id":"request-limited"`) {
+		t.Errorf("rate-limit log lacks the request id: %s", logged)
 	}
 	if strings.Contains(logged, testEmail) {
 		t.Errorf("rate-limit log contains the email: %s", logged)
@@ -1584,6 +1588,42 @@ func waitForLockWaits(t *testing.T, db *gorm.DB, want int64) {
 	t.Fatalf("%d sessions waited on a lock, want %d", waiting, want)
 }
 
+// runWhileUserLocked runs change in the background and commits mutate from a
+// transaction holding the user row, so change waits on that row.
+func runWhileUserLocked(t *testing.T, database *gorm.DB, userID string, mutate func(tx *gorm.DB) error, change func() error) error {
+	t.Helper()
+	userLocked := make(chan struct{})
+	releaseUser := make(chan struct{})
+	lockResult := make(chan error, 1)
+	go func() {
+		lockResult <- database.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(
+				"SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE", userID,
+			).Error; err != nil {
+				return err
+			}
+			if err := mutate(tx); err != nil {
+				return err
+			}
+			close(userLocked)
+			<-releaseUser
+			return nil
+		})
+	}()
+	<-userLocked
+
+	changed := make(chan error, 1)
+	go func() {
+		changed <- change()
+	}()
+	waitForLockWaits(t, database, 1)
+	close(releaseUser)
+	if err := <-lockResult; err != nil {
+		t.Fatalf("release the user lock: %v", err)
+	}
+	return <-changed
+}
+
 // TestConcurrentLoginAndResetTokenUse races a login with the redemption of a
 // reset token for the same user. Both take the user row lock first, so they
 // serialize instead of deadlocking on the identity row.
@@ -1837,6 +1877,905 @@ func TestLoginRejectsDisabledUser(t *testing.T) {
 	}
 }
 
+func TestChangePassword(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	sessions := []LoginResult{
+		test.login(t, testEmail, testPassword),
+		test.login(t, testEmail, testPassword),
+		test.login(t, testEmail, testPassword),
+	}
+	actor, err := test.service.Authenticate(context.Background(), sessions[0].Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	resetToken, _, err := test.service.CreateResetToken(
+		context.Background(), actor, testClient(), user.ID,
+	)
+	if err != nil {
+		t.Fatalf("CreateResetToken: %v", err)
+	}
+
+	const newPassword = "a whole new password"
+	revoked, err := test.service.ChangePassword(
+		context.Background(), actor, testClient(), testPassword, newPassword,
+	)
+	if err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+	if revoked != 2 {
+		t.Errorf("ChangePassword revoked %d sessions, want 2", revoked)
+	}
+
+	if _, err := test.service.Authenticate(context.Background(), sessions[0].Token); err != nil {
+		t.Errorf("Authenticate with the current session after the change = %v, want nil", err)
+	}
+	for index, session := range sessions[1:] {
+		if _, err := test.service.Authenticate(context.Background(), session.Token); !errors.Is(err, ErrUnauthenticated) {
+			t.Errorf("Authenticate with revoked session %d = %v, want ErrUnauthenticated", index+2, err)
+		}
+	}
+	if err := test.service.UseResetToken(
+		context.Background(), resetToken, "another correct horse", testClient(),
+	); !errors.Is(err, ErrInvalidResetToken) {
+		t.Errorf("UseResetToken after the change = %v, want ErrInvalidResetToken", err)
+	}
+
+	if _, err := test.service.Login(
+		context.Background(),
+		LoginRequest{Email: testEmail, Password: testPassword},
+		testClient(),
+	); !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("Login with the old password = %v, want ErrInvalidCredentials", err)
+	}
+	if _, err := test.service.Login(
+		context.Background(),
+		LoginRequest{Email: testEmail, Password: newPassword},
+		testClient(),
+	); err != nil {
+		t.Errorf("Login with the new password = %v, want nil", err)
+	}
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identity.PasswordHash == nil {
+		t.Fatal("identity password hash is nil after the change")
+	}
+	if identity.Version != 2 {
+		t.Errorf("identity version after the change = %d, want 2", identity.Version)
+	}
+	matches, err := VerifyPassword(context.Background(), newPassword, *identity.PasswordHash)
+	if err != nil || !matches {
+		t.Errorf("VerifyPassword(new password) = %v/%v, want true/nil", matches, err)
+	}
+
+	var succeeded int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM login_attempts WHERE succeeded AND email_hash = ?", emailHash(testEmail),
+	).Scan(&succeeded).Error; err != nil {
+		t.Fatalf("count succeeded attempts: %v", err)
+	}
+	if succeeded != 5 {
+		t.Errorf("succeeded attempts = %d, want 5 (three logins, the change, and the new-password login)", succeeded)
+	}
+
+	events := authEventsNamed(t, test.database, user.ID, "simple_siem.auth.password_changed")
+	if len(events) != 1 {
+		t.Fatalf("ChangePassword wrote %d password_changed events, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventCategory != "AUTHENTICATION" || event.EventOutcome != "SUCCESS" || event.ActorType != "USER" {
+		t.Errorf("password change audit = %s/%s/%s, want AUTHENTICATION/SUCCESS/USER",
+			event.EventCategory, event.EventOutcome, event.ActorType)
+	}
+	if event.ActorID == nil || *event.ActorID != user.ID {
+		t.Errorf("password change audit actor id = %v, want %q", event.ActorID, user.ID)
+	}
+	if event.ActorSessionID == nil || *event.ActorSessionID != actor.SessionID {
+		t.Errorf("password change audit actor session id = %v, want %q", event.ActorSessionID, actor.SessionID)
+	}
+	if event.TargetType != "USER" || event.TargetID != user.ID || event.Action != "change_password" {
+		t.Errorf("password change audit target = %q/%q action %q, want USER/%q change_password",
+			event.TargetType, event.TargetID, event.Action, user.ID)
+	}
+	changes := storedChanges(t, event)
+	if changes["revokedCount"] != float64(revoked) {
+		t.Errorf("password change audit revokedCount = %v, want %d", changes["revokedCount"], revoked)
+	}
+
+	logged := test.logs.String()
+	for _, secret := range []string{testPassword, newPassword} {
+		if strings.Contains(logged, secret) {
+			t.Errorf("logs contain the password %q: %s", secret, logged)
+		}
+	}
+	var auditText string
+	if err := test.database.Raw(
+		"SELECT COALESCE(string_agg(changes::text, ' '), '') FROM audit_events",
+	).Scan(&auditText).Error; err != nil {
+		t.Fatalf("read audit changes: %v", err)
+	}
+	for _, secret := range []string{testPassword, newPassword} {
+		if strings.Contains(auditText, secret) {
+			t.Errorf("audit changes contain the password %q: %s", secret, auditText)
+		}
+	}
+}
+
+func TestChangePasswordRejectsWrongCurrentPassword(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	const newPassword = "a whole new password"
+
+	revoked, err := test.service.ChangePassword(
+		context.Background(), actor, testClient(), testPassword+"-wrong", newPassword,
+	)
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("ChangePassword with a wrong current password = %v, want ErrInvalidCredentials", err)
+	}
+	if revoked != 0 {
+		t.Errorf("ChangePassword revoked %d sessions, want 0", revoked)
+	}
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identity.PasswordHash == nil {
+		t.Fatal("identity password hash is nil")
+	}
+	matches, err := VerifyPassword(context.Background(), testPassword, *identity.PasswordHash)
+	if err != nil || !matches {
+		t.Errorf("VerifyPassword(old password) after the rejection = %v/%v, want true/nil", matches, err)
+	}
+	matches, err = VerifyPassword(context.Background(), newPassword, *identity.PasswordHash)
+	if err != nil {
+		t.Fatalf("VerifyPassword(new password): %v", err)
+	}
+	if matches {
+		t.Error("VerifyPassword(new password) after the rejection = true, want false")
+	}
+	if identity.Version != 1 {
+		t.Errorf("identity version after the rejection = %d, want 1", identity.Version)
+	}
+
+	var failed int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM login_attempts WHERE NOT succeeded AND email_hash = ?", emailHash(testEmail),
+	).Scan(&failed).Error; err != nil {
+		t.Fatalf("count failed attempts: %v", err)
+	}
+	if failed != 1 {
+		t.Errorf("failed attempts = %d, want 1 (the rejected change)", failed)
+	}
+
+	events := authEventsNamed(t, test.database, user.ID, "simple_siem.auth.password_change")
+	if len(events) != 1 {
+		t.Fatalf("rejected change wrote %d audit events, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventOutcome != "FAILED" || event.ActorType != "USER" {
+		t.Errorf("rejected change audit = %s/%s, want FAILED/USER", event.EventOutcome, event.ActorType)
+	}
+	if event.ActorID == nil || *event.ActorID != user.ID {
+		t.Errorf("rejected change audit actor id = %v, want %q", event.ActorID, user.ID)
+	}
+	if event.TargetType != "USER" || event.TargetID != user.ID || event.Action != "change_password" {
+		t.Errorf("rejected change audit target = %q/%q action %q, want USER/%q change_password",
+			event.TargetType, event.TargetID, event.Action, user.ID)
+	}
+	changes := storedChanges(t, event)
+	if changes["reason"] != "invalid_current_password" {
+		t.Errorf("rejected change audit reason = %v, want invalid_current_password", changes["reason"])
+	}
+	if strings.Contains(string(event.Changes), testPassword) || strings.Contains(string(event.Changes), newPassword) {
+		t.Errorf("rejected change audit contains a password: %s", event.Changes)
+	}
+}
+
+func TestChangePasswordRateLimited(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	for attempt := 0; attempt < emailFailureLimit; attempt++ {
+		insertFailedAttempt(t, test.database, testEmail, fmt.Sprintf("192.0.2.%d", attempt+10), time.Now().Add(-time.Minute))
+	}
+	attemptsBefore := countRows(t, test.database, "login_attempts")
+	sessionsBefore := countRows(t, test.database, "sessions")
+	eventsBefore := countRows(t, test.database, "audit_events")
+	var identityBefore Identity
+	if err := test.database.Where("user_id = ?", actor.UserID).First(&identityBefore).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+
+	revoked, err := test.service.ChangePassword(
+		context.Background(), actor, testClient(), testPassword, "a whole new password",
+	)
+	var rateLimited RateLimitedError
+	if !errors.As(err, &rateLimited) {
+		t.Fatalf("ChangePassword over the email limit = %v, want RateLimitedError", err)
+	}
+	if revoked != 0 {
+		t.Errorf("ChangePassword revoked %d sessions, want 0", revoked)
+	}
+	if got := countRows(t, test.database, "login_attempts"); got != attemptsBefore {
+		t.Errorf("login attempts = %d after a rate-limited change, want %d", got, attemptsBefore)
+	}
+	if got := countRows(t, test.database, "sessions"); got != sessionsBefore {
+		t.Errorf("sessions = %d after a rate-limited change, want %d", got, sessionsBefore)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after a rate-limited change, want %d", got, eventsBefore)
+	}
+	var identityAfter Identity
+	if err := test.database.Where("user_id = ?", actor.UserID).First(&identityAfter).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identityAfter.PasswordHash == nil || identityBefore.PasswordHash == nil ||
+		*identityAfter.PasswordHash != *identityBefore.PasswordHash || identityAfter.Version != identityBefore.Version {
+		t.Error("a rate-limited change altered the identity")
+	}
+	if !strings.Contains(test.logs.String(), "login rate limited") {
+		t.Errorf("logs do not contain the rate-limit warning: %s", test.logs.String())
+	}
+}
+
+func TestChangePasswordValidatesNewPasswordBeforeReservation(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	for attempt := 0; attempt < emailFailureLimit; attempt++ {
+		insertFailedAttempt(t, test.database, testEmail, fmt.Sprintf("192.0.2.%d", attempt+10), time.Now().Add(-time.Minute))
+	}
+	attemptsBefore := countRows(t, test.database, "login_attempts")
+	eventsBefore := countRows(t, test.database, "audit_events")
+	var identityBefore Identity
+	if err := test.database.Where("user_id = ?", actor.UserID).First(&identityBefore).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+
+	revoked, err := test.service.ChangePassword(
+		context.Background(), actor, testClient(), testPassword, strings.Repeat("a", 11),
+	)
+	if !errors.Is(err, ErrPasswordLength) {
+		t.Fatalf("ChangePassword over the limit with an 11-character password = %v, want ErrPasswordLength", err)
+	}
+	if revoked != 0 {
+		t.Errorf("ChangePassword revoked %d sessions, want 0", revoked)
+	}
+	if got := countRows(t, test.database, "login_attempts"); got != attemptsBefore {
+		t.Errorf("login attempts = %d after a short new password, want %d (no reservation)", got, attemptsBefore)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after a short new password, want %d", got, eventsBefore)
+	}
+	var identityAfter Identity
+	if err := test.database.Where("user_id = ?", actor.UserID).First(&identityAfter).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identityAfter.PasswordHash == nil || identityBefore.PasswordHash == nil ||
+		*identityAfter.PasswordHash != *identityBefore.PasswordHash || identityAfter.Version != identityBefore.Version {
+		t.Error("a rejected short password altered the identity")
+	}
+}
+
+func TestChangePasswordRejectsOverlongCurrentPassword(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	revoked, err := test.service.ChangePassword(
+		context.Background(), actor, testClient(), strings.Repeat("a", 129), "a whole new password",
+	)
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("ChangePassword with a 129-rune current password = %v, want ErrInvalidCredentials", err)
+	}
+	if revoked != 0 {
+		t.Errorf("ChangePassword revoked %d sessions, want 0", revoked)
+	}
+
+	var failed int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM login_attempts WHERE NOT succeeded AND email_hash = ?", emailHash(testEmail),
+	).Scan(&failed).Error; err != nil {
+		t.Fatalf("count failed attempts: %v", err)
+	}
+	if failed != 1 {
+		t.Errorf("failed attempts = %d, want 1 (the rejected change)", failed)
+	}
+	events := authEventsNamed(t, test.database, user.ID, "simple_siem.auth.password_change")
+	if len(events) != 1 || events[0].EventOutcome != "FAILED" {
+		t.Fatalf("overlong current password audits = %+v, want one FAILED event", events)
+	}
+	if changes := storedChanges(t, events[0]); changes["reason"] != "invalid_current_password" {
+		t.Errorf("overlong current password reason = %v, want invalid_current_password", changes["reason"])
+	}
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	matches, err := VerifyPassword(context.Background(), testPassword, *identity.PasswordHash)
+	if err != nil || !matches {
+		t.Errorf("VerifyPassword(old password) = %v/%v, want true/nil", matches, err)
+	}
+}
+
+func TestChangePasswordWithConcurrentLoginRehash(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	oldHash := oldPasswordHash(t, testPassword)
+	if err := test.database.Exec(
+		"UPDATE user_identities SET password_hash = ? WHERE user_id = ?", oldHash, user.ID,
+	).Error; err != nil {
+		t.Fatalf("store old password hash: %v", err)
+	}
+	const newPassword = "a whole new password"
+
+	userLocked := make(chan struct{})
+	releaseUser := make(chan struct{})
+	lockResult := make(chan error, 1)
+	go func() {
+		lockResult <- test.database.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(
+				"SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE", user.ID,
+			).Error; err != nil {
+				return err
+			}
+			close(userLocked)
+			<-releaseUser
+			return nil
+		})
+	}()
+	<-userLocked
+
+	type changeResult struct {
+		revoked int64
+		err     error
+	}
+	changed := make(chan changeResult, 1)
+	go func() {
+		revoked, err := test.service.ChangePassword(
+			context.Background(), actor, testClient(), testPassword, newPassword,
+		)
+		changed <- changeResult{revoked: revoked, err: err}
+	}()
+	waitForLockWaits(t, test.database, 1)
+
+	loginDone := make(chan error, 1)
+	go func() {
+		_, err := test.service.Login(
+			context.Background(),
+			LoginRequest{Email: testEmail, Password: testPassword},
+			testClient(),
+		)
+		loginDone <- err
+	}()
+	waitForLockWaits(t, test.database, 2)
+	close(releaseUser)
+	if err := <-lockResult; err != nil {
+		t.Fatalf("release the user lock: %v", err)
+	}
+
+	result := <-changed
+	if loginErr := <-loginDone; loginErr != nil && !errors.Is(loginErr, ErrInvalidCredentials) {
+		t.Errorf("concurrent login = %v, want nil or ErrInvalidCredentials", loginErr)
+	}
+	if result.err != nil {
+		t.Fatalf("ChangePassword with a concurrent login rehash = %v, want nil", result.err)
+	}
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identity.PasswordHash == nil {
+		t.Fatal("identity password hash is nil after the change")
+	}
+	matches, err := VerifyPassword(context.Background(), newPassword, *identity.PasswordHash)
+	if err != nil || !matches {
+		t.Errorf("VerifyPassword(new password) = %v/%v, want true/nil", matches, err)
+	}
+	matches, err = VerifyPassword(context.Background(), testPassword, *identity.PasswordHash)
+	if err != nil {
+		t.Fatalf("VerifyPassword(old password): %v", err)
+	}
+	if matches {
+		t.Error("VerifyPassword(old password) after the change = true, want false")
+	}
+}
+
+func TestChangePasswordRejectsShortNewPassword(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	attemptsBefore := countRows(t, test.database, "login_attempts")
+	eventsBefore := countRows(t, test.database, "audit_events")
+	var identityBefore Identity
+	if err := test.database.Where("user_id = ?", actor.UserID).First(&identityBefore).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+
+	revoked, err := test.service.ChangePassword(
+		context.Background(), actor, testClient(), testPassword, strings.Repeat("a", 11),
+	)
+	if !errors.Is(err, ErrPasswordLength) {
+		t.Fatalf("ChangePassword with an 11-character password = %v, want ErrPasswordLength", err)
+	}
+	if revoked != 0 {
+		t.Errorf("ChangePassword revoked %d sessions, want 0", revoked)
+	}
+	if got := countRows(t, test.database, "login_attempts"); got != attemptsBefore {
+		t.Errorf("login attempts = %d after a short new password, want %d", got, attemptsBefore)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after a short new password, want %d", got, eventsBefore)
+	}
+	var identityAfter Identity
+	if err := test.database.Where("user_id = ?", actor.UserID).First(&identityAfter).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identityAfter.PasswordHash == nil || identityBefore.PasswordHash == nil ||
+		*identityAfter.PasswordHash != *identityBefore.PasswordHash || identityAfter.Version != identityBefore.Version {
+		t.Error("a rejected short password altered the identity")
+	}
+}
+
+func TestChangePasswordFailureAuditSurvivesCanceledContext(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	original := test.service.provider
+	test.service.provider = cancelOnInvalidProvider{provider: original, cancel: cancel}
+	t.Cleanup(func() { test.service.provider = original })
+
+	revoked, err := test.service.ChangePassword(
+		ctx, actor, testClient(), testPassword+"-wrong", "a whole new password",
+	)
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("ChangePassword with a wrong password and a canceled context = %v, want ErrInvalidCredentials", err)
+	}
+	if revoked != 0 {
+		t.Errorf("ChangePassword revoked %d sessions, want 0", revoked)
+	}
+
+	var failed int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM login_attempts WHERE NOT succeeded AND email_hash = ?", emailHash(testEmail),
+	).Scan(&failed).Error; err != nil {
+		t.Fatalf("count failed attempts: %v", err)
+	}
+	if failed != 1 {
+		t.Errorf("failed attempts = %d, want 1 (the attempt row is kept)", failed)
+	}
+	events := authEventsNamed(t, test.database, actor.UserID, "simple_siem.auth.password_change")
+	if len(events) != 1 {
+		t.Fatalf("canceled password change wrote %d FAILED audits, want 1", len(events))
+	}
+	if events[0].EventOutcome != "FAILED" {
+		t.Errorf("canceled password change audit outcome = %q, want FAILED", events[0].EventOutcome)
+	}
+	if changes := storedChanges(t, events[0]); changes["reason"] != "invalid_current_password" {
+		t.Errorf("canceled password change reason = %v, want invalid_current_password", changes["reason"])
+	}
+}
+
+func TestChangePasswordRejectsDisabledUser(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	attemptsBefore := countRows(t, test.database, "login_attempts")
+	eventsBefore := countRows(t, test.database, "audit_events")
+	sessionsBefore := countRows(t, test.database, "sessions")
+	var identityBefore Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identityBefore).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+
+	changeErr := runWhileUserLocked(t, test.database, user.ID, func(tx *gorm.DB) error {
+		return tx.Exec("UPDATE users SET status = 'DISABLED' WHERE id = ?", user.ID).Error
+	}, func() error {
+		_, err := test.service.ChangePassword(
+			context.Background(), actor, testClient(), testPassword, "a whole new password",
+		)
+		return err
+	})
+	if !errors.Is(changeErr, ErrUnauthenticated) {
+		t.Fatalf("ChangePassword for a user disabled during the change = %v, want ErrUnauthenticated", changeErr)
+	}
+	if got := countRows(t, test.database, "login_attempts"); got != attemptsBefore {
+		t.Errorf("login attempts = %d after the rejection, want %d (the attempt row is deleted)", got, attemptsBefore)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after the rejection, want %d", got, eventsBefore)
+	}
+	if got := countRows(t, test.database, "sessions"); got != sessionsBefore {
+		t.Errorf("sessions = %d after the rejection, want %d", got, sessionsBefore)
+	}
+	var identityAfter Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identityAfter).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identityAfter.PasswordHash == nil || identityBefore.PasswordHash == nil ||
+		*identityAfter.PasswordHash != *identityBefore.PasswordHash || identityAfter.Version != identityBefore.Version {
+		t.Error("a rejected change altered the identity")
+	}
+}
+
+func TestChangePasswordRejectsRevokedSession(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	attemptsBefore := countRows(t, test.database, "login_attempts")
+	eventsBefore := countRows(t, test.database, "audit_events")
+	sessionsBefore := countRows(t, test.database, "sessions")
+	var identityBefore Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identityBefore).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+
+	sessionsAfterDelete := sessionsBefore - 1
+	changeErr := runWhileUserLocked(t, test.database, user.ID, func(tx *gorm.DB) error {
+		return tx.Exec(
+			"DELETE FROM sessions WHERE id = ? AND user_id = ?", actor.SessionID, actor.UserID,
+		).Error
+	}, func() error {
+		_, err := test.service.ChangePassword(
+			context.Background(), actor, testClient(), testPassword, "a whole new password",
+		)
+		return err
+	})
+	if !errors.Is(changeErr, ErrUnauthenticated) {
+		t.Fatalf("ChangePassword for a revoked session = %v, want ErrUnauthenticated", changeErr)
+	}
+	if got := countRows(t, test.database, "login_attempts"); got != attemptsBefore {
+		t.Errorf("login attempts = %d after the rejection, want %d (the attempt row is deleted)", got, attemptsBefore)
+	}
+	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
+		t.Errorf("audit events = %d after the rejection, want %d", got, eventsBefore)
+	}
+	if got := countRows(t, test.database, "sessions"); got != sessionsAfterDelete {
+		t.Errorf("sessions = %d after the rejection, want %d", got, sessionsAfterDelete)
+	}
+	var identityAfter Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identityAfter).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if identityAfter.PasswordHash == nil || identityBefore.PasswordHash == nil ||
+		*identityAfter.PasswordHash != *identityBefore.PasswordHash || identityAfter.Version != identityBefore.Version {
+		t.Error("a rejected change altered the identity")
+	}
+}
+
+func TestChangePasswordRejectsCredentialChange(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+
+	identityLocked := make(chan struct{})
+	releaseIdentity := make(chan struct{})
+	lockResult := make(chan error, 1)
+	go func() {
+		lockResult <- test.database.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(
+				"SELECT id FROM user_identities WHERE id = ? FOR UPDATE", identity.ID,
+			).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(
+				"UPDATE user_identities SET version = version + 1 WHERE id = ?", identity.ID,
+			).Error; err != nil {
+				return err
+			}
+			close(identityLocked)
+			<-releaseIdentity
+			return nil
+		})
+	}()
+	<-identityLocked
+
+	type changeResult struct {
+		revoked int64
+		err     error
+	}
+	changed := make(chan changeResult, 1)
+	go func() {
+		revoked, err := test.service.ChangePassword(
+			context.Background(), actor, testClient(), testPassword, "a whole new password",
+		)
+		changed <- changeResult{revoked: revoked, err: err}
+	}()
+	waitForLockWaits(t, test.database, 1)
+	close(releaseIdentity)
+	if err := <-lockResult; err != nil {
+		t.Fatalf("release the identity lock: %v", err)
+	}
+
+	result := <-changed
+	if !errors.Is(result.err, ErrInvalidCredentials) {
+		t.Fatalf("ChangePassword after a credential change = %v, want ErrInvalidCredentials", result.err)
+	}
+	if result.revoked != 0 {
+		t.Errorf("ChangePassword revoked %d sessions, want 0", result.revoked)
+	}
+
+	var stored Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&stored).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	if stored.PasswordHash == nil {
+		t.Fatal("identity password hash is nil")
+	}
+	matches, err := VerifyPassword(context.Background(), testPassword, *stored.PasswordHash)
+	if err != nil || !matches {
+		t.Errorf("VerifyPassword(old password) after the rejection = %v/%v, want true/nil", matches, err)
+	}
+
+	var failed int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM login_attempts WHERE NOT succeeded AND email_hash = ?", emailHash(testEmail),
+	).Scan(&failed).Error; err != nil {
+		t.Fatalf("count failed attempts: %v", err)
+	}
+	if failed != 1 {
+		t.Errorf("failed attempts = %d, want 1 (the rejected change)", failed)
+	}
+
+	events := authEventsNamed(t, test.database, user.ID, "simple_siem.auth.password_change")
+	if len(events) != 1 {
+		t.Fatalf("credential-change rejection wrote %d audit events, want 1", len(events))
+	}
+	if events[0].EventOutcome != "FAILED" {
+		t.Errorf("credential-change audit outcome = %q, want FAILED", events[0].EventOutcome)
+	}
+	changes := storedChanges(t, events[0])
+	if changes["reason"] != "credential_changed" {
+		t.Errorf("credential-change audit reason = %v, want credential_changed", changes["reason"])
+	}
+}
+
+func authEventsNamed(t *testing.T, db *gorm.DB, targetID, name string) []storedAuditEvent {
+	t.Helper()
+	var events []storedAuditEvent
+	for _, event := range auditEventsForTarget(t, db, targetID) {
+		if event.EventName == name {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func TestListSessions(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	logins := []LoginResult{
+		test.login(t, testEmail, testPassword),
+		test.login(t, testEmail, testPassword),
+		test.login(t, testEmail, testPassword),
+	}
+	actors := make([]Actor, len(logins))
+	for index, login := range logins {
+		actor, err := test.service.Authenticate(context.Background(), login.Token)
+		if err != nil {
+			t.Fatalf("Authenticate session %d: %v", index+1, err)
+		}
+		actors[index] = actor
+	}
+	ages := []string{"3 minutes", "2 minutes", "1 minute"}
+	for index, actor := range actors {
+		if err := test.database.Exec(
+			"UPDATE sessions SET created_at = now() - interval '"+ages[index]+"' WHERE id = ?", actor.SessionID,
+		).Error; err != nil {
+			t.Fatalf("age session %d: %v", index+1, err)
+		}
+	}
+	if err := test.database.Exec(
+		"UPDATE sessions SET idle_expires_at = now() - interval '1 minute' WHERE id = ?", actors[2].SessionID,
+	).Error; err != nil {
+		t.Fatalf("expire session 3: %v", err)
+	}
+
+	sessions, err := test.service.ListSessions(context.Background(), actors[0])
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("ListSessions returned %d sessions, want 2 live ones", len(sessions))
+	}
+	if sessions[0].ID != actors[1].SessionID || sessions[1].ID != actors[0].SessionID {
+		t.Errorf("ListSessions order = %q, %q, want the newer session first", sessions[0].ID, sessions[1].ID)
+	}
+	if sessions[0].Current || !sessions[1].Current {
+		t.Errorf("ListSessions current flags = %v, %v, want false, true", sessions[0].Current, sessions[1].Current)
+	}
+	info := sessions[0]
+	if info.CreatedAt.IsZero() || info.LastUsedAt.IsZero() || info.IdleExpiresAt.IsZero() || info.AbsoluteExpiresAt.IsZero() {
+		t.Errorf("ListSessions left a time zero: %+v", info)
+	}
+	if info.ClientIP == nil || *info.ClientIP != "192.0.2.7" {
+		t.Errorf("ListSessions client ip = %v, want 192.0.2.7", info.ClientIP)
+	}
+	if info.UserAgent != "test-agent" {
+		t.Errorf("ListSessions user agent = %q, want test-agent", info.UserAgent)
+	}
+	if info.AuthProvider != ProviderLocal {
+		t.Errorf("ListSessions auth provider = %q, want %q", info.AuthProvider, ProviderLocal)
+	}
+
+	sessionType := reflect.TypeOf(SessionInfo{})
+	for index := 0; index < sessionType.NumField(); index++ {
+		if name := sessionType.Field(index).Name; strings.Contains(strings.ToLower(name), "token") {
+			t.Errorf("SessionInfo field %q could hold token data", name)
+		}
+	}
+	encoded := fmt.Sprintf("%+v", sessions)
+	for _, login := range logins {
+		if strings.Contains(encoded, login.Token) {
+			t.Errorf("ListSessions output contains the token %q: %s", login.Token, encoded)
+		}
+	}
+}
+
+func TestRevokeSession(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	first := test.login(t, testEmail, testPassword)
+	second := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), first.Token)
+	if err != nil {
+		t.Fatalf("Authenticate current session: %v", err)
+	}
+	other, err := test.service.Authenticate(context.Background(), second.Token)
+	if err != nil {
+		t.Fatalf("Authenticate other session: %v", err)
+	}
+
+	if err := test.service.RevokeSession(context.Background(), actor, testClient(), other.SessionID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	if _, err := test.service.Authenticate(context.Background(), second.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("Authenticate with the revoked session = %v, want ErrUnauthenticated", err)
+	}
+	if _, err := test.service.Authenticate(context.Background(), first.Token); err != nil {
+		t.Errorf("Authenticate with the current session after revoking another = %v, want nil", err)
+	}
+
+	events := authEventsNamed(t, test.database, other.SessionID, "simple_siem.auth.session_revoked")
+	if len(events) != 1 {
+		t.Fatalf("RevokeSession wrote %d audit events, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventOutcome != "SUCCESS" || event.ActorType != "USER" {
+		t.Errorf("revoke audit = %s/%s, want SUCCESS/USER", event.EventOutcome, event.ActorType)
+	}
+	if event.ActorID == nil || *event.ActorID != user.ID {
+		t.Errorf("revoke audit actor id = %v, want %q", event.ActorID, user.ID)
+	}
+	if event.ActorSessionID == nil || *event.ActorSessionID != actor.SessionID {
+		t.Errorf("revoke audit actor session id = %v, want %q", event.ActorSessionID, actor.SessionID)
+	}
+	if event.TargetType != "SESSION" || event.TargetID != other.SessionID {
+		t.Errorf("revoke audit target = %q/%q, want SESSION/%q", event.TargetType, event.TargetID, other.SessionID)
+	}
+	if changes := storedChanges(t, event); changes["current"] != false {
+		t.Errorf("revoke audit current = %v, want false", changes["current"])
+	}
+}
+
+func TestRevokeCurrentSession(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	if err := test.service.RevokeSession(context.Background(), actor, testClient(), actor.SessionID); err != nil {
+		t.Fatalf("RevokeSession on the current session: %v", err)
+	}
+	if _, err := test.service.Authenticate(context.Background(), login.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("Authenticate after revoking the current session = %v, want ErrUnauthenticated", err)
+	}
+
+	events := authEventsNamed(t, test.database, actor.SessionID, "simple_siem.auth.session_revoked")
+	if len(events) != 1 {
+		t.Fatalf("revoking the current session wrote %d audit events, want 1", len(events))
+	}
+	if changes := storedChanges(t, events[0]); changes["current"] != true {
+		t.Errorf("revoke audit current = %v, want true", changes["current"])
+	}
+}
+
+func TestRevokeSessionNotFound(t *testing.T) {
+	test := newTestService(t)
+	test.createAdmin(t, testEmail)
+	first := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), first.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	test.createAdmin(t, "other@example.com")
+	otherLogin := test.login(t, "other@example.com", testPassword)
+	other, err := test.service.Authenticate(context.Background(), otherLogin.Token)
+	if err != nil {
+		t.Fatalf("Authenticate the other user: %v", err)
+	}
+	sessionsBefore := countRows(t, test.database, "sessions")
+
+	if err := test.service.RevokeSession(
+		context.Background(), actor, testClient(), other.SessionID,
+	); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("RevokeSession on another user's session = %v, want ErrSessionNotFound", err)
+	}
+	if got := countRows(t, test.database, "sessions"); got != sessionsBefore {
+		t.Errorf("sessions = %d after revoking another user's session, want %d", got, sessionsBefore)
+	}
+	if _, err := test.service.Authenticate(context.Background(), otherLogin.Token); err != nil {
+		t.Errorf("Authenticate with the other user's session = %v, want nil", err)
+	}
+
+	missing := "0190f8dc-6f43-7f0a-8b2f-9c8c0a2d3e4f"
+	if err := test.service.RevokeSession(
+		context.Background(), actor, testClient(), missing,
+	); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("RevokeSession on a missing session = %v, want ErrSessionNotFound", err)
+	}
+	if got := countRows(t, test.database, "sessions"); got != sessionsBefore {
+		t.Errorf("sessions = %d after revoking a missing session, want %d", got, sessionsBefore)
+	}
+}
+
 func TestLoginRejectsOverlongPassword(t *testing.T) {
 	test := newTestService(t)
 	user := test.createAdmin(t, testEmail)
@@ -2001,6 +2940,23 @@ func (provider cancelingProvider) Name() string {
 func (provider cancelingProvider) Authenticate(context.Context, LoginRequest) (ExternalIdentity, error) {
 	provider.cancel()
 	return ExternalIdentity{}, context.Canceled
+}
+
+type cancelOnInvalidProvider struct {
+	provider IdentityProvider
+	cancel   context.CancelFunc
+}
+
+func (provider cancelOnInvalidProvider) Name() string {
+	return provider.provider.Name()
+}
+
+func (provider cancelOnInvalidProvider) Authenticate(ctx context.Context, request LoginRequest) (ExternalIdentity, error) {
+	identity, err := provider.provider.Authenticate(ctx, request)
+	if errors.Is(err, ErrInvalidCredentials) {
+		provider.cancel()
+	}
+	return identity, err
 }
 
 type signalingProvider struct {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -32,6 +33,7 @@ type userBody struct {
 	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName"`
 	Status      string   `json:"status"`
+	OnCall      bool     `json:"onCall"`
 	Roles       []string `json:"roles"`
 	CreatedAt   string   `json:"createdAt"`
 	UpdatedAt   string   `json:"updatedAt"`
@@ -178,6 +180,140 @@ func TestListUsersValidation(t *testing.T) {
 	}
 }
 
+func TestDirectory(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	admin, _ := apiAdmin(t, router, service)
+	analyst := apiCreateUser(t, service, admin, analystEmail, "Alice Analyst", "ANALYST")
+	apiActivateUser(t, service, admin, analyst.User.ID, analystPassword)
+	alan := apiCreateUser(t, service, admin, "alan@example.com", "Alan Admin", "READ_ONLY")
+	apiActivateUser(t, service, admin, alan.User.ID, "alan horse battery")
+	alfred := apiCreateUser(t, service, admin, "alfred@example.com", "Alfred Gone", "READ_ONLY")
+	if err := database.Exec(
+		"UPDATE users SET status = 'DISABLED' WHERE id = ?", alfred.User.ID,
+	).Error; err != nil {
+		t.Fatalf("disable Alfred: %v", err)
+	}
+	analystToken := loginTokenFor(t, router, analystEmail, analystPassword)
+
+	response := get(router, "/api/v1/directory/users?q=al", "", bearer(analystToken))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/directory/users?q=al = %d, want 200: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	if body := response.Body.String(); strings.Contains(body, "@") || strings.Contains(body, "email") {
+		t.Errorf("directory response leaks emails: %s", body)
+	}
+	var directory struct {
+		Data []map[string]any `json:"data"`
+	}
+	decodeJSON(t, response, &directory)
+	if len(directory.Data) != 2 {
+		t.Fatalf("directory q=al returned %d entries, want Alan and Alice: %s", len(directory.Data), response.Body)
+	}
+	for index, entry := range directory.Data {
+		if len(entry) != 3 {
+			t.Errorf("directory entry %d = %v, want exactly id, displayName, status", index, entry)
+		}
+		for _, key := range []string{"id", "displayName", "status"} {
+			if _, ok := entry[key]; !ok {
+				t.Errorf("directory entry %d has no %q: %v", index, key, entry)
+			}
+		}
+	}
+	if directory.Data[0]["id"] != alan.User.ID || directory.Data[0]["displayName"] != "Alan Admin" ||
+		directory.Data[0]["status"] != "ACTIVE" {
+		t.Errorf("directory entry 0 = %v, want Alan Admin ACTIVE", directory.Data[0])
+	}
+	if directory.Data[1]["id"] != analyst.User.ID || directory.Data[1]["displayName"] != "Alice Analyst" ||
+		directory.Data[1]["status"] != "ACTIVE" {
+		t.Errorf("directory entry 1 = %v, want Alice Analyst ACTIVE", directory.Data[1])
+	}
+
+	response = get(router, "/api/v1/directory/users?ids="+alfred.User.ID, "", bearer(analystToken))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET directory by ids = %d, want 200: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	decodeJSON(t, response, &directory)
+	if len(directory.Data) != 1 || directory.Data[0]["id"] != alfred.User.ID ||
+		directory.Data[0]["status"] != "DISABLED" || len(directory.Data[0]) != 3 {
+		t.Errorf("directory by ids = %v, want only Alfred DISABLED with three keys", directory.Data)
+	}
+
+	tooManyIDs := make([]string, 51)
+	for index := range tooManyIDs {
+		tooManyIDs[index] = newTestUUID()
+	}
+	invalid := []struct {
+		name      string
+		query     string
+		parameter string
+	}{
+		{"unknown parameter", "?sort=email", "sort"},
+		{"limit over the maximum", "?limit=51", "limit"},
+		{"zero limit", "?limit=0", "limit"},
+		{"invalid id", "?ids=not-a-uuid", "ids"},
+		{"empty id part", "?ids=" + analyst.User.ID + ",", "ids"},
+		{"too many ids", "?ids=" + strings.Join(tooManyIDs, ","), "ids"},
+		{"q and ids", "?q=al&ids=" + analyst.User.ID, "q and ids"},
+		{"repeated q", "?q=al&q=an", "q"},
+		{"repeated ids", "?ids=" + analyst.User.ID + "&ids=" + alan.User.ID, "ids"},
+		{"repeated limit", "?limit=5&limit=6", "limit"},
+		{"empty q", "?q=", "q"},
+		{"long q", "?q=" + strings.Repeat("a", 101), "q"},
+		{"NUL q", "?q=ali%00ce", "q"},
+		{"control q", "?q=ali%01ce", "q"},
+		{"invalid UTF-8 q", "?q=ali%FFce", "q"},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			response := get(router, "/api/v1/directory/users"+test.query, "", bearer(analystToken))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("GET directory%s = %d, want 400: %s", test.query, response.Code, response.Body)
+			}
+			assertNoStore(t, response)
+			assertErrorCode(t, response, "VALIDATION_ERROR", test.parameter)
+		})
+	}
+
+	roleless := apiCreateUser(t, service, admin, "roleless@example.com", "Roleless User")
+	apiActivateUser(t, service, admin, roleless.User.ID, "roleless horse battery")
+	rolelessToken := loginTokenFor(t, router, "roleless@example.com", "roleless horse battery")
+	response = get(router, "/api/v1/directory/users?q=al", "", bearer(rolelessToken))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("directory without case:read = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertErrorCode(t, response, "FORBIDDEN", "permission denied")
+}
+
+func TestDirectoryEscapesBackslash(t *testing.T) {
+	router, service, _, _ := newAPIRouter(t)
+	admin, token := apiAdmin(t, router, service)
+	slash := apiCreateUser(t, service, admin, "slash@example.com", `\Backslash`)
+	apiActivateUser(t, service, admin, slash.User.ID, "backslash horse battery")
+
+	response := get(router, "/api/v1/directory/users?q="+url.QueryEscape(`\`), "", bearer(token))
+	if response.Code != http.StatusOK {
+		t.Fatalf("directory q with a backslash = %d, want 200: %s", response.Code, response.Body)
+	}
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	decodeJSON(t, response, &body)
+	if len(body.Data) != 1 || body.Data[0]["id"] != slash.User.ID {
+		t.Errorf("directory q with a backslash = %v, want only the backslash user", body.Data)
+	}
+
+	response = get(router, "/api/v1/directory/users?q="+url.QueryEscape(`abc\`), "", bearer(token))
+	if response.Code != http.StatusOK {
+		t.Fatalf("directory q with a trailing backslash = %d, want 200: %s", response.Code, response.Body)
+	}
+	decodeJSON(t, response, &body)
+	if len(body.Data) != 0 {
+		t.Errorf("directory q with a trailing backslash = %v, want no matches", body.Data)
+	}
+}
+
 func TestGetUser(t *testing.T) {
 	router, service, _, _ := newAPIRouter(t)
 	admin, token := apiAdmin(t, router, service)
@@ -287,6 +423,121 @@ func TestDisableAndEnableUser(t *testing.T) {
 		t.Fatalf("self disable = %d, want 409: %s", response.Code, response.Body)
 	}
 	assertErrorCode(t, response, "STATE_CONFLICT", "cannot disable your own account")
+}
+
+func TestSetOnCallOverHTTP(t *testing.T) {
+	router, service, _, _ := newAPIRouter(t)
+	admin, token := apiAdmin(t, router, service)
+	analyst := apiCreateUser(t, service, admin, analystEmail, "Analyst", "ANALYST")
+	apiActivateUser(t, service, admin, analyst.User.ID, analystPassword)
+
+	response := get(router, "/api/v1/users/"+analyst.User.ID, "", bearer(token))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/users/:id = %d, want 200: %s", response.Code, response.Body)
+	}
+	var before userBody
+	decodeJSON(t, response, &before)
+	if before.OnCall {
+		t.Fatal("a new analyst is already on call")
+	}
+
+	response = sendJSONWithHeaders(
+		router, http.MethodPut, "/api/v1/users/"+analyst.User.ID+"/on-call", bearer(token), `{"onCall":true}`,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT on-call = %d, want 200: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	var updated userBody
+	decodeJSON(t, response, &updated)
+	if !updated.OnCall {
+		t.Error("PUT on-call response has onCall false")
+	}
+	if updated.Version != before.Version+1 {
+		t.Errorf("version after on-call = %d, want %d", updated.Version, before.Version+1)
+	}
+
+	response = sendJSONWithHeaders(
+		router, http.MethodPut, "/api/v1/users/"+analyst.User.ID+"/on-call", bearer(token), `{"onCall":true}`,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("repeated PUT on-call = %d, want 200: %s", response.Code, response.Body)
+	}
+	var unchanged userBody
+	decodeJSON(t, response, &unchanged)
+	if !unchanged.OnCall || unchanged.Version != updated.Version {
+		t.Errorf("repeated on-call = %+v, want on call at version %d", unchanged, updated.Version)
+	}
+
+	response = get(router, "/api/v1/users/"+analyst.User.ID, "", bearer(token))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/users/:id after on-call = %d, want 200: %s", response.Code, response.Body)
+	}
+	var fetched userBody
+	decodeJSON(t, response, &fetched)
+	if !fetched.OnCall {
+		t.Error("GET /users/:id does not show onCall")
+	}
+
+	analystToken := loginTokenFor(t, router, analystEmail, analystPassword)
+	response = get(router, "/api/v1/me", "", bearer(analystToken))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/me after on-call = %d, want 200: %s", response.Code, response.Body)
+	}
+	var me userBody
+	decodeJSON(t, response, &me)
+	if !me.OnCall {
+		t.Error("GET /me does not show onCall")
+	}
+
+	invited := apiCreateUser(t, service, admin, "invited@example.com", "Invited", "ANALYST")
+	response = sendJSONWithHeaders(
+		router, http.MethodPut, "/api/v1/users/"+invited.User.ID+"/on-call", bearer(token), `{"onCall":true}`,
+	)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("on-call for an invited user = %d, want 409: %s", response.Code, response.Body)
+	}
+	assertErrorCode(t, response, "STATE_CONFLICT", "only an active user can be on call")
+
+	response = sendJSONWithHeaders(
+		router, http.MethodPut, "/api/v1/users/"+invited.User.ID+"/on-call", bearer(analystToken), `{"onCall":true}`,
+	)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("analyst PUT on-call = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertErrorCode(t, response, "FORBIDDEN", "permission denied")
+
+	for _, userID := range []string{newTestUUID(), "not-a-uuid"} {
+		response = sendJSONWithHeaders(
+			router, http.MethodPut, "/api/v1/users/"+userID+"/on-call", bearer(token), `{"onCall":true}`,
+		)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("on-call for %q = %d, want 404: %s", userID, response.Code, response.Body)
+		}
+		assertErrorCode(t, response, "NOT_FOUND", "user not found")
+	}
+
+	bodies := []struct {
+		name    string
+		body    string
+		message string
+	}{
+		{"missing", `{}`, "onCall"},
+		{"null", `{"onCall":null}`, "onCall"},
+		{"unknown field", `{"onCall":true,"version":1}`, "invalid request body"},
+		{"wrong type", `{"onCall":"yes"}`, "invalid request body"},
+	}
+	for _, body := range bodies {
+		t.Run(body.name, func(t *testing.T) {
+			response := sendJSONWithHeaders(
+				router, http.MethodPut, "/api/v1/users/"+analyst.User.ID+"/on-call", bearer(token), body.body,
+			)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("on-call with body %s = %d, want 400: %s", body.body, response.Code, response.Body)
+			}
+			assertErrorCode(t, response, "VALIDATION_ERROR", body.message)
+		})
+	}
 }
 
 func TestAssignAndRemoveRole(t *testing.T) {

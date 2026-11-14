@@ -392,19 +392,7 @@ func (authentication authHandler) me(c *gin.Context) {
 		internalError(c, authentication.logger, err)
 		return
 	}
-	if roles == nil {
-		roles = []string{}
-	}
-	c.JSON(http.StatusOK, userResponse{
-		ID:          user.ID,
-		Email:       user.Email,
-		DisplayName: user.DisplayName,
-		Status:      user.Status,
-		Roles:       roles,
-		CreatedAt:   user.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:   user.UpdatedAt.UTC().Format(time.RFC3339),
-		Version:     user.Version,
-	})
+	c.JSON(http.StatusOK, newUserResponse(auth.UserWithRoles{User: user, Roles: roles}))
 }
 
 func clientInfo(c *gin.Context) auth.ClientInfo {

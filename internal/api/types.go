@@ -96,11 +96,35 @@ type loginUser struct {
 	Roles       []string `json:"roles"`
 }
 
+// changePasswordRequest keeps both fields as pointers, so a missing field is a
+// 400 rather than an empty password.
+type changePasswordRequest struct {
+	CurrentPassword *string `json:"currentPassword"`
+	NewPassword     *string `json:"newPassword"`
+}
+
+type sessionResponse struct {
+	ID                string  `json:"id"`
+	CreatedAt         string  `json:"createdAt"`
+	LastUsedAt        string  `json:"lastUsedAt"`
+	IdleExpiresAt     string  `json:"idleExpiresAt"`
+	AbsoluteExpiresAt string  `json:"absoluteExpiresAt"`
+	ClientIP          *string `json:"clientIp"`
+	UserAgent         string  `json:"userAgent"`
+	AuthProvider      string  `json:"authProvider"`
+	Current           bool    `json:"current"`
+}
+
+type sessionListResponse struct {
+	Data []sessionResponse `json:"data"`
+}
+
 type userResponse struct {
 	ID          string   `json:"id"`
 	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName"`
 	Status      string   `json:"status"`
+	OnCall      bool     `json:"onCall"`
 	Roles       []string `json:"roles"`
 	CreatedAt   string   `json:"createdAt"`
 	UpdatedAt   string   `json:"updatedAt"`
@@ -128,6 +152,18 @@ type userListResponse struct {
 	Pagination pagination     `json:"pagination"`
 }
 
+// directoryEntryResponse is one person a picker can show: no email, roles, or
+// on-call state.
+type directoryEntryResponse struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Status      string `json:"status"`
+}
+
+type directoryListResponse struct {
+	Data []directoryEntryResponse `json:"data"`
+}
+
 type createUserRequest struct {
 	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName"`
@@ -144,6 +180,11 @@ type updateUserRequest struct {
 
 type versionRequest struct {
 	Version *int `json:"version"`
+}
+
+// onCallRequest keeps OnCall a pointer, so a missing field is a 400.
+type onCallRequest struct {
+	OnCall *bool `json:"onCall"`
 }
 
 type assignRoleRequest struct {
