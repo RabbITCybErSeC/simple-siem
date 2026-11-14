@@ -1,0 +1,40 @@
+{
+  "@timestamp": "2026-05-11T10:01:00.000Z",
+  "event": {
+    "category": ["authentication"],
+    "type": ["info"],
+    "action": "ssh_login",
+    "outcome": "failure",
+    "ingested": "2026-05-11T10:01:04.000Z",
+    "dataset": "system.auth",
+    "module": "system",
+    "kind": "event"
+  },
+  "process": {
+    "name": "sshd",
+    "pid": 4242
+  },
+  "host": {
+    "name": "web01",
+    "hostname": "web01",
+    "os": {
+      "type": "linux"
+    }
+  },
+  "related": {
+    "ip": ["203.0.113.7"]
+  },
+  "source": {
+    "ip": "203.0.113.7",
+    "port": 52114
+  },
+  "system": {
+    "auth": {
+      "ssh": {
+        "event": "Failed",
+        "method": "password"
+      }
+    }
+  },
+  "message": "Failed password from 203.0.113.7 port 52114 ssh2"
+}

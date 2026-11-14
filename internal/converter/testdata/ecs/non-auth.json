@@ -1,0 +1,15 @@
+{
+  "@timestamp": "2026-05-11T10:04:00.000Z",
+  "event": {
+    "category": ["process"],
+    "outcome": "success",
+    "kind": "event"
+  },
+  "process": {
+    "name": "bash",
+    "pid": 5150
+  },
+  "host": {
+    "name": "web01"
+  }
+}

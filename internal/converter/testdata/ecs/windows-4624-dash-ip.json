@@ -1,0 +1,46 @@
+{
+  "@timestamp": "2026-05-11T10:03:00.000Z",
+  "event": {
+    "category": ["authentication"],
+    "type": ["start"],
+    "code": "4624",
+    "action": "logged-in",
+    "outcome": "success",
+    "ingested": "2026-05-11T10:03:03.000Z",
+    "provider": "Microsoft-Windows-Security-Auditing",
+    "module": "security",
+    "kind": "event"
+  },
+  "host": {
+    "name": "dc01",
+    "hostname": "dc01",
+    "os": {
+      "type": "windows"
+    }
+  },
+  "user": {
+    "name": "bob",
+    "domain": "CORP"
+  },
+  "source": {
+    "ip": "203.0.113.20",
+    "port": 50211
+  },
+  "winlog": {
+    "channel": "Security",
+    "event_id": "4624",
+    "record_id": 918274,
+    "provider_name": "Microsoft-Windows-Security-Auditing",
+    "computer_name": "dc01.corp.example",
+    "event_data": {
+      "TargetUserName": "bob",
+      "TargetDomainName": "CORP",
+      "TargetUserSid": "S-1-0-0",
+      "LogonType": "10",
+      "IpAddress": "-",
+      "IpPort": "-",
+      "WorkstationName": "-"
+    }
+  },
+  "message": "An account was successfully logged on."
+}

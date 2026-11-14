@@ -1,0 +1,42 @@
+{
+  "outcome": "CONVERTED",
+  "event": {
+    "metadata": {
+      "event_timestamp": "2026-05-11T10:02:00Z",
+      "event_type": "USER_LOGIN",
+      "ingested_timestamp": "2026-05-11T10:02:03Z",
+      "vendor_name": "Microsoft",
+      "product_name": "Windows",
+      "product_event_type": "4625",
+      "product_log_id": "918273"
+    },
+    "principal": {
+      "ip": [
+        "203.0.113.20"
+      ],
+      "port": 50211
+    },
+    "target": {
+      "hostname": "dc01",
+      "user": {
+        "userid": "bob",
+        "windows_sid": "S-1-0-0"
+      }
+    },
+    "extensions": {
+      "auth": {
+        "mechanism": "NETWORK"
+      }
+    },
+    "security_result": {
+      "action": "BLOCK",
+      "description": "Unknown user name or bad password."
+    },
+    "additional": {
+      "logon_type": "3",
+      "target_domain": "CORP"
+    }
+  },
+  "mapping_id": "ecs-windows-logon",
+  "mapping_version": 1
+}

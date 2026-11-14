@@ -1,0 +1,35 @@
+id: auth-events
+version: 0.1.0
+
+schedule:
+  every: 5m
+  timeout: 2m
+  overlap_policy: skip
+
+variables:
+  lookback:
+    type: duration
+    default: 15m
+  user:
+    type: string
+
+fetchers:
+  - id: auth-events
+    ref: elastic-prod
+    inputs:
+      index: auth-*
+      lookback: ${variables.lookback}
+      user: ${variables.user}
+
+processors:
+  - id: auth-to-udm
+    type: converter
+    from: auth-events.records
+    mappings: [mappings/ecs-ssh-login.yaml]
+    output: udm.auth_events
+
+outputs:
+  auth_events:
+    from: udm.auth_events
+    retention: 72h
+    allowed_lateness: 10m

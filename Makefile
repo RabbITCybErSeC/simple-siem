@@ -28,6 +28,13 @@ DEV_CONTAINER := simple-siem-api
 WEB_CONTAINER := simple-siem-web
 WEB_PORT ?= 5173
 
+# Security stays on with HTTP basic auth so the seeder and fetcher exercise the
+# same path as production; .env may override the development-only password.
+ELASTICSEARCH_IMAGE := docker.elastic.co/elasticsearch/elasticsearch:9.1.0
+ELASTICSEARCH_CONTAINER := simple-siem-elasticsearch
+ELASTICSEARCH_VOLUME := simple-siem-elasticsearch
+ELASTICSEARCH_PASSWORD ?= simple_siem_dev
+
 # Read the same values the containers receive, so RUN assembles one database
 # URL from them instead of duplicating the defaults.
 include $(POSTGRES_ENV_FILE)
@@ -43,13 +50,19 @@ POSTGRES_PUBLISH ?= -p $(NETWORK_GATEWAY):5432:5432
 API_HOST ?= $(NETWORK_GATEWAY)
 API_PORT ?= 8081
 API_PUBLISH ?= -p 127.0.0.1:8080:8080 -p $(NETWORK_GATEWAY):$(API_PORT):8080
+ELASTICSEARCH_HOST ?= $(NETWORK_GATEWAY)
+ELASTICSEARCH_PUBLISH ?= -p $(NETWORK_GATEWAY):9200:9200
 else
 POSTGRES_HOST ?= $(POSTGRES_CONTAINER)
 POSTGRES_PUBLISH ?=
 API_HOST ?= $(DEV_CONTAINER)
 API_PORT ?= 8080
 API_PUBLISH ?= -p 127.0.0.1:8080:8080
+ELASTICSEARCH_HOST ?= $(ELASTICSEARCH_CONTAINER)
+ELASTICSEARCH_PUBLISH ?= -p 127.0.0.1:9200:9200
 endif
+
+ELASTICSEARCH_URL := http://$(ELASTICSEARCH_HOST):9200
 
 DATABASE_URL := postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)?sslmode=disable
 
@@ -75,7 +88,7 @@ DB_SHELL_TTY := $(shell test -t 0 && echo -t)
 # Apple container gives a container 1 GiB by default; cold Go builds of the
 # dependencies need more.
 TOOLCHAIN_MEMORY := 4g
-COMMON_RUN = $(CONTAINER) run --rm --memory $(TOOLCHAIN_MEMORY) --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) --env SIMPLE_SIEM_DATABASE_URL=$(DATABASE_URL) --env SIMPLE_SIEM_ENV=development
+COMMON_RUN = $(CONTAINER) run --rm --memory $(TOOLCHAIN_MEMORY) --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) --env SIMPLE_SIEM_DATABASE_URL=$(DATABASE_URL) --env SIMPLE_SIEM_ENV=development --env ELASTICSEARCH_URL=$(ELASTICSEARCH_URL) --env ELASTICSEARCH_USERNAME=elastic --env ELASTICSEARCH_PASSWORD=$(ELASTICSEARCH_PASSWORD)
 RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/mod -v $(GO_BUILD_CACHE_VOLUME):/root/.cache/go-build
 
 # Frontend commands run in web/ with the pnpm store and node_modules kept out
@@ -86,7 +99,7 @@ RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/
 PNPM_ENV = --env PNPM_CONFIG_STORE_DIR=/pnpm-store --env PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy
 WEB_RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src/web -v $(PNPM_STORE_VOLUME):/pnpm-store -v $(NODE_MODULES_VOLUME):/src/web/node_modules $(PNPM_ENV)
 
-.PHONY: toolchain network postgres test lint build e2e e2e-image run dev db-shell image debug down clean pnpm shadcn-mcp
+.PHONY: toolchain network postgres test lint build e2e e2e-image run dev db-shell image debug down clean pnpm shadcn-mcp es seed-auth-logs
 
 # The stamp alone misses an image deleted outside make, so check the image first.
 toolchain:
@@ -106,6 +119,30 @@ postgres: network
 		if [ $$attempt -lt 30 ]; then sleep 1; fi; \
 	done; \
 	echo "PostgreSQL did not accept connections within 30 seconds" >&2; \
+	exit 1
+
+# Apple container does not initialize named-volume ownership, and the image
+# runs as uid 1000, so give a new data volume to that user before first start.
+es: network
+	@set -e; \
+	if ! $(CONTAINER) start $(ELASTICSEARCH_CONTAINER) >/dev/null 2>&1; then \
+		if ! $(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) /bin/sh -c true >/dev/null 2>&1; then \
+			$(CONTAINER) run --rm --user root --entrypoint /bin/sh -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data $(ELASTICSEARCH_IMAGE) -c 'chown -R 1000:0 /usr/share/elasticsearch/data'; \
+			$(CONTAINER) run -d --name $(ELASTICSEARCH_CONTAINER) --network $(NETWORK) --memory 2g $(ELASTICSEARCH_PUBLISH) -v $(ELASTICSEARCH_VOLUME):/usr/share/elasticsearch/data --env discovery.type=single-node --env xpack.security.enabled=true --env xpack.security.http.ssl.enabled=false --env xpack.security.transport.ssl.enabled=false --env node.store.allow_mmap=false --env ES_JAVA_OPTS="-Xms1g -Xmx1g" --env ELASTIC_PASSWORD=$(ELASTICSEARCH_PASSWORD) $(ELASTICSEARCH_IMAGE); \
+		fi; \
+	fi
+	@for attempt in $$(seq 1 120); do \
+		code=$$($(CONTAINER) exec $(ELASTICSEARCH_CONTAINER) curl -s -o /dev/null -w '%{http_code}' -u "elastic:$(ELASTICSEARCH_PASSWORD)" 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s' 2>/dev/null); \
+		if [ "$$code" = "401" ]; then \
+			echo "Elasticsearch rejected the password; the volume $(ELASTICSEARCH_VOLUME) was created with a different ELASTICSEARCH_PASSWORD" >&2; \
+			exit 1; \
+		fi; \
+		if [ "$$code" = "200" ]; then \
+			exit 0; \
+		fi; \
+		if [ $$attempt -lt 120 ]; then sleep 1; fi; \
+	done; \
+	echo "Elasticsearch did not become healthy within 120 seconds" >&2; \
 	exit 1
 
 $(TOOLCHAIN_STAMP): Dockerfile
@@ -142,6 +179,9 @@ e2e: postgres build e2e-image
 run: build
 	$(RUN) $(TOOLCHAIN_IMAGE) ./bin/simple-siem $(ARGS)
 
+seed-auth-logs: es toolchain
+	$(RUN) $(TOOLCHAIN_IMAGE) go run ./cmd/seed-auth-logs $(ARGS)
+
 web/node_modules:
 	@mkdir -p $@
 
@@ -167,11 +207,11 @@ debug: postgres toolchain
 	$(CONTAINER) run --rm -it --network $(NETWORK) --env-file $(POSTGRES_ENV_FILE) --env POSTGRES_HOST=$(POSTGRES_HOST) $(DEBUG_IMAGE) bash
 
 down:
-	@$(CONTAINER) stop $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) 2>/dev/null || true
+	@$(CONTAINER) stop $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) $(ELASTICSEARCH_CONTAINER) 2>/dev/null || true
 
 clean:
-	@$(CONTAINER) rm -f $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) 2>/dev/null || true
+	@$(CONTAINER) rm -f $(POSTGRES_CONTAINER) $(DEV_CONTAINER) $(WEB_CONTAINER) $(ELASTICSEARCH_CONTAINER) 2>/dev/null || true
 	@$(CONTAINER) network rm $(NETWORK) 2>/dev/null || true
-	@$(CONTAINER) volume rm $(POSTGRES_VOLUME) $(GO_MOD_CACHE_VOLUME) $(GO_BUILD_CACHE_VOLUME) $(PNPM_STORE_VOLUME) $(NODE_MODULES_VOLUME) $(DEV_NODE_MODULES_VOLUME) $(DEV_PNPM_STORE_VOLUME) $(DEV_GO_MOD_CACHE_VOLUME) $(DEV_GO_BUILD_CACHE_VOLUME) 2>/dev/null || true
+	@$(CONTAINER) volume rm $(POSTGRES_VOLUME) $(ELASTICSEARCH_VOLUME) $(GO_MOD_CACHE_VOLUME) $(GO_BUILD_CACHE_VOLUME) $(PNPM_STORE_VOLUME) $(NODE_MODULES_VOLUME) $(DEV_NODE_MODULES_VOLUME) $(DEV_PNPM_STORE_VOLUME) $(DEV_GO_MOD_CACHE_VOLUME) $(DEV_GO_BUILD_CACHE_VOLUME) 2>/dev/null || true
 	@$(CONTAINER) image rm $(TOOLCHAIN_IMAGE) 2>/dev/null || true
 	rm -rf bin .make web/node_modules

@@ -1,0 +1,57 @@
+id: ecs-windows-logon
+version: 1
+description: Windows Security logons in ECS shape (Winlogbeat).
+
+match:
+  - field: winlog.channel
+    equals: Security
+  - field: winlog.event_id
+    in: [4624, 4625]
+
+constants:
+  metadata.event_type: USER_LOGIN
+  metadata.vendor_name: Microsoft
+  metadata.product_name: Windows
+
+fields:
+  - to: metadata.event_timestamp
+    from: "@timestamp"
+  - to: metadata.ingested_timestamp
+    from: event.ingested
+  - to: metadata.product_event_type
+    from: winlog.event_id
+  - to: metadata.product_log_id
+    from: winlog.record_id
+  - to: target.user.userid
+    from: winlog.event_data.TargetUserName
+    transforms: [dash_as_empty]
+  - to: target.user.windows_sid
+    from: winlog.event_data.TargetUserSid
+    transforms: [dash_as_empty]
+  - to: target.hostname
+    from: host.name
+  - to: principal.ip
+    from: winlog.event_data.IpAddress
+    transforms: [dash_as_empty]
+  - to: principal.port
+    from: winlog.event_data.IpPort
+    transforms: [dash_as_empty]
+  - to: principal.hostname
+    from: winlog.event_data.WorkstationName
+    transforms: [dash_as_empty]
+  - to: extensions.auth.mechanism
+    from: winlog.event_data.LogonType
+    transforms: [windows_logon_type]
+  - to: security_result.action
+    from: event.outcome
+    values: { success: ALLOW, failure: BLOCK }
+    default: UNKNOWN_ACTION
+  - to: security_result.description
+    from: winlog.logon.failure.reason
+
+additional:
+  - key: target_domain
+    from: winlog.event_data.TargetDomainName
+    transforms: [dash_as_empty]
+  - key: logon_type
+    from: winlog.event_data.LogonType

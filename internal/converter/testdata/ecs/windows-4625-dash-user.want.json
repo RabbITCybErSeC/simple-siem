@@ -1,0 +1,11 @@
+{
+  "outcome": "QUARANTINED",
+  "mapping_id": "ecs-windows-logon",
+  "mapping_version": 1,
+  "errors": [
+    {
+      "Path": "target.user.userid",
+      "Message": "is required"
+    }
+  ]
+}

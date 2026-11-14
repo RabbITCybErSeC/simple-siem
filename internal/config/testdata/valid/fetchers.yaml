@@ -1,0 +1,26 @@
+fetchers:
+  elastic-prod:
+    type: elasticsearch
+    addresses:
+      - https://elastic-prod.example.internal:9200
+    auth:
+      api_key: ${secret:ELASTIC_PROD_API_KEY}
+    tls:
+      ca_ref: ${secret:ELASTIC_PROD_CA}
+    defaults:
+      index: auth-*
+      timeout: 30s
+      max_results: 10000
+      time_field: "@timestamp"
+    allowed_indexes:
+      - auth-*
+
+  elastic-edr:
+    type: elasticsearch
+    addresses:
+      - https://elastic-edr.example.internal:9200
+    auth:
+      username: ${secret:ELASTIC_EDR_USERNAME}
+      password: ${secret:ELASTIC_EDR_PASSWORD}
+    allowed_indexes:
+      - edr-*
