@@ -402,9 +402,7 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 			return err
 		}
 		if user.OnCall {
-			disabledEvent := onCallEvent(actor, user, false)
-			disabledEvent.Payload["reason"] = "user_disabled"
-			if err := outbox.Record(tx, disabledEvent); err != nil {
+			if err := outbox.Record(tx, onCallEvent(actor, user, false, "user_disabled")); err != nil {
 				return err
 			}
 		}
@@ -511,7 +509,7 @@ func (service *Service) SetOnCall(ctx context.Context, actor Actor, client Clien
 		if err := audit.Record(tx, event); err != nil {
 			return err
 		}
-		if err := outbox.Record(tx, onCallEvent(actor, user, onCall)); err != nil {
+		if err := outbox.Record(tx, onCallEvent(actor, user, onCall, "")); err != nil {
 			return err
 		}
 
@@ -978,19 +976,23 @@ func otherActiveAdmins(database *gorm.DB, userID string) (int64, error) {
 	return count, nil
 }
 
-// onCallEvent builds the event every on-call change writes; the disable path
-// adds its reason.
-func onCallEvent(actor Actor, user User, onCall bool) outbox.Event {
+// onCallEvent builds the event every on-call change writes; reason is empty
+// unless the change needs an explanation.
+func onCallEvent(actor Actor, user User, onCall bool, reason string) outbox.Event {
+	payload := map[string]any{
+		"userId":      user.ID,
+		"displayName": user.DisplayName,
+		"onCall":      onCall,
+	}
+	if reason != "" {
+		payload["reason"] = reason
+	}
 	return outbox.Event{
 		Type:      outbox.TypeUserOnCallChanged,
 		Version:   1,
 		Actor:     outbox.Actor{Type: outbox.ActorUser, ID: actor.UserID},
 		SubjectID: user.ID,
-		Payload: map[string]any{
-			"userId":      user.ID,
-			"displayName": user.DisplayName,
-			"onCall":      onCall,
-		},
+		Payload:   payload,
 	}
 }
 

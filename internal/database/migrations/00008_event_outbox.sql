@@ -3,7 +3,7 @@ CREATE TABLE event_outbox (
     id uuid PRIMARY KEY DEFAULT uuidv7(),
     type text NOT NULL,
     version integer NOT NULL CHECK (version >= 1),
-    occurred_at timestamptz NOT NULL DEFAULT now(),
+    occurred_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     actor jsonb NOT NULL CHECK (jsonb_typeof(actor) = 'object'),
     subject_type text NOT NULL,
     subject_id text NOT NULL,

@@ -156,6 +156,20 @@ func TestRecordRejectsInvalidEvents(t *testing.T) {
 		{"sensitive key in map", "password", "", func(event *outbox.Event) {
 			event.Payload = map[string]any{"outer": map[string]any{"password": "x"}}
 		}},
+		{"sensitive key in typed map", "payload.headers.Authorization", "", func(event *outbox.Event) {
+			event.Payload = map[string]any{"headers": map[string]string{"Authorization": "x"}}
+		}},
+		{"sensitive key in typed array", "payload.items[0].apiToken", "", func(event *outbox.Event) {
+			event.Payload = map[string]any{"items": []map[string]any{{"apiToken": "x"}}}
+		}},
+		{"href key is not a reference", "payload.passwordResetHref", "", func(event *outbox.Event) {
+			event.Payload = map[string]any{"passwordResetHref": "https://example.com/r"}
+		}},
+		{"NUL in subject id", "subject", "", func(event *outbox.Event) { event.SubjectID = "a\x00b" }},
+		{"invalid UTF-8 actor id", "actor", "", func(event *outbox.Event) { event.Actor.ID = "\xff" }},
+		{"NUL in payload", "payload", "", func(event *outbox.Event) {
+			event.Payload = map[string]any{"name": "a\x00b"}
+		}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -197,6 +211,68 @@ func TestRecordAcceptsReferenceKeys(t *testing.T) {
 	}
 }
 
+func TestRecordNamesFirstSensitivePathDeterministically(t *testing.T) {
+	db := databasetest.New(t)
+	event := validEvent()
+	event.Payload = map[string]any{"password": "x", "apiToken": "y"}
+
+	for attempt := 1; attempt <= 20; attempt++ {
+		err := db.Transaction(func(tx *gorm.DB) error {
+			return outbox.Record(tx, event)
+		})
+		if !errors.Is(err, outbox.ErrInvalidEvent) {
+			t.Fatalf("attempt %d: Record error = %v, want ErrInvalidEvent", attempt, err)
+		}
+		if !strings.Contains(err.Error(), "payload.apiToken") {
+			t.Fatalf("attempt %d: Record error %q does not name payload.apiToken", attempt, err)
+		}
+	}
+	if got := countEvents(t, db); got != 0 {
+		t.Errorf("outbox has %d rows after rejected events, want 0", got)
+	}
+}
+
+func TestRecordAcceptsEscapedBackslashBeforeU0000(t *testing.T) {
+	db := databasetest.New(t)
+	event := validEvent()
+	event.Payload = map[string]any{"text": "\\u0000"}
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		return outbox.Record(tx, event)
+	})
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if got := countEvents(t, db); got != 1 {
+		t.Errorf("outbox has %d rows, want 1", got)
+	}
+}
+
+func TestRecordStampsOccurredAtAtWriteTime(t *testing.T) {
+	db := databasetest.New(t)
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := outbox.Record(tx, validEvent()); err != nil {
+			return err
+		}
+		if err := tx.Exec("SELECT pg_sleep(0.01)").Error; err != nil {
+			return err
+		}
+		return outbox.Record(tx, validEvent())
+	})
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	rows := storedEvents(t, db)
+	if len(rows) != 2 {
+		t.Fatalf("outbox has %d rows, want 2", len(rows))
+	}
+	if !rows[1].OccurredAt.After(rows[0].OccurredAt) {
+		t.Errorf("second occurred_at %v is not after the first %v", rows[1].OccurredAt, rows[0].OccurredAt)
+	}
+}
+
 func validEvent() outbox.Event {
 	return outbox.Event{
 		Type:      outbox.TypeCaseCreated,
@@ -213,7 +289,8 @@ func storedEvents(t *testing.T, db *gorm.DB) []storedEvent {
 	err := db.Raw(`
 		SELECT id::text AS id, type, version, actor, subject_type, subject_id,
 		       payload, occurred_at, dispatched_at
-		FROM event_outbox`).Scan(&rows).Error
+		FROM event_outbox
+		ORDER BY occurred_at, id`).Scan(&rows).Error
 	if err != nil {
 		t.Fatalf("read outbox rows: %v", err)
 	}

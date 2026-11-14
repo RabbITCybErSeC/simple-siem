@@ -1,40 +1,22 @@
 package outbox
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
+	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"gorm.io/gorm"
 )
 
-// outboxRow is the write-side row; the database supplies ID and OccurredAt.
-type outboxRow struct {
-	ID          string         `gorm:"column:id;default:uuidv7();->"`
-	Type        string         `gorm:"column:type"`
-	Version     int            `gorm:"column:version"`
-	OccurredAt  time.Time      `gorm:"column:occurred_at;default:now();autoCreateTime:false;->"`
-	Actor       Actor          `gorm:"column:actor;serializer:json"`
-	SubjectType string         `gorm:"column:subject_type"`
-	SubjectID   string         `gorm:"column:subject_id"`
-	Payload     map[string]any `gorm:"column:payload;serializer:json"`
-}
-
-func (outboxRow) TableName() string {
-	return "event_outbox"
-}
-
 // Record validates event and inserts it through the caller's transaction. It
 // never opens or commits a transaction.
 func Record(tx *gorm.DB, event Event) error {
-	if err := validate(event); err != nil {
+	payload, err := validate(event)
+	if err != nil {
 		return err
-	}
-	payload := event.Payload
-	if payload == nil {
-		payload = map[string]any{}
 	}
 	// The subject type is the event type's prefix, so a row can never name a
 	// subject type other than the one its event type belongs to.
@@ -53,54 +35,66 @@ func Record(tx *gorm.DB, event Event) error {
 	return nil
 }
 
-func validate(event Event) error {
+// validate returns the encoded payload for the row.
+func validate(event Event) (json.RawMessage, error) {
 	if _, ok := eventTypes[event.Type]; !ok {
-		return fmt.Errorf("%w: type %q is not in the catalog", ErrInvalidEvent, event.Type)
+		return nil, fmt.Errorf("%w: type %q is not in the catalog", ErrInvalidEvent, event.Type)
 	}
 	if event.Version < 1 {
-		return fmt.Errorf("%w: version must be at least 1", ErrInvalidEvent)
+		return nil, fmt.Errorf("%w: version must be at least 1", ErrInvalidEvent)
 	}
 	if event.Actor.Type != ActorUser && event.Actor.Type != ActorSystem {
-		return fmt.Errorf("%w: actor type %q is not %q or %q", ErrInvalidEvent, event.Actor.Type, ActorUser, ActorSystem)
+		return nil, fmt.Errorf("%w: actor type %q is not %q or %q", ErrInvalidEvent, event.Actor.Type, ActorUser, ActorSystem)
 	}
-	if len(event.Actor.ID) == 0 || len(event.Actor.ID) > maxIDBytes {
-		return fmt.Errorf("%w: actor id must be 1 to %d bytes", ErrInvalidEvent, maxIDBytes)
+	if !validID(event.Actor.ID) {
+		return nil, fmt.Errorf("%w: actor id must be 1 to %d bytes of valid UTF-8 without NUL", ErrInvalidEvent, maxIDBytes)
 	}
-	if len(event.SubjectID) == 0 || len(event.SubjectID) > maxIDBytes {
-		return fmt.Errorf("%w: subject id must be 1 to %d bytes", ErrInvalidEvent, maxIDBytes)
+	if !validID(event.SubjectID) {
+		return nil, fmt.Errorf("%w: subject id must be 1 to %d bytes of valid UTF-8 without NUL", ErrInvalidEvent, maxIDBytes)
 	}
-	if key, ok := findSensitiveKey(event.Payload); ok {
-		return fmt.Errorf("%w: payload key %q is sensitive", ErrInvalidEvent, key)
-	}
-	encoded, err := json.Marshal(event.Payload)
+	paths, err := audit.SensitivePaths(event.Payload, "payload")
 	if err != nil {
-		return fmt.Errorf("%w: payload cannot be encoded: %v", ErrInvalidEvent, err)
+		return nil, fmt.Errorf("%w: payload cannot be encoded: %v", ErrInvalidEvent, err)
+	}
+	if len(paths) > 0 {
+		return nil, fmt.Errorf("%w: sensitive payload path %q", ErrInvalidEvent, paths[0])
+	}
+	payload := event.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: payload cannot be encoded: %v", ErrInvalidEvent, err)
+	}
+	if containsNULEscape(encoded) {
+		return nil, fmt.Errorf("%w: payload contains a NUL character", ErrInvalidEvent)
 	}
 	if len(encoded) > MaxPayloadBytes {
-		return fmt.Errorf("%w: payload is %d bytes, over the %d-byte limit", ErrInvalidEvent, len(encoded), MaxPayloadBytes)
+		return nil, fmt.Errorf("%w: payload is %d bytes, over the %d-byte limit", ErrInvalidEvent, len(encoded), MaxPayloadBytes)
 	}
-	return nil
+	return encoded, nil
 }
 
-// findSensitiveKey returns the first payload key at any depth that names a
-// secret.
-func findSensitiveKey(value any) (string, bool) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, element := range typed {
-			if audit.IsSensitiveKey(key) {
-				return key, true
-			}
-			if key, ok := findSensitiveKey(element); ok {
-				return key, true
-			}
+func validID(id string) bool {
+	return len(id) >= 1 && len(id) <= maxIDBytes && utf8.ValidString(id) && !strings.ContainsRune(id, 0)
+}
+
+// containsNULEscape reports whether encoded JSON holds a \u0000 escape, which
+// jsonb refuses. A backslash written as \\ is literal, so the escape only
+// counts when an even number of backslashes precede its u.
+func containsNULEscape(encoded []byte) bool {
+	for index := 0; index < len(encoded); index++ {
+		if !bytes.HasPrefix(encoded[index:], []byte(`\u0000`)) {
+			continue
 		}
-	case []any:
-		for _, element := range typed {
-			if key, ok := findSensitiveKey(element); ok {
-				return key, true
-			}
+		backslashes := 0
+		for previous := index - 1; previous >= 0 && encoded[previous] == '\\'; previous-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return true
 		}
 	}
-	return "", false
+	return false
 }

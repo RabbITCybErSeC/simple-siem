@@ -1,6 +1,10 @@
 package outbox
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+	"time"
+)
 
 // Event is one domain event as a service writes it.
 type Event struct {
@@ -8,8 +12,8 @@ type Event struct {
 	Version   int    // payload version, 1 or higher
 	Actor     Actor
 	SubjectID string
-	// A nil Payload is written as {}; maps and slices must be map[string]any
-	// and []any so the key check sees them.
+	// A nil Payload is written as {}; values must be JSON-encodable, and keys
+	// that name secrets are rejected at any depth.
 	Payload map[string]any
 }
 
@@ -55,4 +59,20 @@ var eventTypes = map[string]struct{}{
 	TypeDetectionStatusChanged: {},
 	TypePipelineGapRecorded:    {},
 	TypeUserOnCallChanged:      {},
+}
+
+// outboxRow is the write-side row; the database supplies ID and OccurredAt.
+type outboxRow struct {
+	ID          string          `gorm:"column:id;default:uuidv7();->"`
+	Type        string          `gorm:"column:type"`
+	Version     int             `gorm:"column:version"`
+	OccurredAt  time.Time       `gorm:"column:occurred_at;default:clock_timestamp();autoCreateTime:false;->"`
+	Actor       Actor           `gorm:"column:actor;serializer:json"`
+	SubjectType string          `gorm:"column:subject_type"`
+	SubjectID   string          `gorm:"column:subject_id"`
+	Payload     json.RawMessage `gorm:"column:payload"`
+}
+
+func (outboxRow) TableName() string {
+	return "event_outbox"
 }
