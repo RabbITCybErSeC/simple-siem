@@ -50,6 +50,12 @@ test("the shell, palette, and shortcuts dialog are accessible", async ({
   await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "Cases: Open, Mine" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "Cases: Open, Mine" }).locator("tbody tr"),
+  ).toHaveCount(50);
   await expectAccessibleInBothThemes(page);
 
   await page.keyboard.press("Control+k");
@@ -63,5 +69,45 @@ test("the shell, palette, and shortcuts dialog are accessible", async ({
   await expect(
     page.getByRole("dialog", { name: "Keyboard shortcuts" }),
   ).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+});
+
+test("the cases page is accessible empty and with the picker open", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  await page.goto("/cases?tab=in_progress&scope=unassigned");
+  await expect(
+    page.getByText("No in progress unassigned cases."),
+  ).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+
+  await page.goto("/cases");
+  await expect(
+    page.getByRole("table", { name: "Cases: Open, Mine" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Last 24 hours" }).click();
+  await expect(
+    page.getByRole("group", { name: "Quick select" }),
+  ).toBeVisible();
+  await expectAccessibleInBothThemes(page);
+});
+
+test("the cases error state is accessible", async ({ page }) => {
+  await page.route(/\/api\/v1\/cases\?/, (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "INTERNAL_ERROR", message: "boom", details: {} },
+      }),
+    }),
+  );
+
+  await signIn(page);
+  await page.goto("/cases");
+
+  await expect(page.getByRole("alert")).toBeVisible({ timeout: 10_000 });
   await expectAccessibleInBothThemes(page);
 });

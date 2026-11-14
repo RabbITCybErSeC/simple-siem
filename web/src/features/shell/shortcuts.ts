@@ -4,6 +4,8 @@ export const shellShortcuts: Shortcut[] = [
   { keys: ["Ctrl", "K"], description: "Open the command palette" },
   { keys: ["⌘", "K"], description: "Open the command palette" },
   { keys: ["?"], description: "Show keyboard shortcuts" },
+  { keys: ["j"], description: "Next case", scope: "Cases list" },
+  { keys: ["k"], description: "Previous case", scope: "Cases list" },
 ];
 
 export function shortcutFor(

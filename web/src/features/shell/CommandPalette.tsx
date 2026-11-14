@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import {
   Command,
   CommandEmpty,
@@ -21,6 +21,8 @@ import {
   writeThemePreference,
 } from "../../theme/theme";
 import type { ThemePreference } from "../../theme/theme";
+import { buildShellCommands } from "./commands";
+import { useTimeZone, writeTimeZone } from "./timeZone";
 import type { ShellCommand } from "./types";
 
 export interface CommandPaletteProps {
@@ -33,6 +35,7 @@ export interface CommandPaletteProps {
 const GROUP_ORDER: ShellCommand["group"][] = [
   "Navigation",
   "Theme",
+  "Time zone",
   "Account",
   "Help",
 ];
@@ -44,6 +47,8 @@ export function CommandPalette({
   onSignOut,
 }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const timeZone = useTimeZone();
   const [theme, setTheme] = useState(readThemePreference);
   const opener = useRef<HTMLElement | null>(null);
   const commandMovesFocus = useRef(false);
@@ -54,35 +59,19 @@ export function CommandPalette({
     setTheme(preference);
   };
 
-  const commands: ShellCommand[] = [
-    {
-      id: "go-cases",
-      label: "Go to Cases",
-      group: "Navigation",
-      keywords: ["queue", "case"],
-      movesFocus: true,
-      run: () => {
-        void navigate("/cases");
-      },
+  const commands = buildShellCommands({
+    pathname: location.pathname,
+    search: location.search,
+    theme,
+    timeZone,
+    onNavigate: (path) => {
+      void navigate(path);
     },
-    ...themeCommands(theme, chooseTheme),
-    {
-      id: "sign-out",
-      label: "Sign out",
-      group: "Account",
-      keywords: ["logout", "exit"],
-      movesFocus: true,
-      run: onSignOut,
-    },
-    {
-      id: "keyboard-shortcuts",
-      label: "Keyboard shortcuts",
-      group: "Help",
-      keywords: ["help", "keys"],
-      movesFocus: true,
-      run: onShowShortcuts,
-    },
-  ];
+    onThemeChange: chooseTheme,
+    onTimeZoneChange: writeTimeZone,
+    onShowShortcuts,
+    onSignOut,
+  });
 
   const runCommand = (command: ShellCommand) => {
     commandMovesFocus.current = command.movesFocus;
@@ -152,27 +141,4 @@ export function CommandPalette({
       </DialogContent>
     </Dialog>
   );
-}
-
-function themeCommands(
-  current: ThemePreference,
-  chooseTheme: (preference: ThemePreference) => void,
-): ShellCommand[] {
-  const preferences: ThemePreference[] = ["system", "light", "dark"];
-
-  return preferences.map((preference) => ({
-    id: `theme-${preference}`,
-    label:
-      preference === current
-        ? `Theme: ${capitalize(preference)} (current)`
-        : `Theme: ${capitalize(preference)}`,
-    group: "Theme",
-    keywords: ["appearance", "color", "colour", preference],
-    movesFocus: false,
-    run: () => chooseTheme(preference),
-  }));
-}
-
-function capitalize(value: ThemePreference): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
