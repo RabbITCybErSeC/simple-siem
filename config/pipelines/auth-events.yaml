@@ -1,0 +1,25 @@
+id: auth-events
+version: 0.1.0
+
+schedule:
+  timeout: 2m
+
+fetchers:
+  - id: auth
+    ref: elastic-dev
+    inputs:
+      index: auth-*
+      query_template: auth-events
+
+processors:
+  - id: auth-to-udm
+    type: converter
+    from: auth.records
+    mappings:
+      - mappings/ecs-ssh-login.yaml
+      - mappings/ecs-windows-logon.yaml
+    output: udm.auth_events
+
+outputs:
+  auth_events:
+    from: udm.auth_events

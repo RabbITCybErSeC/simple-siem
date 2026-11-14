@@ -1,0 +1,14 @@
+version: "0.1"
+
+stores:
+  dataset_cache:
+    type: postgres
+    default_retention: 72h
+    default_allowed_lateness: 10m
+
+secrets:
+  provider: env
+
+runner:
+  batch_size: 5000
+  max_quarantine_ratio: 0.10

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,7 +22,10 @@ import (
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
+	"github.com/RabbITCybErSeC/simple-siem/internal/dataset"
+	"github.com/RabbITCybErSeC/simple-siem/internal/fetcher"
 	"github.com/RabbITCybErSeC/simple-siem/internal/fetcher/elasticsearch"
+	"github.com/RabbITCybErSeC/simple-siem/internal/pipeline"
 	"github.com/RabbITCybErSeC/simple-siem/internal/version"
 	"github.com/RabbITCybErSeC/simple-siem/web"
 	"golang.org/x/term"
@@ -36,6 +40,7 @@ commands:
   migrate  apply pending database migrations
   admin    create or recover admin accounts
   config   validate the file configuration
+  run      run one pipeline once
   version  print the version`
 
 	serveUsage   = "usage: simple-siem serve [--migrate=true|false]"
@@ -43,6 +48,7 @@ commands:
 	adminUsage   = `usage: simple-siem admin create --email <email> [--display-name <name>] [--password-file <path>]
 usage: simple-siem admin reset-password --email <email> [--password-file <path>]`
 	configUsage  = "usage: simple-siem config validate [--config-dir DIR]"
+	runUsage     = "usage: simple-siem run <pipeline-id> [--config-dir DIR]"
 	versionUsage = "usage: simple-siem version"
 
 	defaultDisplayNameRunes = 200
@@ -78,6 +84,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return runAdmin(ctx, args[1:], getenv, stdin, stdout, stderr, logger)
 	case "config":
 		return runConfig(args[1:], getenv, stdout, stderr)
+	case "run":
+		return runPipeline(ctx, args[1:], getenv, stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:
@@ -87,11 +95,16 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 }
 
 // loadFileConfig loads and validates the file configuration, including the
-// Elasticsearch dialect of every query template. Every command that loads file
-// configuration (the coming run) must use it.
+// Phase 1 pipeline shape, every mapping, and the Elasticsearch dialect of
+// every query template. Every command that loads file configuration must use
+// it.
 func loadFileConfig(directory string, environment config.Environment, getenv func(string) string) (config.Files, error) {
 	files, err := config.LoadFiles(directory, environment, getenv)
 	if err != nil {
+		return config.Files{}, err
+	}
+
+	if err := pipeline.ValidateFiles(files); err != nil {
 		return config.Files{}, err
 	}
 
@@ -148,6 +161,103 @@ func countLabel(count int, singular string) string {
 		return "1 " + singular
 	}
 	return fmt.Sprintf("%d %ss", count, singular)
+}
+
+// runPipeline runs one pipeline once and prints its result as one JSON line.
+func runPipeline(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("run", stderr, runUsage)
+	directory := flags.String("config-dir", "config", "configuration directory")
+	options, positionals := splitRunArguments(args)
+	if err := flags.Parse(options); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(positionals) != 1 {
+		flags.Usage()
+		return 2
+	}
+	pipelineID := positionals[0]
+
+	settings, err := config.Load(getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	files, err := loadFileConfig(*directory, settings.Environment, getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	// Keep stdout for the one result line; GORM and the runner log to stderr.
+	logger := slog.New(slog.NewJSONHandler(stderr, nil))
+	slog.SetDefault(logger)
+
+	db, err := database.Open(ctx, settings)
+	if err != nil {
+		logger.Error("open database", "error", err)
+		return 1
+	}
+	defer closeDatabase(db, logger)
+
+	// One-shot runs apply pending migrations themselves so an operator does not
+	// need a separate migrate step before the first run.
+	if _, err := database.Migrate(ctx, db); err != nil {
+		logger.Error("migrate database", "error", err)
+		return 1
+	}
+
+	runner := &pipeline.Runner{
+		Files:    files,
+		Database: db,
+		Store:    dataset.NewPostgresStore(db),
+		NewFetcher: func(instance config.FetcherInstance) (fetcher.Fetcher, error) {
+			return elasticsearch.New(instance, getenv)
+		},
+		Logger: logger,
+	}
+	result, err := runner.Run(ctx, pipelineID)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, string(encoded))
+
+	switch result.Status {
+	case pipeline.StatusOK, pipeline.StatusPartial, pipeline.StatusSkipped:
+		return 0
+	default:
+		return 1
+	}
+}
+
+// splitRunArguments separates flags from the pipeline id so --config-dir may
+// follow the id, which the standard flag package does not allow.
+func splitRunArguments(args []string) (options []string, positionals []string) {
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			return options, append(positionals, args[index+1:]...)
+		}
+		if !strings.HasPrefix(argument, "-") || argument == "-" {
+			positionals = append(positionals, argument)
+			continue
+		}
+		options = append(options, argument)
+		if (argument == "--config-dir" || argument == "-config-dir") && index+1 < len(args) {
+			index++
+			options = append(options, args[index])
+		}
+	}
+	return options, positionals
 }
 
 func runAdmin(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, logger *slog.Logger) int {

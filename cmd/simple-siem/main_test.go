@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
+	"github.com/RabbITCybErSeC/simple-siem/internal/pipeline"
 	"github.com/RabbITCybErSeC/simple-siem/internal/version"
 	"gorm.io/gorm"
 )
@@ -114,6 +117,13 @@ func TestRunUnknownFlag(t *testing.T) {
 func TestRunConfigValidate(t *testing.T) {
 	// SIMPLE_SIEM_DATABASE_URL is deliberately unset: config validate must not
 	// need the database.
+	directory := t.TempDir()
+	if err := os.CopyFS(directory, os.DirFS("../../internal/config/testdata/valid")); err != nil {
+		t.Fatalf("copy valid config fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "mappings", "ecs-ssh-login.yaml"), []byte(runTestMapping), 0o600); err != nil {
+		t.Fatalf("write mapping: %v", err)
+	}
 	environment := map[string]string{
 		"SIMPLE_SIEM_ENV":      "development",
 		"ELASTIC_PROD_API_KEY": "test-api-key",
@@ -123,7 +133,7 @@ func TestRunConfigValidate(t *testing.T) {
 	}
 
 	status, stdout, stderr := runCLI(t,
-		[]string{"config", "validate", "--config-dir", "../../internal/config/testdata/valid"}, environment)
+		[]string{"config", "validate", "--config-dir", directory}, environment)
 
 	if status != 0 {
 		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
@@ -213,7 +223,7 @@ outputs:
   auth_events:
     from: udm.auth_events
 `,
-		"mappings/auth.yaml": "id: auth\n",
+		"mappings/auth.yaml": runTestMapping,
 	})
 
 	status, stdout, stderr := runCLI(t,
@@ -317,6 +327,374 @@ func TestRunConfigInvalidEnvironment(t *testing.T) {
 	if strings.Contains(stderr, "system.yaml") {
 		t.Errorf("run() stderr = %q, must not load the configuration before the environment check", stderr)
 	}
+}
+
+func TestRunCommandUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no pipeline", args: []string{"run"}},
+		{name: "two pipelines", args: []string{"run", "one", "two"}},
+		{name: "unknown flag", args: []string{"run", "--no-such-flag", "auth-events"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, stdout, stderr := runCLI(t, test.args, nil)
+
+			if status != 2 {
+				t.Fatalf("run() status = %d, want 2; stderr: %s", status, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("run() stdout = %q, want empty", stdout)
+			}
+			if !strings.Contains(stderr, "usage: simple-siem run <pipeline-id> [--config-dir DIR]") {
+				t.Errorf("run() stderr %q does not print the run usage", stderr)
+			}
+		})
+	}
+}
+
+func TestRunCommandUnknownPipeline(t *testing.T) {
+	testDatabase, environment := runCommandEnvironment(t)
+	directory := runCommandConfig(t, "http://127.0.0.1:1")
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"run", "missing", "--config-dir", directory}, environment)
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, `unknown pipeline "missing"`) {
+		t.Errorf("run() stderr %q does not name the unknown pipeline", stderr)
+	}
+	var runs int
+	if err := testDatabase.Raw("SELECT count(*) FROM pipeline_runs").Scan(&runs).Error; err != nil {
+		t.Fatalf("count run rows: %v", err)
+	}
+	if runs != 0 {
+		t.Errorf("run rows = %d, want 0", runs)
+	}
+}
+
+func TestRunCommandSkipped(t *testing.T) {
+	testDatabase, environment := runCommandEnvironment(t)
+	ctx := context.Background()
+	sqlDatabase, err := testDatabase.DB()
+	if err != nil {
+		t.Fatalf("connection pool: %v", err)
+	}
+	connection, err := sqlDatabase.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reserve connection: %v", err)
+	}
+	defer func() {
+		_, _ = connection.ExecContext(ctx, "SELECT pg_advisory_unlock(hashtextextended('pipeline:' || $1, 0))", "auth-events")
+		_ = connection.Close()
+	}()
+	var acquired bool
+	err = connection.QueryRowContext(ctx,
+		"SELECT pg_try_advisory_lock(hashtextextended('pipeline:' || $1, 0))", "auth-events").Scan(&acquired)
+	if err != nil || !acquired {
+		t.Fatalf("take the pipeline lock: acquired = %t, error = %v", acquired, err)
+	}
+
+	directory := runCommandConfig(t, "http://127.0.0.1:1")
+	status, stdout, stderr := runCLI(t,
+		[]string{"run", "auth-events", "--config-dir", directory}, environment)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	result := decodeRunResult(t, stdout)
+	if result.Status != pipeline.StatusSkipped {
+		t.Errorf("result status = %q, want SKIPPED", result.Status)
+	}
+	if result.RunID == "" {
+		t.Error("result run id is empty")
+	}
+}
+
+func TestRunCommandFailedBackend(t *testing.T) {
+	testDatabase, environment := runCommandEnvironment(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	address := "http://" + listener.Addr().String()
+	_ = listener.Close()
+
+	directory := runCommandConfig(t, address)
+	status, stdout, stderr := runCLI(t,
+		[]string{"run", "auth-events", "--config-dir", directory}, environment)
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	result := decodeRunResult(t, stdout)
+	if result.Status != pipeline.StatusFailed {
+		t.Errorf("result status = %q, want FAILED", result.Status)
+	}
+	if !strings.Contains(result.Error, "BACKEND_UNAVAILABLE") {
+		t.Errorf("result error = %q, want the backend failure", result.Error)
+	}
+	rowStatus := runRowStatus(t, testDatabase, result.RunID)
+	if rowStatus != string(pipeline.StatusFailed) {
+		t.Errorf("run row status = %q, want FAILED", rowStatus)
+	}
+}
+
+func TestRunCommandSucceeds(t *testing.T) {
+	testDatabase, environment := runCommandEnvironment(t)
+	now := time.Now().UTC()
+	fetchTime := now.Add(-2 * time.Minute)
+	server := newStubElasticsearch(t, map[string]any{
+		"@timestamp": now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+		"event":      map[string]any{"category": "authentication"},
+	}, fetchTime)
+
+	directory := runCommandConfig(t, server.URL)
+	status, stdout, stderr := runCLI(t,
+		[]string{"run", "auth-events", "--config-dir", directory}, environment)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	result := decodeRunResult(t, stdout)
+	if result.Status != pipeline.StatusOK {
+		t.Errorf("result status = %q, want OK; error: %s", result.Status, result.Error)
+	}
+	if result.RecordsRead != 1 || result.RecordsWritten != 1 {
+		t.Errorf("records read/written = %d/%d, want 1/1", result.RecordsRead, result.RecordsWritten)
+	}
+	if !result.WindowStart.Before(result.WindowEnd) {
+		t.Errorf("window = %s..%s, want start before end", result.WindowStart, result.WindowEnd)
+	}
+	var events int
+	if err := testDatabase.Raw("SELECT count(*) FROM dataset_events").Scan(&events).Error; err != nil {
+		t.Fatalf("count dataset events: %v", err)
+	}
+	if events != 1 {
+		t.Errorf("dataset events = %d, want 1", events)
+	}
+	if got := runRowStatus(t, testDatabase, result.RunID); got != string(pipeline.StatusOK) {
+		t.Errorf("run row status = %q, want OK", got)
+	}
+}
+
+func TestRunConfigValidateRejectsPhaseOneShape(t *testing.T) {
+	directory := writeConfigDirectory(t, map[string]string{
+		"system.yaml": "version: \"0.1\"\n",
+		"fetchers.yaml": `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [http://es.example.internal:9200]
+    auth:
+      username: ${secret:ELASTICSEARCH_USERNAME}
+      password: ${secret:ELASTICSEARCH_PASSWORD}
+    allowed_indexes: [auth-*]
+`,
+		"query_templates/auth-events.yaml": `id: auth-events
+fetcherType: elasticsearch
+version: 0.1.0
+rawQuery:
+  query:
+    term: { event.category: authentication }
+`,
+		"mappings/auth.yaml": runTestMapping,
+		"pipelines/auth.yaml": `id: auth-events
+version: 0.1.0
+schedule: {timeout: 2m}
+fetchers:
+  - id: auth
+    ref: elastic-dev
+    inputs: {index: auth-*, query_template: auth-events}
+  - id: edr
+    ref: elastic-dev
+    inputs: {index: auth-*, query_template: auth-events}
+processors:
+  - id: to-udm
+    type: converter
+    from: auth.records
+    mappings: [mappings/auth.yaml]
+    output: udm.auth_events
+outputs:
+  auth_events: {from: udm.auth_events}
+`,
+	})
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", directory},
+		map[string]string{
+			"SIMPLE_SIEM_ENV":        "development",
+			"ELASTICSEARCH_USERNAME": "elastic",
+			"ELASTICSEARCH_PASSWORD": "test-password",
+		})
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stdout: %s", status, stdout)
+	}
+	for _, fragment := range []string{"auth-events", "Phase 1 runs one fetcher step, one converter, one output"} {
+		if !strings.Contains(stderr, fragment) {
+			t.Errorf("run() stderr %q does not contain %q", stderr, fragment)
+		}
+	}
+}
+
+func TestExampleConfigLoads(t *testing.T) {
+	files, err := loadFileConfig("../../config", config.EnvironmentDevelopment, func(name string) string {
+		switch name {
+		case "ELASTICSEARCH_USERNAME":
+			return "elastic"
+		case "ELASTICSEARCH_PASSWORD":
+			return "test-password"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("loadFileConfig() error = %v", err)
+	}
+	if len(files.Pipelines) != 1 || files.Pipelines[0].ID != "auth-events" {
+		t.Fatalf("pipelines = %#v, want the one auth-events pipeline", files.Pipelines)
+	}
+	if _, ok := files.Fetchers["elastic-dev"]; !ok {
+		t.Fatalf("fetchers = %#v, want elastic-dev", files.Fetchers)
+	}
+	pipeline := files.Pipelines[0]
+	if len(pipeline.Fetchers) != 1 || pipeline.Fetchers[0].Ref != "elastic-dev" {
+		t.Errorf("fetcher steps = %#v, want one on elastic-dev", pipeline.Fetchers)
+	}
+	if len(pipeline.Processors) != 1 || len(pipeline.Processors[0].Mappings) != 2 {
+		t.Fatalf("processors = %#v, want one converter with both shipped mappings", pipeline.Processors)
+	}
+	if _, ok := pipeline.Outputs["auth_events"]; !ok {
+		t.Errorf("outputs = %#v, want auth_events", pipeline.Outputs)
+	}
+}
+
+func runCommandEnvironment(t *testing.T) (*gorm.DB, map[string]string) {
+	t.Helper()
+	testDatabase, databaseURL := databasetest.NewUnmigrated(t)
+	return testDatabase, map[string]string{
+		"SIMPLE_SIEM_ENV":          "development",
+		"SIMPLE_SIEM_DATABASE_URL": databaseURL,
+		"ELASTICSEARCH_USERNAME":   "elastic",
+		"ELASTICSEARCH_PASSWORD":   "test-password",
+	}
+}
+
+// runTestMapping is the smallest mapping the pipeline tests convert with.
+const runTestMapping = `id: auth
+version: 1
+match: [{field: event.category, equals: authentication}]
+constants: {metadata.event_type: GENERIC_EVENT}
+fields: [{to: metadata.event_timestamp, from: "@timestamp"}]
+`
+
+func runCommandConfig(t *testing.T, address string) string {
+	t.Helper()
+	return writeConfigDirectory(t, map[string]string{
+		"system.yaml": "version: \"0.1\"\n",
+		"fetchers.yaml": fmt.Sprintf(`fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [%s]
+    auth:
+      username: ${secret:ELASTICSEARCH_USERNAME}
+      password: ${secret:ELASTICSEARCH_PASSWORD}
+    allowed_indexes: [auth-*]
+`, address),
+		"query_templates/auth-events.yaml": `id: auth-events
+fetcherType: elasticsearch
+version: 0.1.0
+rawQuery:
+  query:
+    term: { event.category: authentication }
+`,
+		"mappings/auth.yaml": runTestMapping,
+		"pipelines/auth-events.yaml": `id: auth-events
+version: 0.1.0
+schedule: {timeout: 2m}
+fetchers:
+  - id: auth
+    ref: elastic-dev
+    inputs: {index: auth-*, query_template: auth-events}
+processors:
+  - id: to-udm
+    type: converter
+    from: auth.records
+    mappings: [mappings/auth.yaml]
+    output: udm.auth_events
+outputs:
+  auth_events: {from: udm.auth_events}
+`,
+	})
+}
+
+// newStubElasticsearch serves one hit and then an empty page, enough for the
+// Elasticsearch fetcher to complete one window.
+func newStubElasticsearch(t *testing.T, source map[string]any, fetchTime time.Time) *httptest.Server {
+	t.Helper()
+	var searches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/_pit"):
+			writeStubJSON(t, writer, map[string]any{"id": "pit-stub"})
+		case request.Method == http.MethodPost && request.URL.Path == "/_search":
+			hits := []any{}
+			if searches.Add(1) == 1 {
+				hits = append(hits, map[string]any{
+					"_index":  "auth-linux-2026.11.14",
+					"_id":     "doc-1",
+					"_source": source,
+					"sort":    []any{fetchTime.UTC().Format(time.RFC3339Nano), 1},
+				})
+			}
+			writeStubJSON(t, writer, map[string]any{
+				"pit_id": "pit-stub",
+				"hits":   map[string]any{"hits": hits},
+			})
+		case request.Method == http.MethodDelete && request.URL.Path == "/_pit":
+			writer.WriteHeader(http.StatusOK)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func writeStubJSON(t *testing.T, writer http.ResponseWriter, value any) {
+	t.Helper()
+	writer.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(writer).Encode(value); err != nil {
+		t.Errorf("encode stub response: %v", err)
+	}
+}
+
+func decodeRunResult(t *testing.T, stdout string) pipeline.RunResult {
+	t.Helper()
+	if strings.Count(stdout, "\n") != 1 || !strings.HasSuffix(stdout, "\n") {
+		t.Fatalf("run() stdout = %q, want exactly one JSON line", stdout)
+	}
+	var result pipeline.RunResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode run result %q: %v", stdout, err)
+	}
+	return result
+}
+
+func runRowStatus(t *testing.T, testDatabase *gorm.DB, runID string) string {
+	t.Helper()
+	var status string
+	if err := testDatabase.Raw("SELECT status FROM pipeline_runs WHERE id = ?", runID).Scan(&status).Error; err != nil {
+		t.Fatalf("read run row status: %v", err)
+	}
+	return status
 }
 
 func runCLI(t *testing.T, args []string, environment map[string]string) (status int, stdout, stderr string) {
