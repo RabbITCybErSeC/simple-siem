@@ -164,6 +164,9 @@ type Pipeline struct {
 type Schedule struct {
 	Every         Duration // optional in Phase 1; > 0 when set
 	Timeout       Duration // required; > 0, <= 1h
+	IngestDelay   Duration // default 1m; 0..1h
+	Overlap       Duration // default 1m; 0..1h
+	MaxCatchUp    Duration // default 6h, at most the output retention; >= 1m
 	OverlapPolicy string   // skip (default) | queue | parallel
 }
 
@@ -315,6 +318,9 @@ type pipelineFile struct {
 	Schedule struct {
 		Every         *Duration `yaml:"every"`
 		Timeout       *Duration `yaml:"timeout"`
+		IngestDelay   *Duration `yaml:"ingest_delay"`
+		Overlap       *Duration `yaml:"overlap"`
+		MaxCatchUp    *Duration `yaml:"max_catch_up"`
 		OverlapPolicy string    `yaml:"overlap_policy"`
 	} `yaml:"schedule"`
 	Variables  map[string]Variable `yaml:"variables"`
