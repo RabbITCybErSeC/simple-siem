@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "AUTHENTICATION_REQUIRED",
+    "message": "invalid email or password"
+  }
+}

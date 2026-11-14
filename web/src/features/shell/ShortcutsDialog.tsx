@@ -35,6 +35,9 @@ export function ShortcutsDialog({
               <th scope="col" className="px-2 py-2 font-medium">
                 Action
               </th>
+              <th scope="col" className="px-2 py-2 font-medium">
+                Where
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -52,6 +55,9 @@ export function ShortcutsDialog({
                 </td>
                 <td className="px-2 py-2 text-muted-foreground">
                   {shortcut.description}
+                </td>
+                <td className="px-2 py-2 text-muted-foreground">
+                  {shortcut.scope ?? "Anywhere"}
                 </td>
               </tr>
             ))}

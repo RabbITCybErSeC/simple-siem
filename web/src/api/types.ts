@@ -30,6 +30,16 @@ export interface ListResponse<T> {
   pagination: Pagination;
 }
 
+export interface CursorPagination {
+  limit: number;
+  nextCursor: string | null;
+}
+
+export interface CursorListResponse<T> {
+  data: T[];
+  pagination: CursorPagination;
+}
+
 export type Role =
   | "ADMIN"
   | "SECURITY_ENGINEER"

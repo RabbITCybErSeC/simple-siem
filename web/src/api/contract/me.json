@@ -1,0 +1,12 @@
+{
+  "createdAt": "2026-01-01T00:00:00Z",
+  "displayName": "User Name",
+  "email": "analyst@example.test",
+  "id": "user_id",
+  "roles": [
+    "ADMIN"
+  ],
+  "status": "ACTIVE",
+  "updatedAt": "2026-01-01T00:00:00Z",
+  "version": 1
+}

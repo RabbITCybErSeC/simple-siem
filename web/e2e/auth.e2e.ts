@@ -1,4 +1,10 @@
-import { expect, test } from "./support/test.ts";
+import {
+  BROWSER_HEADERS,
+  expect,
+  signIn,
+  TEST_USERS,
+  test,
+} from "./support/test.ts";
 
 interface BrowserStorage {
   length: number;
@@ -12,8 +18,8 @@ interface BrowserGlobals {
   document: { cookie: string };
 }
 
-const EMAIL = "analyst@example.test";
-const PASSWORD = "correct horse battery staple";
+const ANALYST = TEST_USERS.analyst;
+const LIMITED_EMAIL = "limited@example.test";
 
 test("a signed-out visitor is sent to login with the next path", async ({
   page,
@@ -33,13 +39,13 @@ test("signs in with the keyboard and keeps tokens out of storage", async ({
   await expect(page).toHaveURL(/\/login\?next=%2Fcases$/);
 
   await page.keyboard.press("Tab");
-  await page.keyboard.type(EMAIL);
+  await page.keyboard.type(ANALYST.email);
   await page.keyboard.press("Tab");
-  await page.keyboard.type(PASSWORD);
+  await page.keyboard.type(ANALYST.password);
   await page.keyboard.press("Enter");
 
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
-  await expect(page.getByText("Alice Analyst")).toBeVisible();
+  await expect(page.locator("header")).toContainText(ANALYST.displayName);
   await expect(page).toHaveURL(/\/cases$/);
 
   const storage = await page.evaluate(() => {
@@ -63,15 +69,50 @@ test("signs in with the keyboard and keeps tokens out of storage", async ({
   const stored = [...storage.local, ...storage.session, storage.cookie].join(
     " ",
   );
-  expect(stored).not.toContain(PASSWORD);
-  expect(stored).not.toContain(EMAIL);
+  expect(stored).not.toContain(ANALYST.password);
+  expect(stored).not.toContain(ANALYST.email);
   expect(stored).not.toMatch(/sessiontoken|bearer/i);
+
+  const sessionCookie = (await page.context().cookies()).find(
+    (cookie) => cookie.name === "simple_siem_session",
+  );
+  expect(sessionCookie?.httpOnly, "session cookie").toBe(true);
+  expect(storage.cookie).not.toContain("simple_siem_session");
+});
+
+test("refuses a cross-site login and sets no session cookie", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  const response = await page.request.post("/api/v1/auth/login", {
+    headers: { ...BROWSER_HEADERS, Origin: "https://evil.example" },
+    data: { email: ANALYST.email, password: ANALYST.password },
+  });
+
+  expect(response.status()).toBe(403);
+  const body = (await response.json()) as {
+    error: { code: string };
+  };
+  expect(body.error.code).toBe("FORBIDDEN");
+  expect(response.headers()["set-cookie"]).toBeUndefined();
+});
+
+test("an analyst cannot list users", async ({ page }) => {
+  await signIn(page, "analyst");
+
+  const response = await page.request.get("/api/v1/users", {
+    headers: BROWSER_HEADERS,
+  });
+
+  expect(response.status()).toBe(403);
+  const body = (await response.json()) as { error: { code: string } };
+  expect(body.error.code).toBe("FORBIDDEN");
 });
 
 test("shows the generic message after a wrong password", async ({ page }) => {
   await page.goto("/login");
 
-  await page.getByLabel("Email").fill(EMAIL);
+  await page.getByLabel("Email").fill(ANALYST.email);
   await page.getByLabel("Password").fill("not the password");
   await page.getByRole("button", { name: "Sign in" }).click();
 
@@ -79,15 +120,29 @@ test("shows the generic message after a wrong password", async ({ page }) => {
     "Email or password is incorrect.",
   );
   await expect(page.getByLabel("Password")).toHaveValue("");
-  await expect(page.getByLabel("Email")).toHaveValue(EMAIL);
+  await expect(page.getByLabel("Email")).toHaveValue(ANALYST.email);
 });
 
-test("shows the rate-limit message", async ({ page, api }) => {
-  api.rateLimitLogin();
+// The real server allows 10 failed logins per email and 30 per client address
+// in a 15-minute window. The suite spends 10 here, 1 in the wrong-password
+// test above, and 1 in accessibility.e2e.ts, so the per-address limit holds.
+test("shows the rate-limit message on the eleventh failed login", async ({
+  page,
+}) => {
   await page.goto("/login");
+  await page.getByLabel("Email").fill(LIMITED_EMAIL);
 
-  await page.getByLabel("Email").fill(EMAIL);
-  await page.getByLabel("Password").fill(PASSWORD);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await page.getByLabel("Password").fill("not the password");
+    const response = page.waitForResponse((candidate) =>
+      candidate.url().endsWith("/api/v1/auth/login"),
+    );
+    await page.getByRole("button", { name: "Sign in" }).click();
+    expect((await response).status(), `attempt ${attempt + 1}`).toBe(401);
+    await expect(page.getByLabel("Password")).toHaveValue("");
+  }
+
+  await page.getByLabel("Password").fill("not the password");
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page.getByRole("alert")).toHaveText(
@@ -97,13 +152,12 @@ test("shows the rate-limit message", async ({ page, api }) => {
 
 test("returns to login when the session expires and back to the next path", async ({
   page,
-  api,
 }) => {
-  api.signIn();
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
-  api.expireSession();
+  await page.context().clearCookies();
   await page.keyboard.press("Control+k");
   await page.keyboard.type("cases");
   await page.keyboard.press("Enter");
@@ -113,16 +167,16 @@ test("returns to login when the session expires and back to the next path", asyn
     page.getByText("Your session ended. Sign in again."),
   ).toBeVisible();
 
-  await page.getByLabel("Email").fill(EMAIL);
-  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByLabel("Email").fill(ANALYST.email);
+  await page.getByLabel("Password").fill(ANALYST.password);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page).toHaveURL(/\/cases$/);
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 });
 
-test("signs out from the command palette", async ({ page, api }) => {
-  api.signIn();
+test("signs out from the command palette", async ({ page }) => {
+  await signIn(page);
   await page.goto("/cases");
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 
@@ -136,9 +190,18 @@ test("signs out from the command palette", async ({ page, api }) => {
   ).toBeVisible();
 });
 
-test("keeps the shell and alerts when sign out fails", async ({ page, api }) => {
-  api.signIn();
-  api.failLogout();
+test("keeps the shell and alerts when sign out fails", async ({ page }) => {
+  await signIn(page);
+  // The real server cannot be made to fail logout, so this test stubs it.
+  await page.route("**/api/v1/auth/logout", (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "INTERNAL_ERROR", message: "Internal server error" },
+      }),
+    }),
+  );
   await page.goto("/cases");
   const heading = page.getByRole("heading", { name: "Cases" });
   await expect(heading).toBeVisible();

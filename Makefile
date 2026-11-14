@@ -161,20 +161,22 @@ $(E2E_STAMP): Dockerfile web/package.json
 	@touch $@
 
 test: postgres toolchain web/node_modules
-	$(RUN) $(TOOLCHAIN_IMAGE) go test ./...
+	$(RUN) $(TOOLCHAIN_IMAGE) go test $(or $(GO_TEST_ARGS),./...)
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm test'
 
 lint: network toolchain web/node_modules
 	$(RUN) $(TOOLCHAIN_IMAGE) golangci-lint run
+	@if grep -rEln "from ['\"]cn['\"]" web/src; then echo "lint: the files above import the npm package cn; use @/lib/utils (see docs/frontend.md)" >&2; exit 1; fi; if grep -n '"cn":' web/package.json; then echo "lint: web/package.json declares the npm package cn; remove it" >&2; exit 1; fi
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck'
 
 build: network toolchain web/node_modules
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm build'
+	$(RUN) --env SIMPLE_SIEM_CHECK_WEB_BUILD=1 $(TOOLCHAIN_IMAGE) go test -count=1 -run TestBuiltFrontendIsSelfContained ./web
 	$(RUN) $(TOOLCHAIN_IMAGE) sh -c 'mkdir -p bin && go build -trimpath -ldflags "$(LDFLAGS)" -o bin/simple-siem ./cmd/simple-siem'
 
 e2e: postgres build e2e-image
 	$(CONTAINER) exec $(POSTGRES_CONTAINER) sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "DROP DATABASE IF EXISTS $(E2E_DATABASE) WITH (FORCE)" -c "CREATE DATABASE $(E2E_DATABASE)"'
-	$(WEB_RUN) --env SIMPLE_SIEM_DATABASE_URL=$(E2E_DATABASE_URL) --env SIMPLE_SIEM_LISTEN=127.0.0.1:8090 $(E2E_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm exec playwright test'
+	$(WEB_RUN) --env SIMPLE_SIEM_DATABASE_URL=$(E2E_DATABASE_URL) --env SIMPLE_SIEM_LISTEN=127.0.0.1:8090 --env SIMPLE_SIEM_PUBLIC_URL=http://127.0.0.1:8090 $(E2E_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm exec playwright test'
 
 run: build
 	$(RUN) $(TOOLCHAIN_IMAGE) ./bin/simple-siem $(ARGS)
