@@ -120,9 +120,20 @@ describe("applyTheme", () => {
     expect(document.documentElement).toHaveClass("dark");
   });
 
+  it("stops following the system after an explicit preference", () => {
+    const media = stubMediaQuery(false);
+    applyTheme("system");
+    applyTheme("light");
+
+    media.setMatches(true);
+
+    expect(document.documentElement).not.toHaveClass("dark");
+    expect(media.listenerCount()).toBe(0);
+  });
+
   it("tracks media changes under system", () => {
     const media = stubMediaQuery(false);
-    const cleanup = applyTheme("system");
+    applyTheme("system");
 
     expect(document.documentElement).not.toHaveClass("dark");
 
@@ -131,8 +142,6 @@ describe("applyTheme", () => {
 
     media.setMatches(false);
     expect(document.documentElement).not.toHaveClass("dark");
-
-    cleanup();
   });
 
   it("ignores media changes under an explicit preference", () => {
@@ -146,16 +155,13 @@ describe("applyTheme", () => {
     expect(media.listenerCount()).toBe(0);
   });
 
-  it("removes the media listener on cleanup", () => {
+  it("replaces the previous system listener when applied again", () => {
     const media = stubMediaQuery(false);
-    const cleanup = applyTheme("system");
+    applyTheme("system");
 
     expect(media.listenerCount()).toBe(1);
 
-    cleanup();
-    expect(media.listenerCount()).toBe(0);
-
-    media.setMatches(true);
-    expect(document.documentElement).not.toHaveClass("dark");
+    applyTheme("system");
+    expect(media.listenerCount()).toBe(1);
   });
 });

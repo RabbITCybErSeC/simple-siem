@@ -20,10 +20,15 @@ export function writeThemePreference(preference: ThemePreference): void {
   }
 }
 
-export function applyTheme(preference: ThemePreference): () => void {
+let systemThemeCleanup: (() => void) | undefined;
+
+export function applyTheme(preference: ThemePreference): void {
+  systemThemeCleanup?.();
+  systemThemeCleanup = undefined;
+
   if (preference !== "system") {
     document.documentElement.classList.toggle("dark", preference === "dark");
-    return () => {};
+    return;
   }
 
   const mediaQuery = window.matchMedia(DARK_MEDIA_QUERY);
@@ -33,8 +38,8 @@ export function applyTheme(preference: ThemePreference): () => void {
 
   applySystemTheme();
   mediaQuery.addEventListener("change", applySystemTheme);
-
-  return () => mediaQuery.removeEventListener("change", applySystemTheme);
+  systemThemeCleanup = () =>
+    mediaQuery.removeEventListener("change", applySystemTheme);
 }
 
 function isThemePreference(value: string | null): value is ThemePreference {

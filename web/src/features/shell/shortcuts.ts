@@ -1,0 +1,41 @@
+import type { Shortcut } from "./types";
+
+export const shellShortcuts: Shortcut[] = [
+  { keys: ["Ctrl", "K"], description: "Open the command palette" },
+  { keys: ["⌘", "K"], description: "Open the command palette" },
+  { keys: ["?"], description: "Show keyboard shortcuts" },
+];
+
+export function shortcutFor(
+  event: KeyboardEvent,
+  dialogOpen: boolean,
+): "palette" | "help" | undefined {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    return "palette";
+  }
+
+  if (
+    event.key === "?" &&
+    !dialogOpen &&
+    !isTextEntryTarget(event.target)
+  ) {
+    return "help";
+  }
+
+  return undefined;
+}
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    target.isContentEditable ||
+    target.closest('[contenteditable]:not([contenteditable="false"])') !== null
+  );
+}

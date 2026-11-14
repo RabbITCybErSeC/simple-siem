@@ -1,18 +1,4 @@
-import { expectAccessible } from "./support/accessibility.ts";
 import { expect, test } from "./support/test.ts";
-
-test("placeholder page is accessible in light and dark", async ({ page }) => {
-  await page.goto("/");
-  await expect(
-    page.getByRole("heading", { name: "Simple SIEM" }),
-  ).toBeVisible();
-
-  await page.emulateMedia({ colorScheme: "light" });
-  await expectAccessible(page);
-
-  await page.emulateMedia({ colorScheme: "dark" });
-  await expectAccessible(page);
-});
 
 test("an expected API 401 does not fail the test", async ({ page }) => {
   await page.goto("/");

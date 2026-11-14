@@ -74,7 +74,7 @@ export const test = base.extend<Fixtures>({
         `first document Content-Security-Policy: ${firstDocumentPolicy}`,
       ).toBe(true);
       expect(
-        policyRemainder === "" || STYLE_NONCE_SUFFIX.test(policyRemainder),
+        STYLE_NONCE_SUFFIX.test(policyRemainder),
         `first document Content-Security-Policy style suffix: ${policyRemainder}`,
       ).toBe(true);
       expect(browserMessages, "browser console").toEqual([]);
