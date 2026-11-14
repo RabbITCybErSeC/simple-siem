@@ -32,6 +32,7 @@ make run ARGS="config validate --config-dir config"  # check the file configurat
 make es         # single-node Elasticsearch for fetcher tests (basic auth, user elastic)
 make seed-auth-logs ARGS="--seed 1 --end 2026-11-13T12:00:00Z"  # synthetic sshd and Windows logons into auth-*
 make run ARGS="run auth-events"  # fetch, convert, and store the seeded logons with the example config/ (Docker: edit config/fetchers.yaml)
+make run ARGS="detect brute-force-then-success --window-end 2026-11-13T12:00:00Z"  # evaluate one detection window over the stored events (--fixture <path> needs no database)
 make down       # stop containers, keep data
 make clean      # remove containers, volumes, and build output
 ```
