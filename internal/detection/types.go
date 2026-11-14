@@ -183,3 +183,48 @@ type evaluation struct {
 	proposals []Proposal
 	err       error
 }
+
+// runRow is one detection_runs row.
+type runRow struct {
+	ID               string     `gorm:"column:id;default:uuidv7()"`
+	DetectionID      string     `gorm:"column:detection_id"`
+	DetectionVersion string     `gorm:"column:detection_version"`
+	Status           string     `gorm:"column:status"`
+	WindowStart      time.Time  `gorm:"column:window_start"`
+	WindowEnd        time.Time  `gorm:"column:window_end"`
+	Revision         int        `gorm:"column:revision"`
+	RowsRead         int        `gorm:"column:rows_read"`
+	Proposals        int        `gorm:"column:proposals"`
+	Error            *string    `gorm:"column:error"`
+	StartedAt        time.Time  `gorm:"column:started_at;autoCreateTime:false"`
+	FinishedAt       *time.Time `gorm:"column:finished_at;autoUpdateTime:false;->"`
+}
+
+func (runRow) TableName() string {
+	return "detection_runs"
+}
+
+// proposalRow is one detection_proposals row.
+type proposalRow struct {
+	ID             string             `gorm:"column:id;default:uuidv7()"`
+	DetectionRunID string             `gorm:"column:detection_run_id"`
+	IdentityHash   string             `gorm:"column:identity_hash"`
+	Identity       map[string]*string `gorm:"column:identity;serializer:json"`
+	Subject        udm.Event          `gorm:"column:subject;serializer:json"`
+	Summary        string             `gorm:"column:summary"`
+	Details        map[string]string  `gorm:"column:details;serializer:json"`
+	Severity       string             `gorm:"column:severity"`
+	Evidence       []proposalEvidence `gorm:"column:evidence;serializer:json"`
+	CreatedAt      *time.Time         `gorm:"column:created_at;autoCreateTime:false;->"`
+}
+
+func (proposalRow) TableName() string {
+	return "detection_proposals"
+}
+
+// proposalEvidence is one evidence jsonb element: the source key and event
+// time of a record that triggered the proposal.
+type proposalEvidence struct {
+	SourceKey dataset.SourceKey `json:"sourceKey"`
+	EventTime time.Time         `json:"eventTime"`
+}
