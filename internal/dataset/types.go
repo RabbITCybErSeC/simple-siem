@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/udm"
+	"github.com/jackc/pgx/v5/pgtype"
 	"gorm.io/gorm"
 )
 
@@ -92,3 +93,22 @@ var (
 	ErrInvalidDatasetName = errors.New("invalid dataset name")
 	ErrOutsideRetention   = errors.New("event time is outside the dataset retention")
 )
+
+// datasetRow is one datasets row. Retention and lateness are PostgreSQL
+// intervals; pgtype.Interval is their database/sql encoding.
+type datasetRow struct {
+	Name             string          `gorm:"column:name"`
+	PipelineID       string          `gorm:"column:pipeline_id"`
+	Retention        pgtype.Interval `gorm:"column:retention"`
+	AllowedLateness  pgtype.Interval `gorm:"column:allowed_lateness"`
+	FetchWatermark   *time.Time      `gorm:"column:fetch_watermark"`
+	DatasetWatermark *time.Time      `gorm:"column:dataset_watermark"`
+	LastRunID        *string         `gorm:"column:last_run_id"`
+	CreatedAt        time.Time       `gorm:"column:created_at;default:now();autoCreateTime:false;->"`
+	UpdatedAt        time.Time       `gorm:"column:updated_at;default:now();autoUpdateTime:false;->"`
+	Version          int             `gorm:"column:version;default:1"`
+}
+
+func (datasetRow) TableName() string {
+	return "datasets"
+}
