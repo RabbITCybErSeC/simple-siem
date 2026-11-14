@@ -7,6 +7,8 @@ const apiTarget = `http://${process.env.API_HOST ?? "127.0.0.1"}:${process.env.A
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // The Go page handler replaces this placeholder with a per-response nonce.
+  html: { cspNonce: "SIMPLE_SIEM_CSP_NONCE" },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -28,5 +30,6 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    css: { include: /index\.css/ },
   },
 });

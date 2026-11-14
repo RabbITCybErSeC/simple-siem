@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -14,14 +15,15 @@ import (
 const (
 	indexShellMarker = "test shell"
 	testAssetScript  = "console.log('test asset')\n"
+
+	baseContentSecurityPolicy = "default-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+	cspNoncePlaceholder       = "SIMPLE_SIEM_CSP_NONCE"
 )
 
 func TestSecurityHeaders(t *testing.T) {
-	const contentSecurityPolicy = "default-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
 	wantHeaders := map[string]string{
-		"Content-Security-Policy": contentSecurityPolicy,
-		"X-Content-Type-Options":  "nosniff",
-		"Referrer-Policy":         "same-origin",
+		"X-Content-Type-Options": "nosniff",
+		"Referrer-Policy":        "same-origin",
 	}
 
 	router, _ := newTestRouter(t, nil, nil, nil)
@@ -36,6 +38,55 @@ func TestSecurityHeaders(t *testing.T) {
 				if got := response.Header().Get(name); got != want {
 					t.Errorf("GET %s %s = %q, want %q", target, name, got, want)
 				}
+			}
+			policy := response.Header().Get("Content-Security-Policy")
+			if target == "/" {
+				pageNonceFromPolicy(t, policy)
+				return
+			}
+			if policy != baseContentSecurityPolicy {
+				t.Errorf("GET %s Content-Security-Policy = %q, want %q", target, policy, baseContentSecurityPolicy)
+			}
+		})
+	}
+}
+
+func TestPageResponsesCarryNonceInPolicyAndBody(t *testing.T) {
+	router, _ := newTestRouter(t, nil, nil, newNonceWebFiles())
+
+	for _, target := range []string{"/", "/cases"} {
+		t.Run(target, func(t *testing.T) {
+			response := get(router, target, "", nil)
+			nonce := pageNonceFromPolicy(t, response.Header().Get("Content-Security-Policy"))
+			body := response.Body.String()
+			if count := strings.Count(body, nonce); count != 3 {
+				t.Errorf("GET %s body contains the nonce %d times, want 3: %s", target, count, body)
+			}
+			if strings.Contains(body, cspNoncePlaceholder) {
+				t.Errorf("GET %s body still contains the nonce placeholder: %s", target, body)
+			}
+		})
+	}
+}
+
+func TestPageNonceChangesPerResponse(t *testing.T) {
+	router, _ := newTestRouter(t, nil, nil, newNonceWebFiles())
+
+	first := pageNonceFromPolicy(t, get(router, "/", "", nil).Header().Get("Content-Security-Policy"))
+	second := pageNonceFromPolicy(t, get(router, "/", "", nil).Header().Get("Content-Security-Policy"))
+	if first == second {
+		t.Errorf("two GET / responses share the nonce %q", first)
+	}
+}
+
+func TestNonPageResponsesKeepBasePolicy(t *testing.T) {
+	router, _ := newTestRouter(t, nil, nil, newNonceWebFiles())
+
+	for _, target := range []string{"/healthz", "/assets/app.js", "/api/v1/nope"} {
+		t.Run(target, func(t *testing.T) {
+			response := get(router, target, "", nil)
+			if got := response.Header().Get("Content-Security-Policy"); got != baseContentSecurityPolicy {
+				t.Errorf("GET %s Content-Security-Policy = %q, want exactly the base policy", target, got)
 			}
 		})
 	}
@@ -250,4 +301,25 @@ func newTestWebFiles() fstest.MapFS {
 		"assets/index-abc123.js": {Data: []byte(testAssetScript)},
 		"embed.go":               {Data: []byte("package web\n")},
 	}
+}
+
+func newNonceWebFiles() fstest.MapFS {
+	return fstest.MapFS{
+		"index.html": {
+			Data: []byte(`<!doctype html><html><head><meta property="csp-nonce" nonce="SIMPLE_SIEM_CSP_NONCE"><script type="module" nonce="SIMPLE_SIEM_CSP_NONCE" src="/assets/app.js"></script><link rel="stylesheet" nonce="SIMPLE_SIEM_CSP_NONCE" href="/assets/app.css"></head><body></body></html>`),
+		},
+		"assets/app.js": {Data: []byte(testAssetScript)},
+	}
+}
+
+// pageNonceFromPolicy returns the nonce from a page CSP and fails the test
+// when the header is not exactly the base policy plus the nonce directive.
+func pageNonceFromPolicy(t *testing.T, policy string) string {
+	t.Helper()
+	pattern := regexp.MustCompile("^" + regexp.QuoteMeta(baseContentSecurityPolicy) + `; style-src 'self' 'nonce-([A-Za-z0-9_-]{22})'$`)
+	matches := pattern.FindStringSubmatch(policy)
+	if matches == nil {
+		t.Fatalf("Content-Security-Policy = %q, want the base policy plus style-src 'self' 'nonce-<22 base64url characters>'", policy)
+	}
+	return matches[1]
 }

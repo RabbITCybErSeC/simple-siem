@@ -21,6 +21,12 @@ const (
 	codeInternalError = "INTERNAL_ERROR"
 )
 
+// pageContentSecurityPolicy adds the per-response style nonce to the policy
+// every page needs for run-time style elements.
+func pageContentSecurityPolicy(nonce string) string {
+	return contentSecurityPolicy + "; style-src 'self' 'nonce-" + nonce + "'"
+}
+
 func securityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Content-Security-Policy", contentSecurityPolicy)

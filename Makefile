@@ -53,6 +53,14 @@ endif
 
 DATABASE_URL := postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)?sslmode=disable
 
+E2E_DATABASE ?= simple_siem_e2e
+E2E_DATABASE_URL := postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(E2E_DATABASE)?sslmode=disable
+# The e2e image extends the per-worktree toolchain image that .env overrides,
+# so it is derived after the include above.
+E2E_IMAGE := $(TOOLCHAIN_IMAGE)-e2e
+E2E_STAMP := .make/e2e-$(CONTAINER).stamp
+PLAYWRIGHT_VERSION := $(shell sed -n 's/.*"@playwright\/test": "\([^"]*\)".*/\1/p' web/package.json)
+
 VERSION_PACKAGE := github.com/RabbITCybErSeC/simple-siem/internal/version
 # Apple Git ships with the Xcode command line tools that also provide make.
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -78,7 +86,7 @@ RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src -v $(GO_MOD_CACHE_VOLUME):/go/pkg/
 PNPM_ENV = --env PNPM_CONFIG_STORE_DIR=/pnpm-store --env PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy
 WEB_RUN = $(COMMON_RUN) -v $(CURDIR):/src -w /src/web -v $(PNPM_STORE_VOLUME):/pnpm-store -v $(NODE_MODULES_VOLUME):/src/web/node_modules $(PNPM_ENV)
 
-.PHONY: toolchain network postgres test lint build run dev db-shell image debug down clean pnpm shadcn-mcp
+.PHONY: toolchain network postgres test lint build e2e e2e-image run dev db-shell image debug down clean pnpm shadcn-mcp
 
 # The stamp alone misses an image deleted outside make, so check the image first.
 toolchain:
@@ -105,6 +113,16 @@ $(TOOLCHAIN_STAMP): Dockerfile
 	$(CONTAINER) build --target toolchain -t $(TOOLCHAIN_IMAGE) .
 	@touch $@
 
+# The stamp alone misses an image deleted outside make, so check the image first.
+e2e-image:
+	@$(CONTAINER) image inspect $(E2E_IMAGE) >/dev/null 2>&1 || rm -f $(E2E_STAMP)
+	@$(MAKE) --no-print-directory $(E2E_STAMP)
+
+$(E2E_STAMP): Dockerfile web/package.json
+	@mkdir -p $(dir $@)
+	$(CONTAINER) build --target e2e --build-arg PLAYWRIGHT_VERSION=$(PLAYWRIGHT_VERSION) -t $(E2E_IMAGE) .
+	@touch $@
+
 test: postgres toolchain web/node_modules
 	$(RUN) $(TOOLCHAIN_IMAGE) go test ./...
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm test'
@@ -116,6 +134,10 @@ lint: network toolchain web/node_modules
 build: network toolchain web/node_modules
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm build'
 	$(RUN) $(TOOLCHAIN_IMAGE) sh -c 'mkdir -p bin && go build -trimpath -ldflags "$(LDFLAGS)" -o bin/simple-siem ./cmd/simple-siem'
+
+e2e: postgres build e2e-image
+	$(CONTAINER) exec $(POSTGRES_CONTAINER) sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "DROP DATABASE IF EXISTS $(E2E_DATABASE) WITH (FORCE)" -c "CREATE DATABASE $(E2E_DATABASE)"'
+	$(WEB_RUN) --env SIMPLE_SIEM_DATABASE_URL=$(E2E_DATABASE_URL) --env SIMPLE_SIEM_LISTEN=127.0.0.1:8090 $(E2E_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm exec playwright test'
 
 run: build
 	$(RUN) $(TOOLCHAIN_IMAGE) ./bin/simple-siem $(ARGS)

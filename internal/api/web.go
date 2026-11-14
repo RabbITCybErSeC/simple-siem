@@ -1,6 +1,9 @@
 package api
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -13,6 +16,9 @@ const (
 	noCacheControl        = "no-cache"
 
 	codeNotFound = "NOT_FOUND"
+
+	cspNoncePlaceholder = "SIMPLE_SIEM_CSP_NONCE"
+	cspNonceBytes       = 16
 
 	frontendNotBuiltPage = `<!doctype html>
 <html lang="en">
@@ -72,5 +78,17 @@ func (web webHandler) page(c *gin.Context) {
 	}
 	c.Set(routeLabelKey, webRouteLabel)
 	c.Header("Cache-Control", noCacheControl)
-	c.Data(http.StatusOK, "text/html; charset=utf-8", web.indexHTML)
+	nonce := newCSPNonce()
+	c.Header("Content-Security-Policy", pageContentSecurityPolicy(nonce))
+	indexHTML := bytes.ReplaceAll(web.indexHTML, []byte(cspNoncePlaceholder), []byte(nonce))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+}
+
+// newCSPNonce returns 16 random bytes encoded as 22 base64url characters,
+// which need no escaping in HTML attributes or the CSP header.
+func newCSPNonce() string {
+	nonce := make([]byte, cspNonceBytes)
+	// crypto/rand.Read never returns an error since Go 1.24.
+	_, _ = rand.Read(nonce)
+	return base64.RawURLEncoding.EncodeToString(nonce)
 }

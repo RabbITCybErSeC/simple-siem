@@ -24,6 +24,7 @@ make dev        # PostgreSQL + API + Vite at http://127.0.0.1:5173
 make test       # Go and frontend tests against a real PostgreSQL
 make lint       # Go and frontend linters plus the TypeScript type check
 make build      # build the web UI, then embed it in bin/simple-siem
+make e2e        # browser tests (Playwright, axe) against the built binary
 make pnpm ARGS="add <package>"  # run pnpm in the web workspace
 make shadcn-mcp # shadcn registry MCP server on stdio
 make db-shell   # psql into the development database
