@@ -6,6 +6,8 @@ import type {
   LoginResponse,
   User,
 } from "../../src/api/types.ts";
+import type { CaseSummary } from "../../src/features/cases/types.ts";
+import { CaseFixtureRoutes } from "./cases.ts";
 
 const KNOWN_EMAIL = "analyst@example.test";
 const KNOWN_PASSWORD = "correct horse battery staple";
@@ -58,6 +60,7 @@ export class FixtureApi {
 
   readonly requests: string[] = [];
   readonly violations: string[] = [];
+  readonly cases = new CaseFixtureRoutes(this.violations);
 
   constructor(page: Page) {
     this.page = page;
@@ -81,6 +84,22 @@ export class FixtureApi {
 
   failLogout(): void {
     this.logoutFails = true;
+  }
+
+  addCase(partial: Partial<CaseSummary>): CaseSummary {
+    return this.cases.addCase(partial);
+  }
+
+  updateCase(id: string, partial: Partial<CaseSummary>): CaseSummary {
+    return this.cases.updateCase(id, partial);
+  }
+
+  setNow(date: Date): void {
+    this.cases.setNow(date);
+  }
+
+  caseRequests(): string[] {
+    return this.cases.caseRequests();
   }
 
   private async handle(route: Route): Promise<void> {
@@ -120,6 +139,15 @@ export class FixtureApi {
       } else {
         await this.respondJson(route, 401, AUTHENTICATION_REQUIRED);
       }
+      return;
+    }
+    if (path === "/api/v1/cases" || path.startsWith("/api/v1/cases/")) {
+      if (!this.signedIn) {
+        await this.respondJson(route, 401, AUTHENTICATION_REQUIRED);
+        return;
+      }
+      const url = new URL(request.url());
+      await this.cases.handle(route, path, url.searchParams);
       return;
     }
 
