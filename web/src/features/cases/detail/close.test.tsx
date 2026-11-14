@@ -277,6 +277,29 @@ describe("close case dialog", () => {
     expect(closeRequests(api)).toHaveLength(0);
   });
 
+  it("moves and selects the outcome with the arrow keys", async () => {
+    renderClose();
+    const dialog = await openCloseDialog();
+    const malicious = within(dialog).getByRole("radio", {
+      name: "Malicious",
+    });
+    malicious.focus();
+
+    fireEvent.keyDown(malicious, { key: "ArrowRight" });
+
+    await waitFor(() => {
+      expect(
+        within(dialog).getByRole("radio", { name: "Accepted" }),
+      ).toHaveAttribute("aria-checked", "true");
+    });
+    expect(
+      within(dialog).getByRole("radio", { name: "Accepted" }),
+    ).toHaveFocus();
+    expect(
+      within(dialog).getByRole("radio", { name: "Accepted" }),
+    ).toHaveFocus();
+  });
+
   it("offers the seven reasons, not Merged, and sends the chosen values", async () => {
     const { api } = renderClose({
       close: () => jsonResponse(makeDetail()),

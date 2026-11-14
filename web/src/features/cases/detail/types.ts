@@ -69,7 +69,8 @@ export interface TimelineEvidenceEntry {
   at: string;
   alertId: string;
   sourceId: string;
-  udm: Record<string, unknown>;
+  /** Null when the event has left the dataset cache. */
+  udm: Record<string, unknown> | null;
 }
 
 export interface TimelineActivityEntry {

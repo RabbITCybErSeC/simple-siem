@@ -142,6 +142,26 @@ describe("EventViewer", () => {
     ]);
   });
 
+  it("keeps the time, alert, and source id for an event no longer cached", () => {
+    const uncached: TimelineEvidenceEntry = {
+      ...ENTRY,
+      id: "tl_uncached",
+      at: LATER_AT,
+      sourceId: "evt-uncached",
+      udm: null,
+    };
+    const { container } = renderViewer([uncached]);
+    const row = rowAt(container, LATER_AT);
+
+    expect(
+      within(row).getByText("Event no longer cached"),
+    ).toBeInTheDocument();
+    expect(row).toHaveTextContent("alert_9");
+    expect(row).toHaveTextContent("evt-uncached");
+    expect(row.querySelector(`time[datetime="${LATER_AT}"]`)).not.toBeNull();
+    expect(within(row).queryAllByRole("button")).toHaveLength(0);
+  });
+
   it("expands and collapses rows and keeps expanded entries by id", () => {
     const later = entryAt("tl_2", LATER_AT, { metadata: { event_type: "DNS" } });
     const onCopy = vi.fn(async () => true);

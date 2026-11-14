@@ -257,6 +257,9 @@ test("renders case #7's markup value as text", async ({ page }) => {
   await expect(
     detail.getByRole("table", { name: "Evidence events" }).first(),
   ).toBeVisible();
+  await expect(
+    detail.getByText("Event no longer cached").first(),
+  ).toBeVisible();
 
   const value = detail
     .getByText("<img src=x onerror=alert(1)>", { exact: true })
@@ -301,7 +304,9 @@ test("closes a case by keyboard and shows the closed row after Show", async ({
     "id",
     "close-outcome-MALICIOUS",
   );
-  await dialog.getByRole("radio", { name: "Accepted" }).click();
+  await page.keyboard.down("ArrowRight");
+  await page.clock.runFor(1);
+  await page.keyboard.up("ArrowRight");
   await expect(
     dialog.getByRole("radio", { name: "Accepted" }),
   ).toHaveAttribute("aria-checked", "true");

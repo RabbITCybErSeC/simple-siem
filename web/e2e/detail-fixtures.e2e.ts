@@ -236,9 +236,14 @@ test("lists a case's alerts and timeline in ascending time", async ({
   const evidence = evidenceEntries(timeline.body.data);
   expect(evidence.length).toBeGreaterThanOrEqual(3);
   expect(evidence.length).toBeLessThanOrEqual(30);
+  let cachedCount = 0;
   for (const entry of evidence) {
     expect(alertIds.has(entry.alertId)).toBe(true);
     expect(entry.sourceId).not.toBe("");
+    if (entry.udm === null) {
+      continue;
+    }
+    cachedCount += 1;
     const udm = udmOf(entry);
     expect(udm.metadata.event_type).not.toBe("");
     expect(udm.metadata.event_timestamp).toBe(entry.at);
@@ -249,6 +254,7 @@ test("lists a case's alerts and timeline in ascending time", async ({
     expect(udm.target.hostname).not.toBe("");
     expect(udm.security_result[0]?.action).not.toBe("");
   }
+  expect(cachedCount).toBeGreaterThan(0);
 
   const activity = activityEntries(timeline.body.data);
   const actions = activity.map((entry) => entry.action);
@@ -293,7 +299,7 @@ test("keeps markup in a UDM value literal", async ({ page }) => {
   );
   expect(timeline.status).toBe(200);
   const markup = timeline.body.data.find((entry) => {
-    if (entry.kind !== "EVIDENCE") {
+    if (entry.kind !== "EVIDENCE" || entry.udm === null) {
       return false;
     }
     return udmOf(entry).principal.user.userid === MARKUP_USERID;

@@ -1162,16 +1162,20 @@ export class CaseFixtureRoutes {
     const last = Date.parse(item.lastEventAt);
     const span = Math.max(last - first, 1);
     const entries: TimelineEntry[] = [];
+    // The oldest evidence has left the dataset cache; case #7 keeps its
+    // first event cached because the markup-value test reads it.
+    const firstUncached = item.caseNumber === 7 ? 1 : 0;
     for (let index = 0; index < count; index += 1) {
       const at = first + Math.floor((span * (index + random())) / count);
       const alert = pick(alerts, random);
+      const uncached = index === firstUncached || index === firstUncached + 1;
       const entry: TimelineEvidenceEntry = {
         id: `tl_${item.caseNumber}_evt_${index + 1}`,
         kind: "EVIDENCE",
         at: iso(at),
         alertId: alert.id,
         sourceId: `evt-${item.caseNumber}-${index + 1}`,
-        udm: buildUdm(item.caseNumber, index + 1, at),
+        udm: uncached ? null : buildUdm(item.caseNumber, index + 1, at),
       };
       entries.push(entry);
     }

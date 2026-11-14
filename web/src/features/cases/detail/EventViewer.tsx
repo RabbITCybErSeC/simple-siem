@@ -143,6 +143,25 @@ function EvidenceRows({
   onToggleRaw,
   onCopy,
 }: EvidenceRowsProps) {
+  if (entry.udm === null) {
+    return (
+      <TableRow>
+        <TableCell>
+          <TimeCell value={entry.at} timeZone={timeZone} now={now} />
+        </TableCell>
+        <TableCell
+          colSpan={SUMMARY_COLUMNS.length}
+          className="whitespace-normal"
+        >
+          <span>Event no longer cached</span>
+          <span className="ml-2 font-mono text-xs text-muted-foreground">
+            {`alert ${entry.alertId}, source ${entry.sourceId}`}
+          </span>
+        </TableCell>
+      </TableRow>
+    );
+  }
+
   const detailId = `event-fields-${entry.id}`;
   const rawId = `${detailId}-raw`;
   const fields = flattenUdm(entry.udm);
@@ -254,7 +273,12 @@ function TimeCell({ value, timeZone, now }: TimeCellProps) {
   );
 }
 
-export function flattenUdm(udm: Record<string, unknown>): UdmField[] {
+export function flattenUdm(
+  udm: Record<string, unknown> | null,
+): UdmField[] {
+  if (udm === null) {
+    return [];
+  }
   const fields: UdmField[] = [];
   appendFields(udm, "", fields);
   return fields;
