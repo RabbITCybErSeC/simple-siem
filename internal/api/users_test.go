@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -381,6 +382,42 @@ func TestNonAdminCannotChangeAdminsOverHTTP(t *testing.T) {
 	}
 	assertNoStore(t, response)
 	assertErrorCode(t, response, "FORBIDDEN", "only an admin can change an admin")
+
+	response = sendJSONWithHeaders(router, http.MethodPost, "/api/v1/users", bearer(token), `{
+		"email":"new-admin@example.com","displayName":"New Admin","roles":["ADMIN"]
+	}`)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("helpdesk creating an admin = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "only an admin can change an admin")
+
+	if _, err := service.AssignRole(context.Background(), admin, apiTestClient(), admin.UserID, "ANALYST"); err != nil {
+		t.Fatalf("AssignRole(ANALYST) by an admin: %v", err)
+	}
+	response = sendJSONWithHeaders(
+		router, http.MethodPost, "/api/v1/users/"+admin.UserID+"/roles", bearer(token), `{"role":"READ_ONLY"}`,
+	)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("helpdesk assigning READ_ONLY to an admin = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "only an admin can change an admin")
+
+	response = send(router, http.MethodDelete, "/api/v1/users/"+admin.UserID+"/roles/ANALYST", "", bearer(token))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("helpdesk removing ANALYST from an admin = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "only an admin can change an admin")
+
+	updated, err := service.GetUser(context.Background(), admin.UserID)
+	if err != nil {
+		t.Fatalf("GetUser(admin): %v", err)
+	}
+	if !slices.Contains(updated.Roles, "ANALYST") || slices.Contains(updated.Roles, "READ_ONLY") {
+		t.Errorf("admin roles after the refusals = %v, want ANALYST without READ_ONLY", updated.Roles)
+	}
 }
 
 // apiInsertHelpdeskRole adds a custom role with user administration

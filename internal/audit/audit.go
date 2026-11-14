@@ -17,8 +17,13 @@ import (
 
 const (
 	redactedValue = "[REDACTED]"
-	maxPage       = 100000
+	// MaxPage is the highest page number the list endpoints accept.
+	MaxPage = 100000
 )
+
+// ErrInvalidPage is returned when a list request asks for a page outside
+// 1 to MaxPage.
+var ErrInvalidPage = errors.New("page is out of range")
 
 var sensitiveKeyParts = []string{
 	"api_key",
@@ -124,8 +129,11 @@ func (stored storedEvent) event() Event {
 // List returns one page of events, newest first, and the total that match.
 // shortcut: page-based with count(*); switch to keyset pagination when audit_events passes a few million rows (Phase 7 measurement).
 func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) ([]Event, int64, error) {
-	if page < 1 || page > maxPage || pageSize < 1 {
-		return nil, 0, fmt.Errorf("list audit events: page must be 1 to %d and pageSize at least 1", maxPage)
+	if page < 1 || page > MaxPage {
+		return nil, 0, ErrInvalidPage
+	}
+	if pageSize < 1 {
+		return nil, 0, errors.New("list audit events: pageSize must be at least 1")
 	}
 
 	query := db.WithContext(ctx).Model(&Event{})

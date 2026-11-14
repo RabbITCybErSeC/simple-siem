@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"gorm.io/gorm"
 )
 
@@ -139,8 +140,11 @@ func TestListUsers(t *testing.T) {
 		t.Errorf("ListUsers with status SERVICE = %v, want ErrInvalidStatus", err)
 	}
 
-	if _, _, err := test.service.ListUsers(context.Background(), UserFilter{Page: 100001, PageSize: 10}); err == nil {
-		t.Error("ListUsers with page 100001 = nil error, want an error")
+	if _, _, err := test.service.ListUsers(context.Background(), UserFilter{Page: 100001, PageSize: 10}); !errors.Is(err, audit.ErrInvalidPage) {
+		t.Errorf("ListUsers with page 100001 = %v, want audit.ErrInvalidPage", err)
+	}
+	if _, _, err := test.service.ListUsers(context.Background(), UserFilter{Page: 0, PageSize: 10}); !errors.Is(err, audit.ErrInvalidPage) {
+		t.Errorf("ListUsers with page 0 = %v, want audit.ErrInvalidPage", err)
 	}
 }
 
@@ -152,7 +156,7 @@ func TestListUsersRoles(t *testing.T) {
 		Email: "bob@example.com", DisplayName: "Bob", Roles: []string{"READ_ONLY", "ANALYST"},
 	})
 
-	users, _, err := test.service.ListUsers(context.Background(), UserFilter{Status: "INVITED"})
+	users, _, err := test.service.ListUsers(context.Background(), UserFilter{Status: "INVITED", Page: 1})
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
@@ -167,7 +171,7 @@ func TestListUsersRoles(t *testing.T) {
 		t.Errorf("ListUsers roles = %v, want [ANALYST READ_ONLY]", got.Roles)
 	}
 
-	empty, total, err := test.service.ListUsers(context.Background(), UserFilter{Status: "DISABLED"})
+	empty, total, err := test.service.ListUsers(context.Background(), UserFilter{Status: "DISABLED", Page: 1})
 	if err != nil {
 		t.Fatalf("ListUsers DISABLED: %v", err)
 	}
@@ -1863,5 +1867,91 @@ func TestNonAdminCannotChangeAdmins(t *testing.T) {
 		if events := eventsNamed(t, test.database, targetID, name); len(events) != 0 {
 			t.Errorf("a refused %s wrote %d audit events, want 0", name, len(events))
 		}
+	}
+}
+
+func TestNonAdminCannotGrantAdminOrChangeAdminRoles(t *testing.T) {
+	test := newTestService(t)
+	insertHelpdeskRole(t, test.database)
+	admin := test.createAdmin(t, testEmail)
+	adminActor := testActorFor(admin)
+	helpdesk := createUser(t, test.service, adminActor, CreateUserRequest{
+		Email: "helpdesk@example.com", DisplayName: "Help Desk", Roles: []string{"HELPDESK"},
+	})
+	actor := testActorFor(helpdesk.User)
+	actor.Roles = []string{"HELPDESK"}
+	ctx := context.Background()
+
+	if _, err := test.service.CreateUser(ctx, actor, testClient(), CreateUserRequest{
+		Email: "new-admin@example.com", DisplayName: "New Admin", Roles: []string{RoleAdmin},
+	}); !errors.Is(err, ErrForbidden) {
+		t.Errorf("CreateUser with ADMIN by a non-admin = %v, want ErrForbidden", err)
+	}
+	var created int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM users WHERE email = ?", "new-admin@example.com",
+	).Scan(&created).Error; err != nil {
+		t.Fatalf("count the refused admin: %v", err)
+	}
+	if created != 0 {
+		t.Errorf("the refused admin user exists, want no row")
+	}
+
+	createUser(t, test.service, adminActor, CreateUserRequest{
+		Email: "second-admin@example.com", DisplayName: "Second Admin", Roles: []string{RoleAdmin},
+	})
+
+	if _, err := test.service.AssignRole(ctx, adminActor, testClient(), admin.ID, "ANALYST"); err != nil {
+		t.Fatalf("AssignRole(ANALYST) by an admin: %v", err)
+	}
+	if _, err := test.service.AssignRole(ctx, actor, testClient(), admin.ID, "READ_ONLY"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("AssignRole(READ_ONLY) on an admin by a non-admin = %v, want ErrForbidden", err)
+	}
+	if _, err := test.service.RemoveRole(ctx, actor, testClient(), admin.ID, "ANALYST"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("RemoveRole(ANALYST) on an admin by a non-admin = %v, want ErrForbidden", err)
+	}
+	updated, err := test.service.GetUser(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("GetUser(admin): %v", err)
+	}
+	if !slices.Contains(updated.Roles, "ANALYST") || slices.Contains(updated.Roles, "READ_ONLY") {
+		t.Errorf("admin roles after the refusals = %v, want ANALYST without READ_ONLY", updated.Roles)
+	}
+}
+
+func TestAssignAdminVoidsResetTokens(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+	target := createUser(t, test.service, actor, CreateUserRequest{
+		Email: "target@example.com", DisplayName: "Target",
+	})
+	token, _, err := test.service.CreateResetToken(
+		context.Background(), actor, testClient(), target.User.ID,
+	)
+	if err != nil {
+		t.Fatalf("CreateResetToken: %v", err)
+	}
+
+	if _, err := test.service.AssignRole(
+		context.Background(), actor, testClient(), target.User.ID, RoleAdmin,
+	); err != nil {
+		t.Fatalf("AssignRole(ADMIN): %v", err)
+	}
+
+	var unused int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL",
+		target.User.ID,
+	).Scan(&unused).Error; err != nil {
+		t.Fatalf("count reset tokens: %v", err)
+	}
+	if unused != 0 {
+		t.Errorf("unused reset tokens after promotion = %d, want 0", unused)
+	}
+	if err := test.service.UseResetToken(
+		context.Background(), token, testNewPassword, testClient(),
+	); !errors.Is(err, ErrInvalidResetToken) {
+		t.Errorf("UseResetToken after promotion = %v, want ErrInvalidResetToken", err)
 	}
 }

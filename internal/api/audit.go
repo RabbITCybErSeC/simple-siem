@@ -60,6 +60,10 @@ func (events auditHandler) list(c *gin.Context) {
 		CreatedBefore: createdBefore,
 	}, page, pageSize)
 	if err != nil {
+		if errors.Is(err, audit.ErrInvalidPage) {
+			invalidParameter(c, "page")
+			return
+		}
 		internalError(c, events.logger, err)
 		return
 	}

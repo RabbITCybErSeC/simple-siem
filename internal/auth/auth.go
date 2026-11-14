@@ -672,6 +672,13 @@ func (service *Service) startSession(ctx context.Context, user User, identity Ex
 	var roles []string
 	credentialRejected := false
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Take the user row first, then the identity, the same order as the
+		// reset-token paths. NO KEY UPDATE still serializes the writers but
+		// does not block the foreign-key check of the session below.
+		if _, err := loadUserForNoKeyUpdate(tx, user.ID); err != nil {
+			return err
+		}
+
 		var lockedIdentity struct {
 			Version *int `gorm:"column:version"`
 		}

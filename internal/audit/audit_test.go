@@ -814,19 +814,23 @@ func TestListRejectsInvalidPagination(t *testing.T) {
 		name     string
 		page     int
 		pageSize int
+		wantErr  error
 	}{
-		{"page zero", 0, 50},
-		{"page negative", -1, 50},
-		{"page over the maximum", 100001, 50},
-		{"maximum integer page", 9223372036854775807, 50},
-		{"page size zero", 1, 0},
-		{"page size negative", 1, -1},
+		{"page zero", 0, 50, audit.ErrInvalidPage},
+		{"page negative", -1, 50, audit.ErrInvalidPage},
+		{"page over the maximum", 100001, 50, audit.ErrInvalidPage},
+		{"maximum integer page", 9223372036854775807, 50, audit.ErrInvalidPage},
+		{"page size zero", 1, 0, nil},
+		{"page size negative", 1, -1, nil},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			events, total, err := audit.List(context.Background(), db, audit.Filter{}, testCase.page, testCase.pageSize)
 			if err == nil {
 				t.Fatal("List accepted invalid pagination")
+			}
+			if testCase.wantErr != nil && !errors.Is(err, testCase.wantErr) {
+				t.Errorf("List error = %v, want %v", err, testCase.wantErr)
 			}
 			if events != nil {
 				t.Errorf("List returned %d events with invalid pagination, want none", len(events))

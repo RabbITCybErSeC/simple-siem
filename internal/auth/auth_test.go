@@ -1536,7 +1536,7 @@ func TestLoginRejectsIdentityDeletedBeforeSession(t *testing.T) {
 		loginResult <- err
 	}()
 
-	waitForLoginLockWait(t, test.database)
+	waitForLockWaits(t, test.database, 1)
 	close(releaseDelete)
 	if err := <-deleteResult; err != nil {
 		t.Fatalf("delete identity: %v", err)
@@ -1565,23 +1565,129 @@ func TestLoginRejectsIdentityDeletedBeforeSession(t *testing.T) {
 	}
 }
 
-func waitForLoginLockWait(t *testing.T, db *gorm.DB) {
+func waitForLockWaits(t *testing.T, db *gorm.DB, want int64) {
 	t.Helper()
+	var waiting int64
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var waiting int64
 		err := db.Raw(`
 			SELECT count(*) FROM pg_stat_activity
 			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting).Error
 		if err != nil {
 			t.Fatalf("read postgres activity: %v", err)
 		}
-		if waiting > 0 {
+		if waiting >= want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("login did not wait on the identity lock")
+	t.Fatalf("%d sessions waited on a lock, want %d", waiting, want)
+}
+
+// TestConcurrentLoginAndResetTokenUse races a login with the redemption of a
+// reset token for the same user. Both take the user row lock first, so they
+// serialize instead of deadlocking on the identity row.
+func TestConcurrentLoginAndResetTokenUse(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+
+	// The real hash runs before UseResetToken opens its transaction, so a fast
+	// hash keeps both calls in the lock race; Login uses a fixed provider and
+	// never verifies this hash.
+	original := hashPasswordFunction
+	hashPasswordFunction = func(context.Context, string) (string, error) {
+		return "test-password-hash", nil
+	}
+	t.Cleanup(func() { hashPasswordFunction = original })
+
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
+		email := fmt.Sprintf("login%02d@example.com", round)
+		user := test.createAdmin(t, email)
+
+		var identity Identity
+		if err := test.database.Where(
+			"user_id = ? AND provider = ?", user.ID, ProviderLocal,
+		).First(&identity).Error; err != nil {
+			t.Fatalf("round %d: read identity: %v", round, err)
+		}
+		test.service.provider = fixedProvider{identity: ExternalIdentity{
+			Provider:          ProviderLocal,
+			Subject:           user.ID,
+			CredentialVersion: identity.Version,
+		}}
+
+		token, _, err := test.service.CreateResetToken(
+			context.Background(), actor, testClient(), user.ID,
+		)
+		if err != nil {
+			t.Fatalf("round %d: CreateResetToken: %v", round, err)
+		}
+
+		// Hold the identity row so Login queues on it before UseResetToken
+		// reaches it. Releasing it then leaves each call waiting for a row
+		// lock the other holds, which is the inversion this test guards
+		// against.
+		identityLocked := make(chan struct{})
+		releaseIdentity := make(chan struct{})
+		lockResult := make(chan error, 1)
+		go func() {
+			lockResult <- test.database.WithContext(context.Background()).Transaction(
+				func(tx *gorm.DB) error {
+					if err := tx.Exec(
+						"SELECT id FROM user_identities WHERE id = ? FOR UPDATE", identity.ID,
+					).Error; err != nil {
+						return err
+					}
+					close(identityLocked)
+					<-releaseIdentity
+					return nil
+				},
+			)
+		}()
+		<-identityLocked
+
+		var wait sync.WaitGroup
+		var loginErr, resetErr error
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			_, loginErr = test.service.Login(
+				context.Background(),
+				LoginRequest{Email: email, Password: testPassword},
+				testClient(),
+			)
+		}()
+		waitForLockWaits(t, test.database, 1)
+		go func() {
+			defer wait.Done()
+			resetErr = test.service.UseResetToken(
+				context.Background(), token, testNewPassword, testClient(),
+			)
+		}()
+		waitForLockWaits(t, test.database, 2)
+		close(releaseIdentity)
+		if err := <-lockResult; err != nil {
+			t.Fatalf("round %d: release the identity lock: %v", round, err)
+		}
+		wait.Wait()
+
+		if resetErr != nil {
+			t.Fatalf("round %d: UseResetToken = %v, want nil", round, resetErr)
+		}
+		for _, callErr := range []error{loginErr, resetErr} {
+			if callErr == nil {
+				continue
+			}
+			if strings.Contains(strings.ToLower(callErr.Error()), "deadlock") {
+				t.Fatalf("round %d: %v", round, callErr)
+			}
+			if !errors.Is(callErr, ErrInvalidCredentials) {
+				t.Fatalf("round %d: unexpected error %v", round, callErr)
+			}
+		}
+	}
 }
 
 func TestLoginDiscardsAttemptOnProviderError(t *testing.T) {

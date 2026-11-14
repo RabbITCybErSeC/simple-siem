@@ -22,6 +22,8 @@ const (
 	browserHeader           = "X-Requested-With"
 	browserHeaderValue      = "simple-siem"
 
+	permissionDenialTimeout = 5 * time.Second
+
 	credentialKey    = "credential"
 	credentialCookie = "cookie"
 	credentialBearer = "bearer"
@@ -246,10 +248,14 @@ func requirePermission(service *auth.Service, logger *slog.Logger, permissions .
 			if actor.Can(permission) {
 				continue
 			}
+			// The client can cancel its request; the denial must still be
+			// recorded, but not indefinitely.
+			denialContext, cancel := context.WithTimeout(
+				context.WithoutCancel(c.Request.Context()), permissionDenialTimeout,
+			)
+			defer cancel()
 			err := service.RecordPermissionDenied(
-				// The client can cancel its request; the denial must still be
-				// recorded.
-				context.WithoutCancel(c.Request.Context()),
+				denialContext,
 				actor, clientInfo(c), c.FullPath(), c.Request.Method, permissions,
 			)
 			if err != nil {

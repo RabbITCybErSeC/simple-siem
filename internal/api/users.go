@@ -17,8 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const maxPage = 100000
-
 // userHandler serves the user, role, and password-reset routes.
 type userHandler struct {
 	service *auth.Service
@@ -273,7 +271,7 @@ func parsePagination(c *gin.Context, query url.Values, maxPageSize int) (int, in
 	page := 1
 	if raw := query.Get("page"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > maxPage {
+		if err != nil || parsed < 1 || parsed > audit.MaxPage {
 			invalidParameter(c, "page")
 			return 0, 0, false
 		}
@@ -346,6 +344,8 @@ func writeUserError(c *gin.Context, logger *slog.Logger, err error) {
 		writeError(c, http.StatusConflict, codeStateConflict, "email already in use")
 	case errors.Is(err, auth.ErrForbidden):
 		writeError(c, http.StatusForbidden, codeForbidden, auth.ErrForbidden.Error())
+	case errors.Is(err, audit.ErrInvalidPage):
+		invalidParameter(c, "page")
 	case errors.Is(err, auth.ErrUnknownRole), errors.Is(err, auth.ErrInvalidEmail),
 		errors.Is(err, auth.ErrInvalidDisplayName), errors.Is(err, auth.ErrPasswordLength),
 		errors.Is(err, auth.ErrInvalidStatus):
