@@ -1,0 +1,42 @@
+{
+  "outcome": "CONVERTED",
+  "event": {
+    "metadata": {
+      "event_timestamp": "2026-05-11T10:01:00Z",
+      "event_type": "USER_LOGIN",
+      "ingested_timestamp": "2026-05-11T10:01:04Z",
+      "vendor_name": "OpenSSH",
+      "product_name": "sshd",
+      "product_event_type": "ssh_login"
+    },
+    "principal": {
+      "ip": [
+        "203.0.113.7"
+      ],
+      "port": 52114
+    },
+    "target": {
+      "hostname": "web01",
+      "user": {
+        "userid": "alice"
+      },
+      "application": "sshd"
+    },
+    "network": {
+      "application_protocol": "SSH"
+    },
+    "extensions": {
+      "auth": {
+        "mechanism": "USERNAME_PASSWORD"
+      }
+    },
+    "security_result": {
+      "action": "ALLOW"
+    },
+    "additional": {
+      "source_country": "US"
+    }
+  },
+  "mapping_id": "ecs-ssh-login",
+  "mapping_version": 1
+}

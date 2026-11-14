@@ -1,0 +1,35 @@
+{
+  "outcome": "CONVERTED",
+  "event": {
+    "metadata": {
+      "event_timestamp": "2026-05-11T10:03:00Z",
+      "event_type": "USER_LOGIN",
+      "ingested_timestamp": "2026-05-11T10:03:03Z",
+      "vendor_name": "Microsoft",
+      "product_name": "Windows",
+      "product_event_type": "4624",
+      "product_log_id": "918274"
+    },
+    "target": {
+      "hostname": "dc01",
+      "user": {
+        "userid": "bob",
+        "windows_sid": "S-1-0-0"
+      }
+    },
+    "extensions": {
+      "auth": {
+        "mechanism": "REMOTE_INTERACTIVE"
+      }
+    },
+    "security_result": {
+      "action": "ALLOW"
+    },
+    "additional": {
+      "logon_type": "10",
+      "target_domain": "CORP"
+    }
+  },
+  "mapping_id": "ecs-windows-logon",
+  "mapping_version": 1
+}
