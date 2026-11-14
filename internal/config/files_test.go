@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ var validSecrets = map[string]string{
 	"ELASTIC_PROD_CA":      "prod-ca",
 	"ELASTIC_EDR_USERNAME": "edr-user",
 	"ELASTIC_EDR_PASSWORD": "edr-password",
+	"ELASTIC_DEV_API_KEY":  "dev-api-key",
 }
 
 func getenv(values map[string]string) func(string) string {
@@ -148,6 +150,27 @@ func TestLoadFiles(t *testing.T) {
 			},
 			wantErrors: []string{"system.yaml", "scheduler", "unknown field"},
 		},
+		{
+			name: "missing system file does not cascade",
+			files: map[string]string{
+				"fetchers.yaml":       pipelineFetchers,
+				"pipelines/auth.yaml": minimalPipeline,
+				"mappings/auth.yaml":  "id: auth\n",
+			},
+			wantErrors:       []string{"system.yaml", "required"},
+			wantNoErrorTexts: []string{"allowed_lateness"},
+		},
+		{
+			name: "system decode error does not cascade",
+			files: map[string]string{
+				"system.yaml":         minimalSystem + "scheduler: {}\n",
+				"fetchers.yaml":       pipelineFetchers,
+				"pipelines/auth.yaml": minimalPipeline,
+				"mappings/auth.yaml":  "id: auth\n",
+			},
+			wantErrors:       []string{"system.yaml", "unknown field"},
+			wantNoErrorTexts: []string{"allowed_lateness"},
+		},
 	}
 
 	for _, test := range tests {
@@ -182,6 +205,47 @@ func TestLoadFiles(t *testing.T) {
 				test.check(t, files)
 			}
 		})
+	}
+}
+
+func TestLoadFilesRejectsFIFO(t *testing.T) {
+	directory := writeConfig(t, map[string]string{
+		"system.yaml":   minimalSystem,
+		"fetchers.yaml": emptyFetchers,
+	})
+	fifo := filepath.Join(directory, "pipelines", "fifo.yaml")
+	if err := os.MkdirAll(filepath.Dir(fifo), 0o755); err != nil {
+		t.Fatalf("create pipelines directory: %v", err)
+	}
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("create FIFO: %v", err)
+	}
+
+	type loaded struct {
+		files Files
+		err   error
+	}
+	result := make(chan loaded, 1)
+	go func() {
+		files, err := LoadFiles(directory, EnvironmentDevelopment, getenv(validSecrets))
+		result <- loaded{files: files, err: err}
+	}()
+
+	select {
+	case got := <-result:
+		if got.err == nil {
+			t.Fatal("LoadFiles() error = nil, want an error for a FIFO pipeline file")
+		}
+		for _, wantError := range []string{"pipelines/fifo.yaml", "regular file"} {
+			if !strings.Contains(got.err.Error(), wantError) {
+				t.Errorf("LoadFiles() error = %v, want an error containing %q", got.err, wantError)
+			}
+		}
+		if !reflect.DeepEqual(got.files, Files{}) {
+			t.Errorf("LoadFiles() = %+v, want the zero Files", got.files)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("LoadFiles blocked on a FIFO")
 	}
 }
 
@@ -740,6 +804,44 @@ func TestFetcherInstances(t *testing.T) {
 			wantErrors: []string{"auth"},
 		},
 		{
+			name: "password without username",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      password: ${secret:ELASTIC_DEV_PASSWORD}
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"auth", "exactly one"},
+		},
+		{
+			name: "api key with username",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+      username: ${secret:ELASTIC_DEV_USERNAME}
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"auth", "exactly one"},
+		},
+		{
+			name: "api key with password",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+      password: ${secret:ELASTIC_DEV_PASSWORD}
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"auth", "exactly one"},
+		},
+		{
 			name: "missing index allowlist",
 			fetchers: `fetchers:
   elastic-dev:
@@ -803,6 +905,70 @@ func TestFetcherInstances(t *testing.T) {
     allowed_indexes: [auth-*]
 `,
 			wantErrors: []string{"defaults.index", "edr-*"},
+		},
+		{
+			name: "default index with a comma",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      index: auth-x,secret-*
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.index", "invalid index pattern"},
+		},
+		{
+			name: "default index with a cross-cluster reference",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      index: auth-x,remote:edr-*
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"defaults.index", "invalid index pattern"},
+		},
+		{
+			name: "match-everything allowlist with two wildcards",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    allowed_indexes: ["**"]
+`,
+			wantErrors: []string{"allowed_indexes[0]", "invalid index pattern"},
+		},
+		{
+			name: "match-everything allowlist with wildcards and hyphens",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    allowed_indexes: ["*-*"]
+`,
+			wantErrors: []string{"allowed_indexes[0]", "invalid index pattern"},
+		},
+		{
+			name: "match-everything allowlist with wildcards and dots",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    allowed_indexes: ["*.*"]
+`,
+			wantErrors: []string{"allowed_indexes[0]", "invalid index pattern"},
 		},
 		{
 			name: "timeout above the maximum",
@@ -1251,6 +1417,16 @@ outputs:
 			wantErrors: []string{"fetchers[0].inputs.index", "edr-*", "elastic-prod"},
 		},
 		{
+			name:       "step index with a comma",
+			pipeline:   strings.ReplaceAll(minimalPipeline, "index: auth-*", "index: auth-x,secret-*"),
+			wantErrors: []string{"fetchers[0].inputs.index", "invalid index pattern"},
+		},
+		{
+			name:       "step index with a cross-cluster reference",
+			pipeline:   strings.ReplaceAll(minimalPipeline, "index: auth-*", "index: auth-x,remote:edr-*"),
+			wantErrors: []string{"fetchers[0].inputs.index", "invalid index pattern"},
+		},
+		{
 			name:       "mapping escapes the config directory",
 			pipeline:   strings.ReplaceAll(minimalPipeline, "mappings/auth.yaml", "../secrets.yaml"),
 			wantErrors: []string{"processors[0].mappings[0]", "inside the config directory"},
@@ -1280,6 +1456,21 @@ outputs:
 			name:       "missing mapping file",
 			pipeline:   strings.ReplaceAll(minimalPipeline, "mappings/auth.yaml", "mappings/missing.yaml"),
 			wantErrors: []string{"processors[0].mappings[0]", "missing.yaml"},
+		},
+		{
+			name: "mapping is a FIFO",
+			prepare: func(t *testing.T) string {
+				directory := pipelineConfig(t, map[string]string{"auth.yaml": minimalPipeline})
+				mapping := filepath.Join(directory, "mappings", "auth.yaml")
+				if err := os.Remove(mapping); err != nil {
+					t.Fatalf("remove mapping: %v", err)
+				}
+				if err := syscall.Mkfifo(mapping, 0o600); err != nil {
+					t.Fatalf("create mapping FIFO: %v", err)
+				}
+				return directory
+			},
+			wantErrors: []string{"processors[0].mappings[0]", "regular file"},
 		},
 		{
 			name:       "processor reads an unknown step",
@@ -1510,6 +1701,27 @@ outputs: {}
 				return directory
 			},
 		},
+		{
+			name: "yml pipeline file",
+			prepare: func(t *testing.T) string {
+				return pipelineConfig(t, map[string]string{"auth.yml": minimalPipeline})
+			},
+			wantErrors: []string{"pipelines/auth.yml", ".yaml"},
+		},
+		{
+			name: "uppercase yaml pipeline file",
+			prepare: func(t *testing.T) string {
+				return pipelineConfig(t, map[string]string{"auth.YAML": minimalPipeline})
+			},
+			wantErrors: []string{"pipelines/auth.YAML", ".yaml"},
+		},
+		{
+			name: "mixed-case yaml pipeline file",
+			prepare: func(t *testing.T) string {
+				return pipelineConfig(t, map[string]string{"auth.Yaml": minimalPipeline})
+			},
+			wantErrors: []string{"pipelines/auth.Yaml", ".yaml"},
+		},
 	}
 
 	for _, test := range tests {
@@ -1633,6 +1845,14 @@ func TestResolveVariables(t *testing.T) {
 			},
 			overrides: map[string]string{"since": "2026-11-14T10:00:00+02:00"},
 			want:      map[string]string{"since": "2026-11-14T08:00:00Z"},
+		},
+		{
+			name: "timestamp keeps sub-second precision",
+			variables: map[string]Variable{
+				"since": {Type: "timestamp"},
+			},
+			overrides: map[string]string{"since": "2026-01-01T00:00:00.750Z"},
+			want:      map[string]string{"since": "2026-01-01T00:00:00.75Z"},
 		},
 		{
 			name: "string is unchanged",

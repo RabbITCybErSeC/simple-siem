@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"net/url"
@@ -56,7 +57,7 @@ var (
 func LoadFiles(directory string, environment Environment, getenv func(string) string) (Files, error) {
 	var problems []error
 
-	system, systemProblems := loadSystem(directory)
+	system, systemLoaded, systemProblems := loadSystem(directory)
 	problems = append(problems, systemProblems...)
 
 	fetchers, fetcherProblems := loadFetchers(directory)
@@ -68,7 +69,7 @@ func LoadFiles(directory string, environment Environment, getenv func(string) st
 	problems = append(problems, checkSecrets(fetchers, getenv)...)
 	problems = append(problems, checkSecretPlacement(fetchers, pipelines)...)
 	problems = append(problems, validateFetchers(fetchers, environment)...)
-	problems = append(problems, validatePipelines(directory, pipelines, system, fetchers)...)
+	problems = append(problems, validatePipelines(directory, pipelines, system, fetchers, systemLoaded)...)
 
 	if err := errors.Join(problems...); err != nil {
 		return Files{}, err
@@ -82,33 +83,15 @@ func LoadFiles(directory string, environment Environment, getenv func(string) st
 	}, nil
 }
 
-// systemFile, fetcherFile and pipelineFile mirror the YAML shapes so optional
-// values keep their presence before defaults are applied.
-type systemFile struct {
-	Version string `yaml:"version"`
-	Stores  struct {
-		DatasetCache struct {
-			Type                   string    `yaml:"type"`
-			DefaultRetention       *Duration `yaml:"default_retention"`
-			DefaultAllowedLateness *Duration `yaml:"default_allowed_lateness"`
-		} `yaml:"dataset_cache"`
-	} `yaml:"stores"`
-	Secrets SecretsSettings `yaml:"secrets"`
-	Runner  struct {
-		BatchSize          *int     `yaml:"batch_size"`
-		MaxQuarantineRatio *float64 `yaml:"max_quarantine_ratio"`
-	} `yaml:"runner"`
-}
-
-func loadSystem(directory string) (System, []error) {
+func loadSystem(directory string) (System, bool, []error) {
 	data, err := readConfigFile(directory, "system.yaml")
 	if err != nil {
-		return System{}, []error{err}
+		return System{}, false, []error{err}
 	}
 
 	var file systemFile
 	if err := decodeStrict(data, &file); err != nil {
-		return System{}, []error{fmt.Errorf("system.yaml: %w", err)}
+		return System{}, false, []error{fmt.Errorf("system.yaml: %w", err)}
 	}
 
 	system := System{
@@ -178,21 +161,7 @@ func loadSystem(directory string) (System, []error) {
 		}
 	}
 
-	return system, problems
-}
-
-type fetcherFile struct {
-	Type      string      `yaml:"type"`
-	Addresses []string    `yaml:"addresses"`
-	Auth      FetcherAuth `yaml:"auth"`
-	TLS       FetcherTLS  `yaml:"tls"`
-	Defaults  struct {
-		Index      string    `yaml:"index"`
-		Timeout    *Duration `yaml:"timeout"`
-		MaxResults *int      `yaml:"max_results"`
-		TimeField  string    `yaml:"time_field"`
-	} `yaml:"defaults"`
-	AllowedIndexes []string `yaml:"allowed_indexes"`
+	return system, true, problems
 }
 
 func loadFetchers(directory string) (map[string]FetcherInstance, []error) {
@@ -244,20 +213,6 @@ func loadFetchers(directory string) (map[string]FetcherInstance, []error) {
 	return fetchers, problems
 }
 
-type pipelineFile struct {
-	ID       string `yaml:"id"`
-	Version  string `yaml:"version"`
-	Schedule struct {
-		Every         *Duration `yaml:"every"`
-		Timeout       *Duration `yaml:"timeout"`
-		OverlapPolicy string    `yaml:"overlap_policy"`
-	} `yaml:"schedule"`
-	Variables  map[string]Variable `yaml:"variables"`
-	Fetchers   []FetcherStep       `yaml:"fetchers"`
-	Processors []Processor         `yaml:"processors"`
-	Outputs    map[string]Output   `yaml:"outputs"`
-}
-
 func loadPipelines(directory string) ([]Pipeline, []error) {
 	entries, err := os.ReadDir(filepath.Join(directory, "pipelines"))
 	if err != nil {
@@ -270,10 +225,24 @@ func loadPipelines(directory string) ([]Pipeline, []error) {
 	var pipelines []Pipeline
 	var problems []error
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
+		if entry.IsDir() {
 			continue
 		}
 		name := filepath.Join("pipelines", entry.Name())
+		extension := filepath.Ext(entry.Name())
+		switch strings.ToLower(extension) {
+		case ".yml":
+			problems = append(problems, fileError(name, "extension", "pipeline files must use the .yaml extension"))
+			continue
+		case ".yaml":
+			if extension != ".yaml" {
+				problems = append(problems, fileError(name, "extension", "pipeline files must use the .yaml extension"))
+				continue
+			}
+		default:
+			continue
+		}
+
 		data, err := readConfigFile(directory, name)
 		if err != nil {
 			problems = append(problems, err)
@@ -362,8 +331,11 @@ func validateFetchers(fetchers map[string]FetcherInstance, environment Environme
 		}
 
 		hasAPIKey := instance.Auth.APIKey != nil
-		hasBasicAuth := instance.Auth.Username != nil && instance.Auth.Password != nil
-		if hasAPIKey == hasBasicAuth {
+		hasUsername := instance.Auth.Username != nil
+		hasPassword := instance.Auth.Password != nil
+		mixedAuth := hasAPIKey && (hasUsername || hasPassword)
+		incompleteBasicAuth := !hasAPIKey && (!hasUsername || !hasPassword)
+		if mixedAuth || incompleteBasicAuth {
 			problems = append(problems, fileError("fetchers.yaml", prefix+"auth",
 				"exactly one of api_key or username and password is required"))
 		}
@@ -391,9 +363,14 @@ func validateFetchers(fetchers map[string]FetcherInstance, environment Environme
 			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.max_results",
 				fmt.Sprintf("must be between %d and %d", minFetcherMaxResults, maxFetcherMaxResults)))
 		}
-		if defaults.Index != "" && !IndexAllowed(defaults.Index, instance.AllowedIndexes) {
-			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.index",
-				fmt.Sprintf("index %q is not allowed by allowed_indexes", defaults.Index)))
+		if defaults.Index != "" {
+			if !validIndexPattern(defaults.Index) {
+				problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.index",
+					fmt.Sprintf("invalid index pattern %q", defaults.Index)))
+			} else if !IndexAllowed(defaults.Index, instance.AllowedIndexes) {
+				problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.index",
+					fmt.Sprintf("index %q is not allowed by allowed_indexes", defaults.Index)))
+			}
 		}
 	}
 	return problems
@@ -417,7 +394,15 @@ func validateFetcherAddress(address string, environment Environment) error {
 }
 
 func validIndexPattern(pattern string) bool {
-	return len(pattern) <= 255 && pattern != "*" && indexPattern.MatchString(pattern)
+	if len(pattern) == 0 || len(pattern) > 255 || !indexPattern.MatchString(pattern) {
+		return false
+	}
+	for _, character := range pattern {
+		if !strings.ContainsRune("*-._", character) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveVariables returns one canonical string per declared variable, from
@@ -459,7 +444,7 @@ func (pipeline Pipeline) ResolveVariables(overrides map[string]string) (map[stri
 	return resolved, nil
 }
 
-func validatePipelines(directory string, pipelines []Pipeline, system System, fetchers map[string]FetcherInstance) []error {
+func validatePipelines(directory string, pipelines []Pipeline, system System, fetchers map[string]FetcherInstance, systemLoaded bool) []error {
 	resolvedDirectory, err := filepath.EvalSymlinks(directory)
 	if err != nil {
 		resolvedDirectory = directory
@@ -481,7 +466,7 @@ func validatePipelines(directory string, pipelines []Pipeline, system System, fe
 		processorOutputs, processorProblems := validatePipelineProcessors(pipeline, resolvedDirectory, stepIDs)
 		problems = append(problems, processorProblems...)
 
-		problems = append(problems, validatePipelineOutputs(pipeline, system, processorOutputs, datasetWriters)...)
+		problems = append(problems, validatePipelineOutputs(pipeline, system, processorOutputs, datasetWriters, systemLoaded)...)
 	}
 
 	return problems
@@ -577,7 +562,14 @@ func validatePipelineFetchers(pipeline *Pipeline, fetchers map[string]FetcherIns
 			}
 			if input.Variable != "" {
 				problems = append(problems, fileError(pipeline.File, path, "index must be a literal"))
-			} else if known && !IndexAllowed(input.Literal, instance.AllowedIndexes) {
+				continue
+			}
+			if !validIndexPattern(input.Literal) {
+				problems = append(problems, fileError(pipeline.File, path,
+					fmt.Sprintf("invalid index pattern %q", input.Literal)))
+				continue
+			}
+			if known && !IndexAllowed(input.Literal, instance.AllowedIndexes) {
 				problems = append(problems, fileError(pipeline.File, path,
 					fmt.Sprintf("index %q is not allowed by fetcher instance %q", input.Literal, step.Ref)))
 			}
@@ -636,7 +628,7 @@ func validatePipelineProcessors(pipeline *Pipeline, resolvedDirectory string, st
 	return processorOutputs, problems
 }
 
-func validatePipelineOutputs(pipeline *Pipeline, system System, processorOutputs map[string]bool, datasetWriters map[string]string) []error {
+func validatePipelineOutputs(pipeline *Pipeline, system System, processorOutputs map[string]bool, datasetWriters map[string]string, systemLoaded bool) []error {
 	var problems []error
 	if len(pipeline.Outputs) == 0 {
 		problems = append(problems, fileError(pipeline.File, "outputs", "at least one output is required"))
@@ -656,27 +648,29 @@ func validatePipelineOutputs(pipeline *Pipeline, system System, processorOutputs
 				fmt.Sprintf("%q is not produced by a processor", output.From)))
 		}
 
-		retention := system.Stores.DatasetCache.DefaultRetention
-		if output.Retention != nil {
-			retention = *output.Retention
-			if retention < Duration(minRetention) || retention > Duration(maxRetention) {
-				problems = append(problems, fileError(pipeline.File, path+".retention",
-					fmt.Sprintf("must be between %s and %s", minRetention, maxRetention)))
+		if systemLoaded {
+			retention := system.Stores.DatasetCache.DefaultRetention
+			if output.Retention != nil {
+				retention = *output.Retention
+				if retention < Duration(minRetention) || retention > Duration(maxRetention) {
+					problems = append(problems, fileError(pipeline.File, path+".retention",
+						fmt.Sprintf("must be between %s and %s", minRetention, maxRetention)))
+				}
 			}
-		}
-		lateness := system.Stores.DatasetCache.DefaultAllowedLateness
-		if output.AllowedLateness != nil {
-			lateness = *output.AllowedLateness
-		}
-		if lateness < 0 || lateness >= retention {
-			problems = append(problems, fileError(pipeline.File, path+".allowed_lateness", "must be at least 0 and less than retention"))
-		}
+			lateness := system.Stores.DatasetCache.DefaultAllowedLateness
+			if output.AllowedLateness != nil {
+				lateness = *output.AllowedLateness
+			}
+			if lateness < 0 || lateness >= retention {
+				problems = append(problems, fileError(pipeline.File, path+".allowed_lateness", "must be at least 0 and less than retention"))
+			}
 
-		if output.Retention == nil {
-			output.Retention = &retention
-		}
-		if output.AllowedLateness == nil {
-			output.AllowedLateness = &lateness
+			if output.Retention == nil {
+				output.Retention = &retention
+			}
+			if output.AllowedLateness == nil {
+				output.AllowedLateness = &lateness
+			}
 		}
 		pipeline.Outputs[name] = output
 
@@ -736,7 +730,7 @@ func canonicalVariableValue(variableType string, value string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("invalid timestamp %q", value)
 		}
-		return parsed.UTC().Format(time.RFC3339), nil
+		return parsed.UTC().Format(time.RFC3339Nano), nil
 	case "int":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
@@ -824,11 +818,26 @@ func checkSecretPlacement(fetchers map[string]FetcherInstance, pipelines []Pipel
 }
 
 func readConfigFile(directory string, name string) ([]byte, error) {
-	data, err := os.ReadFile(filepath.Join(directory, name))
+	path := filepath.Join(directory, name)
+	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%s: file is required", name)
 		}
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: must be a regular file", name)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxConfigFileSize+1))
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	if len(data) > maxConfigFileSize {

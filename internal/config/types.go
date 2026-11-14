@@ -76,20 +76,20 @@ type Files struct {
 }
 
 type System struct {
-	Version string          `yaml:"version"` // must be 0.1
-	Stores  Stores          `yaml:"stores"`  // stores.dataset_cache
-	Secrets SecretsSettings `yaml:"secrets"` // secrets.provider, only "env"
-	Runner  RunnerSettings  `yaml:"runner"`  // runner.batch_size, runner.max_quarantine_ratio
+	Version string          // must be 0.1
+	Stores  Stores          // stores.dataset_cache
+	Secrets SecretsSettings // secrets.provider, only "env"
+	Runner  RunnerSettings  // runner.batch_size, runner.max_quarantine_ratio
 }
 
 type Stores struct {
-	DatasetCache DatasetCacheStore `yaml:"dataset_cache"`
+	DatasetCache DatasetCacheStore
 }
 
 type DatasetCacheStore struct {
-	Type                   string   `yaml:"type"`                     // only "postgres"
-	DefaultRetention       Duration `yaml:"default_retention"`        // default 72h; 1h..2160h (90d)
-	DefaultAllowedLateness Duration `yaml:"default_allowed_lateness"` // default 10m; >= 0 and < DefaultRetention
+	Type                   string   // only "postgres"
+	DefaultRetention       Duration // default 72h; 1h..2160h (90d)
+	DefaultAllowedLateness Duration // default 10m; >= 0 and < DefaultRetention
 }
 
 type SecretsSettings struct {
@@ -97,18 +97,18 @@ type SecretsSettings struct {
 }
 
 type RunnerSettings struct {
-	BatchSize          int     `yaml:"batch_size"`           // default 5000; 1..50000
-	MaxQuarantineRatio float64 `yaml:"max_quarantine_ratio"` // default 0.10; > 0 and <= 1
+	BatchSize          int     // default 5000; 1..50000
+	MaxQuarantineRatio float64 // default 0.10; > 0 and <= 1
 }
 
 type FetcherInstance struct {
-	ID             string          `yaml:"-"` // from the map key
-	Type           string          `yaml:"type"`
-	Addresses      []string        `yaml:"addresses"`
-	Auth           FetcherAuth     `yaml:"auth"`
-	TLS            FetcherTLS      `yaml:"tls"`
-	Defaults       FetcherDefaults `yaml:"defaults"`
-	AllowedIndexes []string        `yaml:"allowed_indexes"` // required, non-empty
+	ID             string // from the map key
+	Type           string
+	Addresses      []string
+	Auth           FetcherAuth
+	TLS            FetcherTLS
+	Defaults       FetcherDefaults
+	AllowedIndexes []string // required, non-empty
 }
 
 type FetcherAuth struct {
@@ -123,27 +123,27 @@ type FetcherTLS struct {
 }
 
 type FetcherDefaults struct {
-	Index      string   `yaml:"index"`       // optional; must pass IndexAllowed
-	Timeout    Duration `yaml:"timeout"`     // default 30s; <= 10m
-	MaxResults int      `yaml:"max_results"` // default 10000; 1..1000000
-	TimeField  string   `yaml:"time_field"`  // default "@timestamp"
+	Index      string   // optional; must pass IndexAllowed
+	Timeout    Duration // default 30s; <= 10m
+	MaxResults int      // default 10000; 1..1000000
+	TimeField  string   // default "@timestamp"
 }
 
 type Pipeline struct {
-	File       string              `yaml:"-"` // path relative to the config directory
-	ID         string              `yaml:"id"`
-	Version    string              `yaml:"version"`
-	Schedule   Schedule            `yaml:"schedule"`
-	Variables  map[string]Variable `yaml:"variables"`
-	Fetchers   []FetcherStep       `yaml:"fetchers"`
-	Processors []Processor         `yaml:"processors"`
-	Outputs    map[string]Output   `yaml:"outputs"` // key = dataset name
+	File       string // path relative to the config directory
+	ID         string
+	Version    string
+	Schedule   Schedule
+	Variables  map[string]Variable
+	Fetchers   []FetcherStep
+	Processors []Processor
+	Outputs    map[string]Output // key = dataset name
 }
 
 type Schedule struct {
-	Every         Duration `yaml:"every"`          // optional in Phase 1; > 0 when set
-	Timeout       Duration `yaml:"timeout"`        // required; > 0, <= 1h
-	OverlapPolicy string   `yaml:"overlap_policy"` // skip (default) | queue | parallel
+	Every         Duration // optional in Phase 1; > 0 when set
+	Timeout       Duration // required; > 0, <= 1h
+	OverlapPolicy string   // skip (default) | queue | parallel
 }
 
 type Variable struct {
@@ -241,4 +241,50 @@ type IdentityField struct {
 	Path     string `yaml:"path"`
 	Required bool   `yaml:"required"`
 	Fallback string `yaml:"fallback"`
+}
+
+// systemFile, fetcherFile and pipelineFile mirror the YAML shapes so optional
+// values keep their presence before defaults are applied.
+type systemFile struct {
+	Version string `yaml:"version"`
+	Stores  struct {
+		DatasetCache struct {
+			Type                   string    `yaml:"type"`
+			DefaultRetention       *Duration `yaml:"default_retention"`
+			DefaultAllowedLateness *Duration `yaml:"default_allowed_lateness"`
+		} `yaml:"dataset_cache"`
+	} `yaml:"stores"`
+	Secrets SecretsSettings `yaml:"secrets"`
+	Runner  struct {
+		BatchSize          *int     `yaml:"batch_size"`
+		MaxQuarantineRatio *float64 `yaml:"max_quarantine_ratio"`
+	} `yaml:"runner"`
+}
+
+type fetcherFile struct {
+	Type      string      `yaml:"type"`
+	Addresses []string    `yaml:"addresses"`
+	Auth      FetcherAuth `yaml:"auth"`
+	TLS       FetcherTLS  `yaml:"tls"`
+	Defaults  struct {
+		Index      string    `yaml:"index"`
+		Timeout    *Duration `yaml:"timeout"`
+		MaxResults *int      `yaml:"max_results"`
+		TimeField  string    `yaml:"time_field"`
+	} `yaml:"defaults"`
+	AllowedIndexes []string `yaml:"allowed_indexes"`
+}
+
+type pipelineFile struct {
+	ID       string `yaml:"id"`
+	Version  string `yaml:"version"`
+	Schedule struct {
+		Every         *Duration `yaml:"every"`
+		Timeout       *Duration `yaml:"timeout"`
+		OverlapPolicy string    `yaml:"overlap_policy"`
+	} `yaml:"schedule"`
+	Variables  map[string]Variable `yaml:"variables"`
+	Fetchers   []FetcherStep       `yaml:"fetchers"`
+	Processors []Processor         `yaml:"processors"`
+	Outputs    map[string]Output   `yaml:"outputs"`
 }
