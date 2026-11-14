@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -13,16 +12,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
+
+const maxPage = 100000
 
 // userHandler serves the user, role, and password-reset routes.
 type userHandler struct {
-	service  *auth.Service
-	database *gorm.DB
-	logger   *slog.Logger
+	service *auth.Service
+	logger  *slog.Logger
 }
 
 // userTransition is one version-checked state change on a user.
@@ -35,14 +35,6 @@ func (users userHandler) list(c *gin.Context) {
 		return
 	}
 	status := query.Get("status")
-	switch status {
-	// DISABLED and INVITED are the other two statuses of the users table; the
-	// auth package only exports ACTIVE.
-	case "", auth.StatusActive, "DISABLED", "INVITED":
-	default:
-		invalidParameter(c, "status")
-		return
-	}
 	page, pageSize, ok := parsePagination(c, query, maxUserPageSize)
 	if !ok {
 		return
@@ -180,33 +172,18 @@ func (users userHandler) createResetToken(c *gin.Context) {
 
 func (users userHandler) roles(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	var rows []struct {
-		Name        string `gorm:"column:name"`
-		Description string `gorm:"column:description"`
-		Permissions string `gorm:"column:permissions"`
-	}
-	err := users.database.WithContext(c.Request.Context()).Raw(`
-		SELECT roles.name, roles.description,
-		       COALESCE(string_agg(role_permissions.permission, ',' ORDER BY role_permissions.permission), '') AS permissions
-		FROM roles
-		LEFT JOIN role_permissions ON role_permissions.role_name = roles.name
-		GROUP BY roles.name, roles.description
-		ORDER BY roles.name`).Scan(&rows).Error
+	roles, err := users.service.ListRoles(c.Request.Context())
 	if err != nil {
 		internalError(c, users.logger, err)
 		return
 	}
 
-	data := make([]roleResponse, 0, len(rows))
-	for _, row := range rows {
-		permissions := []string{}
-		if row.Permissions != "" {
-			permissions = strings.Split(row.Permissions, ",")
-		}
+	data := make([]roleResponse, 0, len(roles))
+	for _, role := range roles {
 		data = append(data, roleResponse{
-			Name:        row.Name,
-			Description: row.Description,
-			Permissions: permissions,
+			Name:        role.Name,
+			Description: role.Description,
+			Permissions: role.Permissions,
 		})
 	}
 	c.JSON(http.StatusOK, rolesResponse{Data: data})
@@ -296,7 +273,7 @@ func parsePagination(c *gin.Context, query url.Values, maxPageSize int) (int, in
 	page := 1
 	if raw := query.Get("page"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 {
+		if err != nil || parsed < 1 || parsed > maxPage {
 			invalidParameter(c, "page")
 			return 0, 0, false
 		}
@@ -325,22 +302,11 @@ func newPagination(page, pageSize int, total int64) pagination {
 
 func pathUUID(c *gin.Context, parameter, notFoundMessage string) (string, bool) {
 	value := c.Param(parameter)
-	if !validUUID(value) {
+	if !audit.ValidID(value) {
 		writeError(c, http.StatusNotFound, codeNotFound, notFoundMessage)
 		return "", false
 	}
 	return value, true
-}
-
-// validUUID mirrors the canonical form audit.Get accepts: five dash-separated
-// groups of hex digits, so malformed ids never reach a query.
-func validUUID(identifier string) bool {
-	if len(identifier) != 36 || identifier[8] != '-' || identifier[13] != '-' ||
-		identifier[18] != '-' || identifier[23] != '-' {
-		return false
-	}
-	_, err := hex.DecodeString(strings.ReplaceAll(identifier, "-", ""))
-	return err == nil
 }
 
 func requiredVersion(c *gin.Context, version *int) (int, bool) {
@@ -378,6 +344,8 @@ func writeUserError(c *gin.Context, logger *slog.Logger, err error) {
 		writeError(c, http.StatusConflict, codeStateConflict, stateConflictMessage(err))
 	case errors.Is(err, auth.ErrUserExists):
 		writeError(c, http.StatusConflict, codeStateConflict, "email already in use")
+	case errors.Is(err, auth.ErrForbidden):
+		writeError(c, http.StatusForbidden, codeForbidden, auth.ErrForbidden.Error())
 	case errors.Is(err, auth.ErrUnknownRole), errors.Is(err, auth.ErrInvalidEmail),
 		errors.Is(err, auth.ErrInvalidDisplayName), errors.Is(err, auth.ErrPasswordLength),
 		errors.Is(err, auth.ErrInvalidStatus):

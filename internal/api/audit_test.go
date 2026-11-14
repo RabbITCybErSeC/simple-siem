@@ -121,6 +121,8 @@ func TestAuditListValidation(t *testing.T) {
 	}{
 		{name: "malformed time", query: "?createdAfter=yesterday", wantMessage: "createdAfter"},
 		{name: "page size over the maximum", query: "?pageSize=1000", wantMessage: "pageSize"},
+		{name: "page over the maximum", query: "?page=9223372036854775807", wantMessage: "page"},
+		{name: "unknown outcome", query: "?eventOutcome=MAYBE", wantMessage: "eventOutcome"},
 		{name: "unknown parameter", query: "?sort=createdAt", wantMessage: "sort"},
 	}
 	for _, test := range tests {
@@ -132,6 +134,11 @@ func TestAuditListValidation(t *testing.T) {
 			assertNoStore(t, response)
 			assertErrorCode(t, response, "VALIDATION_ERROR", test.wantMessage)
 		})
+	}
+
+	response := get(router, "/api/v1/audit-events?eventOutcome=SUCCESS", "", bearer(token))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/audit-events?eventOutcome=SUCCESS = %d, want 200: %s", response.Code, response.Body)
 	}
 }
 

@@ -13,12 +13,12 @@ import (
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
-	statusDisabled      = "DISABLED"
-	statusInvited       = "INVITED"
 	defaultUserPageSize = 50
+	maxPage             = 100000
 	lastAdminLockName   = "simple-siem:last-admin"
 	resetTokenLifetime  = 24 * time.Hour
 	resetTokenLength    = 32
@@ -32,6 +32,14 @@ var hashPasswordFunction = HashPassword
 type userWithRoleNames struct {
 	User
 	RoleNames string `gorm:"column:role_names"`
+}
+
+// roleWithPermissionNames scans one role row with its permissions aggregated
+// per row.
+type roleWithPermissionNames struct {
+	Name        string `gorm:"column:name"`
+	Description string `gorm:"column:description"`
+	Permissions string `gorm:"column:permissions"`
 }
 
 // resetTokenRow is one usable password reset token.
@@ -59,9 +67,12 @@ const resetTokenLookup = `
 
 func (service *Service) ListUsers(ctx context.Context, filter UserFilter) ([]UserWithRoles, int64, error) {
 	switch filter.Status {
-	case "", StatusActive, statusDisabled, statusInvited:
+	case "", StatusActive, StatusDisabled, StatusInvited:
 	default:
 		return nil, 0, ErrInvalidStatus
+	}
+	if filter.Page > maxPage {
+		return nil, 0, fmt.Errorf("list users: page must not exceed %d", maxPage)
 	}
 	page := filter.Page
 	if page < 1 {
@@ -99,13 +110,37 @@ func (service *Service) ListUsers(ctx context.Context, filter UserFilter) ([]Use
 
 	users := make([]UserWithRoles, 0, len(rows))
 	for _, row := range rows {
-		users = append(users, UserWithRoles{User: row.User, Roles: splitRoleNames(row.RoleNames)})
+		users = append(users, UserWithRoles{User: row.User, Roles: splitNames(row.RoleNames)})
 	}
 	return users, total, nil
 }
 
 func (service *Service) GetUser(ctx context.Context, userID string) (UserWithRoles, error) {
 	return loadUserWithRoles(service.database.WithContext(ctx), userID)
+}
+
+func (service *Service) ListRoles(ctx context.Context) ([]RoleWithPermissions, error) {
+	var rows []roleWithPermissionNames
+	err := service.database.WithContext(ctx).Raw(`
+		SELECT roles.name, roles.description,
+		       COALESCE(string_agg(role_permissions.permission, ',' ORDER BY role_permissions.permission), '') AS permissions
+		FROM roles
+		LEFT JOIN role_permissions ON role_permissions.role_name = roles.name
+		GROUP BY roles.name, roles.description
+		ORDER BY roles.name`).Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+
+	roles := make([]RoleWithPermissions, 0, len(rows))
+	for _, row := range rows {
+		roles = append(roles, RoleWithPermissions{
+			Name:        row.Name,
+			Description: row.Description,
+			Permissions: splitNames(row.Permissions),
+		})
+	}
+	return roles, nil
 }
 
 func (service *Service) CreateUser(ctx context.Context, actor Actor, client ClientInfo, request CreateUserRequest) (UserWithRoles, error) {
@@ -125,7 +160,7 @@ func (service *Service) CreateUser(ctx context.Context, actor Actor, client Clie
 			return err
 		}
 
-		user := User{Email: email, DisplayName: displayName, Status: statusInvited}
+		user := User{Email: email, DisplayName: displayName, Status: StatusInvited}
 		if err := tx.Create(&user).Error; err != nil {
 			if errors.Is(err, gorm.ErrDuplicatedKey) {
 				return ErrUserExists
@@ -184,6 +219,9 @@ func (service *Service) UpdateUser(ctx context.Context, actor Actor, client Clie
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		user, err := loadUser(tx, userID)
 		if err != nil {
+			return err
+		}
+		if err := requireAdminForTarget(tx, actor, user.ID); err != nil {
 			return err
 		}
 
@@ -252,10 +290,13 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 		if err != nil {
 			return err
 		}
+		if err := requireAdminForTarget(tx, actor, user.ID); err != nil {
+			return err
+		}
 		if actor.UserID == user.ID {
 			return fmt.Errorf("%w: cannot disable your own account", ErrStateConflict)
 		}
-		if user.Status == statusDisabled {
+		if user.Status == StatusDisabled {
 			return fmt.Errorf("%w: user is disabled", ErrStateConflict)
 		}
 		admin, err := userHasRole(tx, user.ID, RoleAdmin)
@@ -275,7 +316,7 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 		result := tx.Model(&User{}).
 			Where("id = ? AND version = ?", user.ID, version).
 			Updates(map[string]any{
-				"status":     statusDisabled,
+				"status":     StatusDisabled,
 				"updated_at": gorm.Expr("now()"),
 				"version":    gorm.Expr("version + 1"),
 			})
@@ -321,7 +362,10 @@ func (service *Service) EnableUser(ctx context.Context, actor Actor, client Clie
 		if err != nil {
 			return err
 		}
-		if user.Status != statusDisabled {
+		if err := requireAdminForTarget(tx, actor, user.ID); err != nil {
+			return err
+		}
+		if user.Status != StatusDisabled {
 			return fmt.Errorf("%w: user is not disabled", ErrStateConflict)
 		}
 
@@ -333,7 +377,7 @@ func (service *Service) EnableUser(ctx context.Context, actor Actor, client Clie
 		if err != nil {
 			return fmt.Errorf("check local password: %w", err)
 		}
-		status := statusInvited
+		status := StatusInvited
 		if passwords > 0 {
 			status = StatusActive
 		}
@@ -373,6 +417,9 @@ func (service *Service) EnableUser(ctx context.Context, actor Actor, client Clie
 func (service *Service) AssignRole(ctx context.Context, actor Actor, client ClientInfo, userID, role string) (UserWithRoles, error) {
 	var assigned UserWithRoles
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if role == RoleAdmin && !actorIsAdmin(actor) {
+			return ErrForbidden
+		}
 		if err := ensureRolesExist(tx, []string{role}); err != nil {
 			return err
 		}
@@ -419,6 +466,9 @@ func (service *Service) AssignRole(ctx context.Context, actor Actor, client Clie
 func (service *Service) RemoveRole(ctx context.Context, actor Actor, client ClientInfo, userID, role string) (UserWithRoles, error) {
 	var removed UserWithRoles
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if role == RoleAdmin && !actorIsAdmin(actor) {
+			return ErrForbidden
+		}
 		if role == RoleAdmin {
 			if err := lockLastAdminGuard(tx); err != nil {
 				return err
@@ -486,11 +536,14 @@ func (service *Service) CreateResetToken(ctx context.Context, actor Actor, clien
 
 	var expiresAt time.Time
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		user, err := loadUser(tx, userID)
+		user, err := loadUserForUpdate(tx, userID)
 		if err != nil {
 			return err
 		}
-		if user.Status == statusDisabled {
+		if err := requireAdminForTarget(tx, actor, user.ID); err != nil {
+			return err
+		}
+		if user.Status == StatusDisabled {
 			return fmt.Errorf("%w: user is disabled", ErrStateConflict)
 		}
 		if err := tx.Exec(
@@ -536,7 +589,7 @@ func (service *Service) UseResetToken(ctx context.Context, token, password strin
 	// password validation or a hash; every invalid case returns the same error.
 	var lookup resetTokenRow
 	err = service.database.WithContext(ctx).Raw(
-		resetTokenLookup, tokenHash[:], statusDisabled,
+		resetTokenLookup, tokenHash[:], StatusDisabled,
 	).Scan(&lookup).Error
 	if err != nil {
 		return fmt.Errorf("find reset token: %w", err)
@@ -554,9 +607,22 @@ func (service *Service) UseResetToken(ctx context.Context, token, password strin
 	}
 
 	return service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Lock the user first. DisableUser updates the user row and then
+		// deletes its tokens; taking the token lock first would deadlock.
+		user, err := loadUserForUpdate(tx, lookup.UserID)
+		if errors.Is(err, ErrUserNotFound) {
+			return ErrInvalidResetToken
+		}
+		if err != nil {
+			return err
+		}
+		if user.Status == StatusDisabled {
+			return ErrInvalidResetToken
+		}
+
 		var locked resetTokenRow
-		err := tx.Raw(
-			resetTokenLookup+" FOR UPDATE OF password_reset_tokens", tokenHash[:], statusDisabled,
+		err = tx.Raw(
+			resetTokenLookup+" FOR UPDATE OF password_reset_tokens", tokenHash[:], StatusDisabled,
 		).Scan(&locked).Error
 		if err != nil {
 			return fmt.Errorf("lock reset token: %w", err)
@@ -599,7 +665,7 @@ func (service *Service) UseResetToken(ctx context.Context, token, password strin
 
 		if err := tx.Exec(
 			"UPDATE users SET status = ?, version = version + 1, updated_at = now() WHERE id = ? AND status = ?",
-			StatusActive, locked.UserID, statusInvited,
+			StatusActive, locked.UserID, StatusInvited,
 		).Error; err != nil {
 			return fmt.Errorf("activate user: %w", err)
 		}
@@ -646,6 +712,12 @@ func loadUser(database *gorm.DB, userID string) (User, error) {
 	return user, nil
 }
 
+// loadUserForUpdate locks the user row, so token and session writes for that
+// user serialize with user writes.
+func loadUserForUpdate(database *gorm.DB, userID string) (User, error) {
+	return loadUser(database.Clauses(clause.Locking{Strength: "UPDATE"}), userID)
+}
+
 func loadUserWithRoles(database *gorm.DB, userID string) (UserWithRoles, error) {
 	var row userWithRoleNames
 	err := database.Raw(selectUsersWithRoleNames+`
@@ -657,10 +729,10 @@ func loadUserWithRoles(database *gorm.DB, userID string) (UserWithRoles, error) 
 	if row.ID == "" {
 		return UserWithRoles{}, ErrUserNotFound
 	}
-	return UserWithRoles{User: row.User, Roles: splitRoleNames(row.RoleNames)}, nil
+	return UserWithRoles{User: row.User, Roles: splitNames(row.RoleNames)}, nil
 }
 
-func splitRoleNames(names string) []string {
+func splitNames(names string) []string {
 	if names == "" {
 		return []string{}
 	}
@@ -720,6 +792,28 @@ func userHasRole(database *gorm.DB, userID, role string) (bool, error) {
 		return false, fmt.Errorf("read user roles: %w", err)
 	}
 	return count > 0, nil
+}
+
+// actorIsAdmin reports whether the actor itself holds the ADMIN role, as
+// opposed to holding a permission an admin role happens to grant.
+func actorIsAdmin(actor Actor) bool {
+	return slices.Contains(actor.Roles, RoleAdmin)
+}
+
+// requireAdminForTarget refuses a mutation of an admin user by an actor who
+// does not hold ADMIN, whatever permissions the actor's roles grant.
+func requireAdminForTarget(database *gorm.DB, actor Actor, userID string) error {
+	if actorIsAdmin(actor) {
+		return nil
+	}
+	admin, err := userHasRole(database, userID, RoleAdmin)
+	if err != nil {
+		return err
+	}
+	if admin {
+		return ErrForbidden
+	}
+	return nil
 }
 
 // bumpUserVersion records a role change on the user row, so clients holding a

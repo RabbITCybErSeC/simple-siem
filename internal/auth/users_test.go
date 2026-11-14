@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ func testActorFor(user User) Actor {
 		SessionID:   testActorSessionID,
 		Email:       user.Email,
 		DisplayName: user.DisplayName,
+		Roles:       []string{RoleAdmin},
 	}
 }
 
@@ -136,6 +138,10 @@ func TestListUsers(t *testing.T) {
 	if _, _, err := test.service.ListUsers(context.Background(), UserFilter{Status: "SERVICE"}); !errors.Is(err, ErrInvalidStatus) {
 		t.Errorf("ListUsers with status SERVICE = %v, want ErrInvalidStatus", err)
 	}
+
+	if _, _, err := test.service.ListUsers(context.Background(), UserFilter{Page: 100001, PageSize: 10}); err == nil {
+		t.Error("ListUsers with page 100001 = nil error, want an error")
+	}
 }
 
 func TestListUsersRoles(t *testing.T) {
@@ -167,6 +173,37 @@ func TestListUsersRoles(t *testing.T) {
 	}
 	if total != 0 || empty == nil || len(empty) != 0 {
 		t.Errorf("ListUsers DISABLED = %v of %d, want an empty list", empty, total)
+	}
+}
+
+func TestListRoles(t *testing.T) {
+	test := newTestService(t)
+	roles, err := test.service.ListRoles(context.Background())
+	if err != nil {
+		t.Fatalf("ListRoles: %v", err)
+	}
+	names := []string{"ADMIN", "ANALYST", "READ_ONLY", "SECURITY_ENGINEER", "SERVICE"}
+	if len(roles) != len(names) {
+		t.Fatalf("ListRoles returned %d roles, want %d", len(roles), len(names))
+	}
+	for index, role := range roles {
+		if role.Name != names[index] {
+			t.Errorf("role %d = %q, want %q", index, role.Name, names[index])
+		}
+		if role.Description == "" {
+			t.Errorf("role %q has no description", role.Name)
+		}
+		for position := 1; position < len(role.Permissions); position++ {
+			if role.Permissions[position-1] >= role.Permissions[position] {
+				t.Errorf("role %q permissions are not sorted: %v", role.Name, role.Permissions)
+			}
+		}
+	}
+	if !slices.Contains(roles[0].Permissions, "user:read") {
+		t.Errorf("ADMIN permissions = %v, want user:read", roles[0].Permissions)
+	}
+	if roles[4].Permissions == nil || len(roles[4].Permissions) != 0 {
+		t.Errorf("SERVICE permissions = %v, want an empty array", roles[4].Permissions)
 	}
 }
 
@@ -733,12 +770,17 @@ func TestDisableUserRejectsOwnAccount(t *testing.T) {
 func TestDisableUserLastActiveAdmin(t *testing.T) {
 	test := newTestService(t)
 	admin := test.createAdmin(t, testEmail)
-	actor := createUser(t, test.service, testActorFor(admin), CreateUserRequest{
-		Email: "operator@example.com", DisplayName: "Operator", Roles: []string{"READ_ONLY"},
-	})
+	// A disabled admin still holds ADMIN, so it passes the admin-only check
+	// while leaving the target as the only active admin.
+	actorUser := test.createAdmin(t, "operator@example.com")
+	if err := test.database.Exec(
+		"UPDATE users SET status = 'DISABLED' WHERE id = ?", actorUser.ID,
+	).Error; err != nil {
+		t.Fatalf("disable the operator: %v", err)
+	}
 
 	_, err := test.service.DisableUser(
-		context.Background(), testActorFor(actor.User), testClient(), admin.ID, admin.Version,
+		context.Background(), testActorFor(actorUser), testClient(), admin.ID, admin.Version,
 	)
 	assertStateConflict(t, err, "the last active admin cannot be removed")
 	stored := storedUser(t, test.database, admin.ID)
@@ -1603,6 +1645,223 @@ func TestResetTokenNeverStoredOrAudited(t *testing.T) {
 	for _, haystack := range []string{tokenRows, auditChanges, logged} {
 		if strings.Contains(haystack, token) {
 			t.Errorf("the reset token appears in stored or logged data: %s", haystack)
+		}
+	}
+}
+
+// TestConcurrentResetTokenCreationAndDisable races the two writes that touch
+// a user's unused tokens: creating one and disabling the user. A disable that
+// commits after the creation must leave no usable token behind.
+func TestConcurrentResetTokenCreationAndDisable(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
+		target := createUser(t, test.service, actor, CreateUserRequest{
+			Email:       fmt.Sprintf("target%02d@example.com", round),
+			DisplayName: "Target",
+		})
+
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		var resetErr, disableErr error
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, _, resetErr = test.service.CreateResetToken(
+				context.Background(), actor, testClient(), target.User.ID,
+			)
+		}()
+		go func() {
+			defer wait.Done()
+			<-start
+			_, disableErr = test.service.DisableUser(
+				context.Background(), actor, testClient(), target.User.ID, target.User.Version,
+			)
+		}()
+		close(start)
+		wait.Wait()
+
+		if disableErr != nil {
+			t.Fatalf("round %d: DisableUser = %v, want nil", round, disableErr)
+		}
+		if resetErr != nil && !errors.Is(resetErr, ErrStateConflict) {
+			t.Fatalf("round %d: CreateResetToken = %v, want nil or ErrStateConflict", round, resetErr)
+		}
+		var unused int64
+		err := test.database.Raw(
+			"SELECT count(*) FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL",
+			target.User.ID,
+		).Scan(&unused).Error
+		if err != nil {
+			t.Fatalf("round %d: count reset tokens: %v", round, err)
+		}
+		if unused != 0 {
+			t.Fatalf("round %d: disabled user has %d unused reset tokens", round, unused)
+		}
+	}
+}
+
+// TestConcurrentResetTokenUseAndDisable races the use of a reset token and the
+// disable of its user. UseResetToken must take the user lock before the token
+// lock, the same order DisableUser uses, so the pair cannot deadlock.
+func TestConcurrentResetTokenUseAndDisable(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+
+	// The real hash runs before the transaction, so it would hide the lock
+	// order; this test is about the locks, not the hashing.
+	original := hashPasswordFunction
+	hashPasswordFunction = func(context.Context, string) (string, error) {
+		return "test-password-hash", nil
+	}
+	t.Cleanup(func() { hashPasswordFunction = original })
+
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
+		target := createUser(t, test.service, actor, CreateUserRequest{
+			Email:       fmt.Sprintf("target%02d@example.com", round),
+			DisplayName: "Target",
+		})
+		token, _, err := test.service.CreateResetToken(
+			context.Background(), actor, testClient(), target.User.ID,
+		)
+		if err != nil {
+			t.Fatalf("round %d: CreateResetToken: %v", round, err)
+		}
+
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		var useErr, disableErr error
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			<-start
+			useErr = test.service.UseResetToken(
+				context.Background(), token, testNewPassword, testClient(),
+			)
+		}()
+		go func() {
+			defer wait.Done()
+			<-start
+			_, disableErr = test.service.DisableUser(
+				context.Background(), actor, testClient(), target.User.ID, target.User.Version,
+			)
+		}()
+		close(start)
+		wait.Wait()
+
+		for _, callErr := range []error{useErr, disableErr} {
+			if callErr == nil {
+				continue
+			}
+			if strings.Contains(strings.ToLower(callErr.Error()), "deadlock") {
+				t.Fatalf("round %d: %v", round, callErr)
+			}
+			if !errors.Is(callErr, ErrInvalidResetToken) &&
+				!errors.Is(callErr, ErrVersionConflict) &&
+				!errors.Is(callErr, ErrStateConflict) {
+				t.Fatalf("round %d: unexpected error %v", round, callErr)
+			}
+		}
+	}
+}
+
+// insertHelpdeskRole adds a custom role with user administration permissions
+// but without ADMIN. The default mapping is fixed by migration, so a test role
+// is inserted directly.
+func insertHelpdeskRole(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Exec(
+		"INSERT INTO roles (name, description) VALUES ('HELPDESK', 'Help desk')",
+	).Error; err != nil {
+		t.Fatalf("insert HELPDESK role: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO role_permissions (role_name, permission) VALUES
+		('HELPDESK', 'user:write'), ('HELPDESK', 'role:assign')`).Error; err != nil {
+		t.Fatalf("grant HELPDESK permissions: %v", err)
+	}
+}
+
+func TestNonAdminCannotChangeAdmins(t *testing.T) {
+	test := newTestService(t)
+	insertHelpdeskRole(t, test.database)
+	admin := test.createAdmin(t, testEmail)
+	disabledAdmin := test.createAdmin(t, "disabled-admin@example.com")
+	if err := test.database.Exec(
+		"UPDATE users SET status = 'DISABLED' WHERE id = ?", disabledAdmin.ID,
+	).Error; err != nil {
+		t.Fatalf("disable the second admin: %v", err)
+	}
+
+	helpdesk := createUser(t, test.service, testActorFor(admin), CreateUserRequest{
+		Email: "helpdesk@example.com", DisplayName: "Help Desk", Roles: []string{"HELPDESK"},
+	})
+	actor := testActorFor(helpdesk.User)
+	actor.Roles = []string{"HELPDESK"}
+	ctx := context.Background()
+
+	if _, _, err := test.service.CreateResetToken(ctx, actor, testClient(), admin.ID); !errors.Is(err, ErrForbidden) {
+		t.Errorf("CreateResetToken for an admin by a non-admin = %v, want ErrForbidden", err)
+	}
+	if got := countRows(t, test.database, "password_reset_tokens"); got != 0 {
+		t.Errorf("reset tokens = %d after the refusal, want 0", got)
+	}
+
+	_, err := test.service.UpdateUser(ctx, actor, testClient(), admin.ID, UpdateUserRequest{
+		DisplayName: stringPointer("Renamed"), Version: admin.Version,
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Errorf("UpdateUser on an admin by a non-admin = %v, want ErrForbidden", err)
+	}
+	if stored := storedUser(t, test.database, admin.ID); stored.DisplayName != admin.DisplayName || stored.Version != admin.Version {
+		t.Errorf("admin after the refused update = %+v, want the unchanged admin", stored)
+	}
+
+	if _, err := test.service.DisableUser(ctx, actor, testClient(), admin.ID, admin.Version); !errors.Is(err, ErrForbidden) {
+		t.Errorf("DisableUser on an admin by a non-admin = %v, want ErrForbidden", err)
+	}
+	if stored := storedUser(t, test.database, admin.ID); stored.Status != StatusActive || stored.Version != admin.Version {
+		t.Errorf("admin after the refused disable = %+v, want ACTIVE at version %d", stored, admin.Version)
+	}
+
+	if _, err := test.service.EnableUser(ctx, actor, testClient(), disabledAdmin.ID, disabledAdmin.Version); !errors.Is(err, ErrForbidden) {
+		t.Errorf("EnableUser on an admin by a non-admin = %v, want ErrForbidden", err)
+	}
+	if stored := storedUser(t, test.database, disabledAdmin.ID); stored.Status != "DISABLED" || stored.Version != disabledAdmin.Version {
+		t.Errorf("admin after the refused enable = %+v, want DISABLED at version %d", stored, disabledAdmin.Version)
+	}
+
+	if _, err := test.service.AssignRole(ctx, actor, testClient(), helpdesk.User.ID, RoleAdmin); !errors.Is(err, ErrForbidden) {
+		t.Errorf("AssignRole(ADMIN) by a non-admin = %v, want ErrForbidden", err)
+	}
+	if held, err := userHasRole(test.database, helpdesk.User.ID, RoleAdmin); err != nil || held {
+		t.Errorf("helpdesk holds ADMIN after the refused assignment = %v (error %v), want false", held, err)
+	}
+	if stored := storedUser(t, test.database, helpdesk.User.ID); stored.Version != helpdesk.User.Version {
+		t.Errorf("helpdesk version after the refused assignment = %d, want %d", stored.Version, helpdesk.User.Version)
+	}
+
+	if _, err := test.service.RemoveRole(ctx, actor, testClient(), admin.ID, RoleAdmin); !errors.Is(err, ErrForbidden) {
+		t.Errorf("RemoveRole(ADMIN) by a non-admin = %v, want ErrForbidden", err)
+	}
+	if held, err := userHasRole(test.database, admin.ID, RoleAdmin); err != nil || !held {
+		t.Errorf("admin still holds ADMIN after the refused removal = %v (error %v), want true", held, err)
+	}
+
+	refusedEvents := map[string]string{
+		admin.ID:         "simple_siem.auth.password_reset_created",
+		disabledAdmin.ID: "simple_siem.user.enabled",
+		helpdesk.User.ID: "simple_siem.role.assigned",
+	}
+	for targetID, name := range refusedEvents {
+		if events := eventsNamed(t, test.database, targetID, name); len(events) != 0 {
+			t.Errorf("a refused %s wrote %d audit events, want 0", name, len(events))
 		}
 	}
 }

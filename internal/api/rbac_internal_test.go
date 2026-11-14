@@ -151,6 +151,38 @@ func TestRequirePermission(t *testing.T) {
 	if count != 1 {
 		t.Errorf("allowed request wrote an audit event; count = %d, want 1", count)
 	}
+
+	// A client that disconnects cancels the request context. The denial must
+	// still be audited, so the middleware writes it on a context that survives
+	// the cancellation.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	canceledRouter := gin.New()
+	canceledRouter.GET("/probe-canceled",
+		func(c *gin.Context) {
+			c.Set(ActorKey, analystActor)
+			c.Next()
+		},
+		requirePermission(service, logger, "user:read"),
+		func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		},
+	)
+	request := httptest.NewRequest(http.MethodGet, "/probe-canceled", nil).WithContext(canceled)
+	response = httptest.NewRecorder()
+	canceledRouter.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("canceled GET /probe-canceled = %d, want 403: %s", response.Code, response.Body)
+	}
+	err = database.Raw(
+		"SELECT count(*) FROM audit_events WHERE target_id = '/probe-canceled'",
+	).Scan(&count).Error
+	if err != nil {
+		t.Fatalf("count canceled denial audit events: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("canceled denial wrote %d audit events, want 1", count)
+	}
 }
 
 func rbacLogin(t *testing.T, service *auth.Service, client auth.ClientInfo, email, password string) string {

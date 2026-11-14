@@ -1,7 +1,7 @@
 package api
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"log/slog"
 	"math"
@@ -17,8 +17,6 @@ import (
 )
 
 const (
-	maxLoginBodyBytes = 4096
-
 	sessionCookieName       = "simple_siem_session"
 	secureSessionCookieName = "__Host-simple_siem_session"
 	browserHeader           = "X-Requested-With"
@@ -249,7 +247,10 @@ func requirePermission(service *auth.Service, logger *slog.Logger, permissions .
 				continue
 			}
 			err := service.RecordPermissionDenied(
-				c.Request.Context(), actor, clientInfo(c), c.FullPath(), c.Request.Method, permissions,
+				// The client can cancel its request; the denial must still be
+				// recorded.
+				context.WithoutCancel(c.Request.Context()),
+				actor, clientInfo(c), c.FullPath(), c.Request.Method, permissions,
 			)
 			if err != nil {
 				logger.Error("record permission denial failed",
@@ -302,19 +303,14 @@ func (authentication authHandler) login(c *gin.Context) {
 		rejectCrossSite(c, authentication.logger)
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxLoginBodyBytes)
-
-	decoder := json.NewDecoder(c.Request.Body)
-	decoder.DisallowUnknownFields()
 	var request loginRequest
-	if err := decoder.Decode(&request); err != nil || decoder.More() ||
-		request.Email == nil || request.Password == nil {
-		c.JSON(http.StatusBadRequest, errorResponse{
-			Error: errorDetail{Code: codeValidationError, Message: "invalid request body"},
-		})
+	if !decodeJSONBody(c, &request) {
 		return
 	}
-
+	if request.Email == nil || request.Password == nil {
+		writeError(c, http.StatusBadRequest, codeValidationError, "invalid request body")
+		return
+	}
 	result, err := authentication.service.Login(
 		c.Request.Context(),
 		auth.LoginRequest{Email: *request.Email, Password: *request.Password},

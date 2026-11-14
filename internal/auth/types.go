@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	ProviderLocal = "local"
-	StatusActive  = "ACTIVE"
-	RoleAdmin     = "ADMIN"
+	ProviderLocal  = "local"
+	StatusActive   = "ACTIVE"
+	StatusDisabled = "DISABLED"
+	StatusInvited  = "INVITED"
+	RoleAdmin      = "ADMIN"
 )
 
 // User is one person who can sign in. The database supplies ID, CreatedAt,
@@ -146,6 +148,13 @@ type UserWithRoles struct {
 	Roles []string
 }
 
+// RoleWithPermissions is one role and the permissions it grants.
+type RoleWithPermissions struct {
+	Name        string
+	Description string
+	Permissions []string
+}
+
 type CreateUserRequest struct {
 	Email       string
 	DisplayName string
@@ -171,6 +180,7 @@ var (
 var (
 	ErrVersionConflict   = errors.New("the user was changed by someone else")
 	ErrStateConflict     = errors.New("state conflict")
+	ErrForbidden         = errors.New("only an admin can change an admin")
 	ErrUnknownRole       = errors.New("unknown role")
 	ErrInvalidResetToken = errors.New("invalid or expired token")
 	ErrInvalidStatus     = errors.New("status must be ACTIVE, DISABLED, or INVITED")

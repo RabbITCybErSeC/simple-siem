@@ -28,6 +28,11 @@ func (events auditHandler) list(c *gin.Context) {
 	if !ok {
 		return
 	}
+	outcome := query.Get("eventOutcome")
+	if outcome != "" && !audit.ValidOutcome(outcome) {
+		invalidParameter(c, "eventOutcome")
+		return
+	}
 	createdAfter, ok := parseTimeParameter(c, query, "createdAfter")
 	if !ok {
 		return
@@ -44,7 +49,7 @@ func (events auditHandler) list(c *gin.Context) {
 	listed, total, err := audit.List(c.Request.Context(), events.database, audit.Filter{
 		EventName:     query.Get("eventName"),
 		EventCategory: query.Get("eventCategory"),
-		EventOutcome:  query.Get("eventOutcome"),
+		EventOutcome:  outcome,
 		ActorID:       query.Get("actorId"),
 		Action:        query.Get("action"),
 		TargetType:    query.Get("targetType"),

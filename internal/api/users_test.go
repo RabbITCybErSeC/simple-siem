@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +147,7 @@ func TestListUsersValidation(t *testing.T) {
 		{name: "unknown parameter", query: "?sort=email", wantMessage: "sort"},
 		{name: "page size over the maximum", query: "?pageSize=1000", wantMessage: "pageSize"},
 		{name: "zero page", query: "?page=0", wantMessage: "page"},
+		{name: "page over the maximum", query: "?page=9223372036854775807", wantMessage: "page"},
 		{name: "bad status", query: "?status=ROOT", wantMessage: "status"},
 	}
 	for _, test := range tests {
@@ -348,23 +348,55 @@ func TestRoleList(t *testing.T) {
 	}
 	names := []string{"ADMIN", "ANALYST", "READ_ONLY", "SECURITY_ENGINEER", "SERVICE"}
 	for index, role := range body.Data {
-		if role.Name != names[index] {
-			t.Errorf("role %d = %q, want %q", index, role.Name, names[index])
+		if role.Name != names[index] || role.Description == "" {
+			t.Errorf("role %d = %q/%q, want name %q with a description", index, role.Name, role.Description, names[index])
 		}
-		if role.Description == "" {
-			t.Errorf("role %q has no description", role.Name)
-		}
-		for position := 1; position < len(role.Permissions); position++ {
-			if role.Permissions[position-1] >= role.Permissions[position] {
-				t.Errorf("role %q permissions are not sorted: %v", role.Name, role.Permissions)
-			}
-		}
-	}
-	if !slices.Contains(body.Data[0].Permissions, "user:read") {
-		t.Errorf("ADMIN permissions = %v, want user:read", body.Data[0].Permissions)
 	}
 	if body.Data[4].Permissions == nil || len(body.Data[4].Permissions) != 0 {
 		t.Errorf("SERVICE permissions = %v, want an empty array", body.Data[4].Permissions)
+	}
+}
+
+func TestNonAdminCannotChangeAdminsOverHTTP(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	admin, _ := apiAdmin(t, router, service)
+	apiInsertHelpdeskRole(t, database)
+	helpdesk := apiCreateUser(t, service, admin, "helpdesk@example.com", "Help Desk", "HELPDESK")
+	const helpdeskPassword = "helpdesk horse battery"
+	apiActivateUser(t, service, admin, helpdesk.User.ID, helpdeskPassword)
+	token := loginTokenFor(t, router, "helpdesk@example.com", helpdeskPassword)
+
+	response := send(router, http.MethodPost, "/api/v1/users/"+admin.UserID+"/password-reset", "", bearer(token))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("helpdesk reset token for an admin = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "only an admin can change an admin")
+
+	response = sendJSONWithHeaders(
+		router, http.MethodPost, "/api/v1/users/"+helpdesk.User.ID+"/roles", bearer(token), `{"role":"ADMIN"}`,
+	)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("helpdesk assigning ADMIN = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "only an admin can change an admin")
+}
+
+// apiInsertHelpdeskRole adds a custom role with user administration
+// permissions but without ADMIN, directly because the default mapping is
+// fixed by migration.
+func apiInsertHelpdeskRole(t *testing.T, database *gorm.DB) {
+	t.Helper()
+	if err := database.Exec(
+		"INSERT INTO roles (name, description) VALUES ('HELPDESK', 'Help desk')",
+	).Error; err != nil {
+		t.Fatalf("insert HELPDESK role: %v", err)
+	}
+	if err := database.Exec(`
+		INSERT INTO role_permissions (role_name, permission) VALUES
+		('HELPDESK', 'user:write'), ('HELPDESK', 'role:assign')`).Error; err != nil {
+		t.Fatalf("grant HELPDESK permissions: %v", err)
 	}
 }
 

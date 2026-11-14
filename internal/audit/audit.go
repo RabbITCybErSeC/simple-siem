@@ -15,7 +15,10 @@ import (
 	"gorm.io/gorm"
 )
 
-const redactedValue = "[REDACTED]"
+const (
+	redactedValue = "[REDACTED]"
+	maxPage       = 100000
+)
 
 var sensitiveKeyParts = []string{
 	"api_key",
@@ -41,6 +44,13 @@ var validOutcomes = map[string]struct{}{
 	"PARTIAL":           {},
 	"CANCELED":          {},
 	"SKIPPED":           {},
+}
+
+// ValidOutcome reports whether outcome is one of the values the audit_events
+// table accepts.
+func ValidOutcome(outcome string) bool {
+	_, ok := validOutcomes[outcome]
+	return ok
 }
 
 // Record validates event, redacts sensitive values in a copy of its changes,
@@ -114,8 +124,8 @@ func (stored storedEvent) event() Event {
 // List returns one page of events, newest first, and the total that match.
 // shortcut: page-based with count(*); switch to keyset pagination when audit_events passes a few million rows (Phase 7 measurement).
 func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) ([]Event, int64, error) {
-	if page < 1 || pageSize < 1 {
-		return nil, 0, errors.New("list audit events: page and pageSize must be at least 1")
+	if page < 1 || page > maxPage || pageSize < 1 {
+		return nil, 0, fmt.Errorf("list audit events: page must be 1 to %d and pageSize at least 1", maxPage)
 	}
 
 	query := db.WithContext(ctx).Model(&Event{})
@@ -177,7 +187,7 @@ func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) (
 
 // Get returns one audit event by id.
 func Get(ctx context.Context, db *gorm.DB, id string) (Event, error) {
-	if !isUUID(id) {
+	if !ValidID(id) {
 		return Event{}, ErrNotFound
 	}
 	var row storedEvent
@@ -194,10 +204,10 @@ func Get(ctx context.Context, db *gorm.DB, id string) (Event, error) {
 	return row.event(), nil
 }
 
-// isUUID reports whether id is in canonical UUID form. The database rejects
-// every other form for this column, so the check keeps malformed ids out of
-// the query.
-func isUUID(id string) bool {
+// ValidID reports whether id is in canonical UUID form. The database rejects
+// every other form for a uuid column, so the check keeps malformed ids out of
+// queries.
+func ValidID(id string) bool {
 	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
 		return false
 	}
@@ -242,7 +252,7 @@ func validate(event Event) error {
 			return fmt.Errorf("audit event: %s is required", field.name)
 		}
 	}
-	if _, ok := validOutcomes[event.EventOutcome]; !ok {
+	if !ValidOutcome(event.EventOutcome) {
 		return fmt.Errorf("audit event: eventOutcome %q is not one of the allowed values", event.EventOutcome)
 	}
 	return nil

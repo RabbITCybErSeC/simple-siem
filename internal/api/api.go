@@ -44,7 +44,7 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 
 	policy := newOriginPolicy(dependencies.PublicURL, dependencies.Development, dependencies.Logger)
 	authentication := authHandler{service: dependencies.Auth, logger: dependencies.Logger, policy: policy}
-	users := userHandler{service: dependencies.Auth, database: dependencies.AuditDatabase, logger: dependencies.Logger}
+	users := userHandler{service: dependencies.Auth, logger: dependencies.Logger}
 	auditEvents := auditHandler{database: dependencies.AuditDatabase, logger: dependencies.Logger}
 	v1 := router.Group("/api/v1")
 	v1.GET("/auth/providers", authentication.providers)
