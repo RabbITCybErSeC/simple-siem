@@ -6,6 +6,17 @@ import (
 	"log/slog"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
+	"gorm.io/gorm"
+)
+
+const (
+	defaultPageSize     = 50
+	maxUserPageSize     = 100
+	maxAuditPageSize    = 200
+	maxRequestBodyBytes = 4096
+
+	codeVersionConflict = "VERSION_CONFLICT"
+	codeStateConflict   = "STATE_CONFLICT"
 )
 
 // RequestIDKey is the Gin context key holding the request id, so handlers can
@@ -30,7 +41,8 @@ type originPolicy struct {
 
 // Dependencies are the collaborators NewRouter needs.
 type Dependencies struct {
-	Database       ReadinessChecker
+	Database       ReadinessChecker // readiness probe only
+	AuditDatabase  *gorm.DB         // full handle for the audit and role reads
 	Logger         *slog.Logger
 	Auth           *auth.Service
 	Web            fs.FS
@@ -101,4 +113,83 @@ type providersResponse struct {
 
 type providerItem struct {
 	ID string `json:"id"`
+}
+
+// pagination is the list envelope every paginated route shares.
+type pagination struct {
+	Page       int   `json:"page"`
+	PageSize   int   `json:"pageSize"`
+	TotalItems int64 `json:"totalItems"`
+	TotalPages int   `json:"totalPages"`
+}
+
+type userListResponse struct {
+	Data       []userResponse `json:"data"`
+	Pagination pagination     `json:"pagination"`
+}
+
+type createUserRequest struct {
+	Email       string   `json:"email"`
+	DisplayName string   `json:"displayName"`
+	Roles       []string `json:"roles"`
+}
+
+// updateUserRequest keeps version a pointer so a missing field is a 400, not a
+// silent zero.
+type updateUserRequest struct {
+	Email       *string `json:"email"`
+	DisplayName *string `json:"displayName"`
+	Version     *int    `json:"version"`
+}
+
+type versionRequest struct {
+	Version *int `json:"version"`
+}
+
+type assignRoleRequest struct {
+	Role string `json:"role"`
+}
+
+type resetTokenResponse struct {
+	ResetToken string `json:"resetToken"`
+	ExpiresAt  string `json:"expiresAt"`
+}
+
+type useResetTokenRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+type roleResponse struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+}
+
+type rolesResponse struct {
+	Data []roleResponse `json:"data"`
+}
+
+type auditEventResponse struct {
+	ID             string         `json:"id"`
+	EventName      string         `json:"eventName"`
+	EventCategory  string         `json:"eventCategory"`
+	EventOutcome   string         `json:"eventOutcome"`
+	ActorType      string         `json:"actorType"`
+	ActorID        *string        `json:"actorId"`
+	ActorSessionID *string        `json:"actorSessionId"`
+	RequestID      string         `json:"requestId"`
+	TraceID        string         `json:"traceId"`
+	SourceIP       *string        `json:"sourceIp"`
+	TargetType     string         `json:"targetType"`
+	TargetID       string         `json:"targetId"`
+	Action         string         `json:"action"`
+	Changes        map[string]any `json:"changes"`
+	Redactions     []string       `json:"redactions"`
+	CreatedAt      string         `json:"createdAt"`
+}
+
+type auditListResponse struct {
+	Data       []auditEventResponse `json:"data"`
+	Pagination pagination           `json:"pagination"`
 }

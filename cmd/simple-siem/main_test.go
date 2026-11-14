@@ -162,7 +162,7 @@ func TestRunMigrateAppliesPendingMigrations(t *testing.T) {
 
 func TestNewHTTPServerSetsTimeouts(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, nil, logger)
+	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, nil, nil, logger)
 
 	timeouts := []struct {
 		name string
@@ -603,7 +603,7 @@ func TestNewHTTPServerWiresAuthService(t *testing.T) {
 	database, _ := newAdminTestDatabase(t)
 	service := newAdminTestService(t, database)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, service, logger)
+	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, database, service, logger)
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil)
 	response := httptest.NewRecorder()
@@ -628,7 +628,7 @@ func TestNewHTTPServerSetsSecureBrowserCookie(t *testing.T) {
 		Listen:      "127.0.0.1:0",
 		Environment: config.EnvironmentProduction,
 		PublicURL:   "https://siem.example.com",
-	}, nil, service, logger)
+	}, nil, database, service, logger)
 
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(
 		fmt.Sprintf(`{"email":%q,"password":%q}`, "admin@example.com", cliTestPassword),

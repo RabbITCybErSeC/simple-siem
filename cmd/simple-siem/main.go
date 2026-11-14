@@ -336,15 +336,16 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 		logger.Error("get database connection pool", "error", err)
 		return 1
 	}
-	server := newHTTPServer(settings, sqlDatabase, authService, logger)
+	server := newHTTPServer(settings, sqlDatabase, db, authService, logger)
 	return serveHTTP(ctx, server, settings.ShutdownTimeout)
 }
 
-func newHTTPServer(settings config.Config, database api.ReadinessChecker, authService *auth.Service, logger *slog.Logger) *http.Server {
+func newHTTPServer(settings config.Config, database api.ReadinessChecker, auditDatabase *gorm.DB, authService *auth.Service, logger *slog.Logger) *http.Server {
 	return &http.Server{
 		Addr: settings.Listen,
 		Handler: api.NewRouter(api.Dependencies{
 			Database:       database,
+			AuditDatabase:  auditDatabase,
 			Logger:         logger,
 			Auth:           authService,
 			Web:            web.Files(),

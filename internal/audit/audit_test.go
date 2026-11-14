@@ -836,6 +836,47 @@ func TestListRejectsInvalidPagination(t *testing.T) {
 	}
 }
 
+func TestListAndGetReadSourceIP(t *testing.T) {
+	db := databasetest.New(t)
+	addresses := map[string]net.IP{
+		"ipv4": net.ParseIP("192.0.2.10"),
+		"ipv6": net.ParseIP("2001:db8::10"),
+	}
+	for targetID, address := range addresses {
+		event := eventOfType("SOURCE_IP_TARGET", targetID)
+		event.SourceIP = address
+		if err := audit.Record(db, event); err != nil {
+			t.Fatalf("Record %q: %v", targetID, err)
+		}
+	}
+
+	events, _, err := audit.List(context.Background(), db, audit.Filter{TargetType: "SOURCE_IP_TARGET"}, 1, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(events) != len(addresses) {
+		t.Fatalf("List returned %d events, want %d", len(events), len(addresses))
+	}
+	for _, event := range events {
+		want, ok := addresses[event.TargetID]
+		if !ok {
+			t.Fatalf("List returned unexpected target %q", event.TargetID)
+		}
+		if !event.SourceIP.Equal(want) {
+			t.Errorf("List source IP for %q = %v, want %v", event.TargetID, event.SourceIP, want)
+		}
+	}
+
+	stored := storedEventByTarget(t, db, "ipv4")
+	event, err := audit.Get(context.Background(), db, stored.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !event.SourceIP.Equal(addresses["ipv4"]) {
+		t.Errorf("Get source IP = %v, want %v", event.SourceIP, addresses["ipv4"])
+	}
+}
+
 func TestGetReturnsEvent(t *testing.T) {
 	db := databasetest.New(t)
 	actorID := "actor-get"

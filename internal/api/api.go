@@ -44,15 +44,31 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 
 	policy := newOriginPolicy(dependencies.PublicURL, dependencies.Development, dependencies.Logger)
 	authentication := authHandler{service: dependencies.Auth, logger: dependencies.Logger, policy: policy}
+	users := userHandler{service: dependencies.Auth, database: dependencies.AuditDatabase, logger: dependencies.Logger}
+	auditEvents := auditHandler{database: dependencies.AuditDatabase, logger: dependencies.Logger}
 	v1 := router.Group("/api/v1")
 	v1.GET("/auth/providers", authentication.providers)
 	v1.POST("/auth/login", authentication.login)
+	v1.POST("/auth/password-reset", users.useResetToken)
 	authenticated := v1.Group("",
 		requireSameOriginForCookie(policy, dependencies.Logger),
 		requireSession(dependencies.Auth, dependencies.Logger, policy),
 	)
 	authenticated.POST("/auth/logout", authentication.logout)
 	authenticated.GET("/me", authentication.me)
+
+	authenticated.GET("/users", requirePermission(dependencies.Auth, dependencies.Logger, "user:read"), users.list)
+	authenticated.POST("/users", requirePermission(dependencies.Auth, dependencies.Logger, "user:write", "role:assign"), users.create)
+	authenticated.GET("/users/:userId", requirePermission(dependencies.Auth, dependencies.Logger, "user:read"), users.get)
+	authenticated.PATCH("/users/:userId", requirePermission(dependencies.Auth, dependencies.Logger, "user:write"), users.update)
+	authenticated.POST("/users/:userId/disable", requirePermission(dependencies.Auth, dependencies.Logger, "user:write"), users.disable)
+	authenticated.POST("/users/:userId/enable", requirePermission(dependencies.Auth, dependencies.Logger, "user:write"), users.enable)
+	authenticated.POST("/users/:userId/password-reset", requirePermission(dependencies.Auth, dependencies.Logger, "user:write"), users.createResetToken)
+	authenticated.GET("/roles", requirePermission(dependencies.Auth, dependencies.Logger, "user:read"), users.roles)
+	authenticated.POST("/users/:userId/roles", requirePermission(dependencies.Auth, dependencies.Logger, "role:assign"), users.assignRole)
+	authenticated.DELETE("/users/:userId/roles/:role", requirePermission(dependencies.Auth, dependencies.Logger, "role:assign"), users.removeRole)
+	authenticated.GET("/audit-events", requirePermission(dependencies.Auth, dependencies.Logger, "audit:read"), auditEvents.list)
+	authenticated.GET("/audit-events/:auditEventId", requirePermission(dependencies.Auth, dependencies.Logger, "audit:read"), auditEvents.get)
 
 	router.NoRoute(web.page)
 	return router
