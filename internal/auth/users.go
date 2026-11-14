@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
+	"github.com/RabbITCybErSeC/simple-siem/internal/outbox"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -400,6 +401,13 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 		if err := audit.Record(tx, event); err != nil {
 			return err
 		}
+		if user.OnCall {
+			disabledEvent := onCallEvent(actor, user, false)
+			disabledEvent.Payload["reason"] = "user_disabled"
+			if err := outbox.Record(tx, disabledEvent); err != nil {
+				return err
+			}
+		}
 
 		disabled, err = loadUserWithRoles(tx, user.ID)
 		return err
@@ -501,6 +509,9 @@ func (service *Service) SetOnCall(ctx context.Context, actor Actor, client Clien
 			"after":  map[string]any{"onCall": onCall},
 		}
 		if err := audit.Record(tx, event); err != nil {
+			return err
+		}
+		if err := outbox.Record(tx, onCallEvent(actor, user, onCall)); err != nil {
 			return err
 		}
 
@@ -965,6 +976,22 @@ func otherActiveAdmins(database *gorm.DB, userID string) (int64, error) {
 		return 0, fmt.Errorf("count active admins: %w", err)
 	}
 	return count, nil
+}
+
+// onCallEvent builds the event every on-call change writes; the disable path
+// adds its reason.
+func onCallEvent(actor Actor, user User, onCall bool) outbox.Event {
+	return outbox.Event{
+		Type:      outbox.TypeUserOnCallChanged,
+		Version:   1,
+		Actor:     outbox.Actor{Type: outbox.ActorUser, ID: actor.UserID},
+		SubjectID: user.ID,
+		Payload: map[string]any{
+			"userId":      user.ID,
+			"displayName": user.DisplayName,
+			"onCall":      onCall,
+		},
+	}
 }
 
 // userAuditEvent fills the fields every admin mutation of a user shares.

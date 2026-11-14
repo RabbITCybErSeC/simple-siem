@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
+	"github.com/RabbITCybErSeC/simple-siem/internal/outbox"
 	"gorm.io/gorm"
 )
 
@@ -667,6 +670,44 @@ func eventsNamed(t *testing.T, db *gorm.DB, targetID, name string) []storedAudit
 	return events
 }
 
+type storedOutboxEvent struct {
+	Actor       []byte `gorm:"column:actor"`
+	SubjectType string `gorm:"column:subject_type"`
+	Payload     []byte `gorm:"column:payload"`
+}
+
+func onCallEvents(t *testing.T, db *gorm.DB, subjectID string) []storedOutboxEvent {
+	t.Helper()
+	var events []storedOutboxEvent
+	err := db.Raw(`
+		SELECT actor, subject_type, payload
+		FROM event_outbox
+		WHERE type = 'user.on_call_changed' AND subject_id = ?
+		ORDER BY occurred_at, id`, subjectID).Scan(&events).Error
+	if err != nil {
+		t.Fatalf("read on-call outbox events for %q: %v", subjectID, err)
+	}
+	return events
+}
+
+func outboxActor(t *testing.T, event storedOutboxEvent) outbox.Actor {
+	t.Helper()
+	var actor outbox.Actor
+	if err := json.Unmarshal(event.Actor, &actor); err != nil {
+		t.Fatalf("decode outbox actor: %v", err)
+	}
+	return actor
+}
+
+func outboxPayload(t *testing.T, event storedOutboxEvent) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("decode outbox payload: %v", err)
+	}
+	return payload
+}
+
 func TestUpdateUser(t *testing.T) {
 	test := newTestService(t)
 	admin := test.createAdmin(t, testEmail)
@@ -976,6 +1017,9 @@ func TestDisableUser(t *testing.T) {
 	if !ok || after["status"] != StatusDisabled || after["onCall"] != false {
 		t.Errorf("disable audit after = %v, want DISABLED and onCall false", changes["after"])
 	}
+	if events := onCallEvents(t, test.database, target.ID); len(events) != 0 {
+		t.Errorf("DisableUser of a user not on call wrote %d outbox events, want 0", len(events))
+	}
 }
 
 func TestDisableUserRejectsOwnAccount(t *testing.T) {
@@ -1183,6 +1227,23 @@ func TestDisableUserTakesUserOffCall(t *testing.T) {
 	if !ok || after["status"] != StatusDisabled || after["onCall"] != false {
 		t.Errorf("disable audit after = %v, want DISABLED and onCall false", changes["after"])
 	}
+
+	onCallOutbox := onCallEvents(t, test.database, analyst.User.ID)
+	if len(onCallOutbox) != 1 {
+		t.Fatalf("DisableUser wrote %d outbox events, want 1", len(onCallOutbox))
+	}
+	if got, want := outboxActor(t, onCallOutbox[0]), (outbox.Actor{Type: outbox.ActorUser, ID: actorUser.ID}); got != want {
+		t.Errorf("disabled on-call outbox actor = %+v, want %+v", got, want)
+	}
+	wantPayload := map[string]any{
+		"userId":      analyst.User.ID,
+		"displayName": analyst.User.DisplayName,
+		"onCall":      false,
+		"reason":      "user_disabled",
+	}
+	if got := outboxPayload(t, onCallOutbox[0]); !reflect.DeepEqual(got, wantPayload) {
+		t.Errorf("disabled on-call outbox payload = %v, want %v", got, wantPayload)
+	}
 }
 
 func TestEnableUserRejectsStaleVersion(t *testing.T) {
@@ -1262,6 +1323,25 @@ func TestSetOnCall(t *testing.T) {
 		t.Errorf("on-call audit after = %v, want onCall true", changes["after"])
 	}
 
+	onCallOutbox := onCallEvents(t, test.database, analyst.User.ID)
+	if len(onCallOutbox) != 1 {
+		t.Fatalf("SetOnCall wrote %d outbox events, want 1", len(onCallOutbox))
+	}
+	if got, want := outboxActor(t, onCallOutbox[0]), (outbox.Actor{Type: outbox.ActorUser, ID: admin.ID}); got != want {
+		t.Errorf("on-call outbox actor = %+v, want %+v", got, want)
+	}
+	if got := onCallOutbox[0].SubjectType; got != "user" {
+		t.Errorf("on-call outbox subject_type = %q, want user", got)
+	}
+	onCallPayload := map[string]any{
+		"userId":      analyst.User.ID,
+		"displayName": analyst.User.DisplayName,
+		"onCall":      true,
+	}
+	if got := outboxPayload(t, onCallOutbox[0]); !reflect.DeepEqual(got, onCallPayload) {
+		t.Errorf("on-call outbox payload = %v, want %v", got, onCallPayload)
+	}
+
 	unchanged, err := test.service.SetOnCall(
 		context.Background(), actor, testClient(), analyst.User.ID, true,
 	)
@@ -1273,6 +1353,9 @@ func TestSetOnCall(t *testing.T) {
 	}
 	if got := len(eventsNamed(t, test.database, analyst.User.ID, "simple_siem.user.on_call_changed")); got != 1 {
 		t.Errorf("SetOnCall with the same value wrote another audit event (%d total, want 1)", got)
+	}
+	if got := len(onCallEvents(t, test.database, analyst.User.ID)); got != 1 {
+		t.Errorf("SetOnCall with the same value wrote another outbox event (%d total, want 1)", got)
 	}
 
 	off, err := test.service.SetOnCall(
@@ -1294,6 +1377,15 @@ func TestSetOnCall(t *testing.T) {
 	if before["onCall"] != true || after["onCall"] != false {
 		t.Errorf("Second on-call audit = %v, want before true and after false", changes)
 	}
+
+	onCallOutbox = onCallEvents(t, test.database, analyst.User.ID)
+	if len(onCallOutbox) != 2 {
+		t.Fatalf("SetOnCall(false) left %d outbox events, want 2", len(onCallOutbox))
+	}
+	onCallPayload["onCall"] = false
+	if got := outboxPayload(t, onCallOutbox[1]); !reflect.DeepEqual(got, onCallPayload) {
+		t.Errorf("second on-call outbox payload = %v, want %v", got, onCallPayload)
+	}
 }
 
 func TestSetOnCallRejectsInvitedUser(t *testing.T) {
@@ -1314,6 +1406,9 @@ func TestSetOnCallRejectsInvitedUser(t *testing.T) {
 	}
 	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
 		t.Errorf("audit events = %d after the refusal, want %d", got, eventsBefore)
+	}
+	if events := onCallEvents(t, test.database, invited.User.ID); len(events) != 0 {
+		t.Errorf("refused on-call wrote %d outbox events, want 0", len(events))
 	}
 }
 
@@ -1371,6 +1466,9 @@ func TestSetOnCallRejectsAdminTargetForNonAdmin(t *testing.T) {
 	}
 	if got := countRows(t, test.database, "audit_events"); got != eventsBefore {
 		t.Errorf("audit events = %d after the refusal, want %d", got, eventsBefore)
+	}
+	if events := onCallEvents(t, test.database, admin.ID); len(events) != 0 {
+		t.Errorf("refused on-call wrote %d outbox events, want 0", len(events))
 	}
 }
 
