@@ -369,8 +369,13 @@ func loadPipelines(directory string) ([]Pipeline, []error) {
 }
 
 // IndexAllowed reports whether index matches at least one allowlist entry,
-// where only the allowlist entry may contain a wildcard.
+// where only the allowlist entry may contain a wildcard. An index that fails
+// the index-pattern rule is never allowed, so a comma or any other separator
+// cannot ride a wildcard into another index.
 func IndexAllowed(index string, allowlist []string) bool {
+	if !validIndexPattern(index) {
+		return false
+	}
 	for _, entry := range allowlist {
 		if matched, err := path.Match(entry, index); err == nil && matched {
 			return true

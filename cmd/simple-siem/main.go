@@ -86,6 +86,28 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 	}
 }
 
+// loadFileConfig loads and validates the file configuration, including the
+// Elasticsearch dialect of every query template. Every command that loads file
+// configuration (the coming run) must use it.
+func loadFileConfig(directory string, environment config.Environment, getenv func(string) string) (config.Files, error) {
+	files, err := config.LoadFiles(directory, environment, getenv)
+	if err != nil {
+		return config.Files{}, err
+	}
+
+	var templateProblems []error
+	for _, id := range slices.Sorted(maps.Keys(files.QueryTemplates)) {
+		template := files.QueryTemplates[id]
+		if err := elasticsearch.ValidateQuery(template.RawQuery); err != nil {
+			templateProblems = append(templateProblems, fmt.Errorf("query template %s: %w", template.File, err))
+		}
+	}
+	if err := errors.Join(templateProblems...); err != nil {
+		return config.Files{}, err
+	}
+	return files, nil
+}
+
 func runConfig(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "validate" {
 		_, _ = fmt.Fprintln(stderr, configUsage)
@@ -104,20 +126,8 @@ func runConfig(args []string, getenv func(string) string, stdout, stderr io.Writ
 		return 2
 	}
 
-	files, err := config.LoadFiles(*directory, environment, getenv)
+	files, err := loadFileConfig(*directory, environment, getenv)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, err)
-		return 1
-	}
-
-	var templateProblems []error
-	for _, id := range slices.Sorted(maps.Keys(files.QueryTemplates)) {
-		template := files.QueryTemplates[id]
-		if err := elasticsearch.ValidateQuery(template.RawQuery); err != nil {
-			templateProblems = append(templateProblems, fmt.Errorf("query template %s: %w", template.File, err))
-		}
-	}
-	if err := errors.Join(templateProblems...); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}

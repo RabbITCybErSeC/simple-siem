@@ -123,8 +123,12 @@ func (fetcherInstance *Fetcher) Fetch(ctx context.Context, request fetcher.Fetch
 			return failedStatus(status, failure.code, failure.message, failure.retryable)
 		}
 
-		size := min(remaining, fetcherInstance.instance.Defaults.PageSize)
 		keepAlive := time.Duration(fetcherInstance.instance.Defaults.KeepAlive)
+		size := min(remaining, fetcherInstance.instance.Defaults.PageSize)
+		probeInPage := remaining < fetcherInstance.instance.Defaults.PageSize
+		if probeInPage {
+			size = remaining + 1
+		}
 		body, err := json.Marshal(searchPage(base, size, currentPIT, keepAlive, searchAfter))
 		if err != nil {
 			return failedStatus(status, fetcher.ErrorCodeMalformedResponse, "encode search request", false)
@@ -133,13 +137,11 @@ func (fetcherInstance *Fetcher) Fetch(ctx context.Context, request fetcher.Fetch
 		page, failure := fetcherInstance.search(ctx, body, status.BytesRead)
 		status.BytesRead += page.bytesRead
 		if failure != nil {
-			if failure.partial {
-				return partialStatus(status, failure.code, failure.message, failure.retryable)
-			}
-			return failedStatus(status, failure.code, failure.message, failure.retryable)
+			return statusForFailure(status, failure)
 		}
 		if page.pitID != "" {
 			currentPIT = page.pitID
+			fetcherInstance.observePIT(page.pitID)
 		}
 		if len(page.hits) == 0 {
 			return status, nil
@@ -167,8 +169,38 @@ func (fetcherInstance *Fetcher) Fetch(ctx context.Context, request fetcher.Fetch
 		status.RecordCount += len(records)
 		last := records[len(records)-1]
 		status.LastRecord = &fetcher.LastRecord{FetchTime: last.FetchTime, Key: last.Key}
+
+		extraInPage := len(page.hits) > len(records)
+		pageFull := len(page.hits) == size
 		remaining -= len(records)
+
 		if remaining == 0 {
+			extra := extraInPage
+			if !extra && !probeInPage && pageFull {
+				// The budget equals the page size, so the probe hit did not fit;
+				// one single-hit search decides whether the result is truncated.
+				probeBody, err := json.Marshal(searchPage(base, 1, currentPIT, keepAlive, lastSort))
+				if err != nil {
+					return failedStatus(status, fetcher.ErrorCodeMalformedResponse, "encode probe request", false)
+				}
+				probe, failure := fetcherInstance.search(ctx, probeBody, status.BytesRead)
+				status.BytesRead += probe.bytesRead
+				if failure != nil {
+					return statusForFailure(status, failure)
+				}
+				if probe.pitID != "" {
+					currentPIT = probe.pitID
+					fetcherInstance.observePIT(probe.pitID)
+				}
+				extra = len(probe.hits) > 0
+			}
+			if !extra {
+				return status, nil
+			}
+			if last.FetchTime.Equal(request.Window.Start) {
+				return failedStatus(status, fetcher.ErrorCodeResultLimitNoProgress,
+					"the fetch reached max_results with all remaining records at the window start; raise max_results", false)
+			}
 			return partialStatus(status, fetcher.ErrorCodeResultLimitReached,
 				"the fetch reached the maximum number of results", false)
 		}
@@ -181,21 +213,67 @@ func (fetcherInstance *Fetcher) openPIT(ctx context.Context, index string) (stri
 	path := "/" + url.PathEscape(index) + "/_pit?keep_alive=" + url.QueryEscape(keepAliveValue(keepAlive))
 
 	status, body, err := fetcherInstance.doRequest(ctx, http.MethodPost, path, nil, maxControlBody)
-	if err != nil {
-		if errors.Is(err, errBodyTooLarge) {
-			return "", &fetchFailure{code: fetcher.ErrorCodeMalformedResponse, message: "open point in time: response too large"}
-		}
+	oversized := errors.Is(err, errBodyTooLarge)
+	if err != nil && !oversized {
 		return "", transportFailure(ctx, err)
 	}
 	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		return "", responseFailure(status, body)
 	}
 
-	var response pitResponse
-	if err := json.Unmarshal(body, &response); err != nil || response.ID == "" {
-		return "", &fetchFailure{code: fetcher.ErrorCodeMalformedResponse, message: "open point in time: malformed response"}
+	pitID := pitIDFromBody(body)
+	if oversized || pitID == "" {
+		// A usable id may have arrived before the truncation or the syntax
+		// error; close it so the open context does not leak.
+		if pitID != "" {
+			fetcherInstance.closePIT(pitID)
+		}
+		message := "open point in time: malformed response"
+		if oversized {
+			message = "open point in time: response too large"
+		}
+		return "", &fetchFailure{code: fetcher.ErrorCodeMalformedResponse, message: message}
 	}
-	return response.ID, nil
+	fetcherInstance.observePIT(pitID)
+	return pitID, nil
+}
+
+// pitIDFromBody extracts the id from a valid or truncated point-in-time
+// response. The token scan recovers an id that precedes a syntax error.
+func pitIDFromBody(body []byte) string {
+	var response pitResponse
+	if err := json.Unmarshal(body, &response); err == nil && response.ID != "" {
+		return response.ID
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	depth := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		if delimiter, ok := token.(json.Delim); ok {
+			switch delimiter {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+			continue
+		}
+		key, ok := token.(string)
+		if !ok || depth != 1 || key != "id" {
+			continue
+		}
+		value, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		if id, ok := value.(string); ok {
+			return id
+		}
+	}
 }
 
 func (fetcherInstance *Fetcher) search(ctx context.Context, body []byte, bytesRead int64) (pageResult, *fetchFailure) {
@@ -208,11 +286,12 @@ func (fetcherInstance *Fetcher) search(ctx context.Context, body []byte, bytesRe
 	result := pageResult{bytesRead: int64(len(responseBody))}
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
-			return result, byteLimitFailure()
+			// The over-limit page is not accepted, so it is not counted.
+			return pageResult{}, byteLimitFailure()
 		}
 		return result, transportFailure(ctx, err)
 	}
-	if status == http.StatusNotFound && errorType(responseBody) == searchContextMissingException {
+	if status == http.StatusNotFound && isSearchContextMissing(responseBody) {
 		return result, &fetchFailure{
 			code:      fetcher.ErrorCodePITExpired,
 			message:   "the point in time expired before the fetch completed",
@@ -282,6 +361,9 @@ func (fetcherInstance *Fetcher) exchange(ctx context.Context, method, path strin
 
 		response, err := fetcherInstance.client.Do(request)
 		if err != nil {
+			if !isDialError(err) {
+				return 0, nil, err
+			}
 			lastErr = err
 			continue
 		}
@@ -315,6 +397,8 @@ func responseFailure(status int, body []byte) *fetchFailure {
 		return &fetchFailure{code: fetcher.ErrorCodeQueryRejected, message: fmt.Sprintf("backend returned status %d", status)}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return &fetchFailure{code: fetcher.ErrorCodeAuthFailed, message: fmt.Sprintf("backend returned status %d", status)}
+	case status == http.StatusRequestTimeout || status == http.StatusTooManyRequests:
+		return &fetchFailure{code: fetcher.ErrorCodeBackendUnavailable, message: fmt.Sprintf("backend returned status %d", status), retryable: true}
 	case status >= http.StatusInternalServerError:
 		return &fetchFailure{code: fetcher.ErrorCodeBackendUnavailable, message: fmt.Sprintf("backend returned status %d", status), retryable: true}
 	case status >= http.StatusBadRequest:
@@ -410,9 +494,35 @@ func decodeError(body []byte) (errorType, reason string, ok bool) {
 	return errorType, reason, true
 }
 
-func errorType(body []byte) string {
-	value, _, _ := decodeError(body)
-	return value
+func isSearchContextMissing(body []byte) bool {
+	var response errorResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return false
+	}
+	if response.Error.Type == searchContextMissingException {
+		return true
+	}
+	for index := range response.Error.RootCause {
+		if hasErrorType(&response.Error.RootCause[index], searchContextMissingException) {
+			return true
+		}
+	}
+	return hasErrorType(response.Error.CausedBy, searchContextMissingException)
+}
+
+func hasErrorType(cause *errorCause, errorType string) bool {
+	for cause != nil {
+		if cause.Type == errorType {
+			return true
+		}
+		cause = cause.CausedBy
+	}
+	return false
+}
+
+func isDialError(err error) bool {
+	var operationError *net.OpError
+	return errors.As(err, &operationError) && operationError.Op == "dial"
 }
 
 func sourceRecord(hit searchHit, instanceID string, fetchedAt time.Time) (fetcher.SourceRecord, error) {
@@ -446,6 +556,25 @@ func failedStatus(status fetcher.FetchStatus, code fetcher.ErrorCode, message st
 	status.Status = fetcher.StatusFailed
 	status.Errors = append(status.Errors, fetcher.FetchError{Code: code, Message: message, Retryable: retryable})
 	return status, fmt.Errorf("%s: %s", code, message)
+}
+
+// statusForFailure turns a page failure into PARTIAL, except a byte limit hit
+// before the first record, which cannot make progress and is FAILED.
+func statusForFailure(status fetcher.FetchStatus, failure *fetchFailure) (fetcher.FetchStatus, error) {
+	if failure.code == fetcher.ErrorCodeByteLimitReached && status.RecordCount == 0 {
+		return failedStatus(status, failure.code,
+			"the fetch reached the maximum number of bytes before any record was emitted; raise max_bytes or lower page_size", false)
+	}
+	if failure.partial {
+		return partialStatus(status, failure.code, failure.message, failure.retryable)
+	}
+	return failedStatus(status, failure.code, failure.message, failure.retryable)
+}
+
+func (fetcherInstance *Fetcher) observePIT(pitID string) {
+	if fetcherInstance.onPIT != nil {
+		fetcherInstance.onPIT(pitID)
+	}
 }
 
 func partialStatus(status fetcher.FetchStatus, code fetcher.ErrorCode, message string, retryable bool) (fetcher.FetchStatus, error) {

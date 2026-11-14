@@ -31,11 +31,6 @@ var fieldQueryNodes = map[string]bool{
 	"prefix":       true,
 }
 
-var fieldQueryOptions = map[string]bool{
-	"value": true, "query": true, "boost": true,
-	"case_insensitive": true, "operator": true,
-}
-
 // ValidateQuery checks that a template's raw query holds only the allowed
 // Elasticsearch DSL nodes. Errors name the JSON path of the offending node.
 func ValidateQuery(rawQuery map[string]any) error {
@@ -156,8 +151,22 @@ func validateFieldQuery(node any, path string) error {
 	}
 	if options, isOptions := value.(map[string]any); isOptions {
 		for _, option := range slices.Sorted(maps.Keys(options)) {
-			if !fieldQueryOptions[option] {
-				return fmt.Errorf("%s.%s: unknown option", fieldPath, option)
+			optionPath := fieldPath + "." + option
+			switch option {
+			case "value", "query", "operator":
+				if !isScalar(options[option]) {
+					return fmt.Errorf("%s: must be a scalar or placeholder", optionPath)
+				}
+			case "boost":
+				if !isNumber(options[option]) {
+					return fmt.Errorf("%s: must be a number", optionPath)
+				}
+			case "case_insensitive":
+				if _, isBool := options[option].(bool); !isBool {
+					return fmt.Errorf("%s: must be a boolean", optionPath)
+				}
+			default:
+				return fmt.Errorf("%s: unknown option", optionPath)
 			}
 		}
 		return nil
@@ -200,7 +209,7 @@ func validateTerms(node any, path string) error {
 	}
 	for index, value := range values {
 		if !isScalar(value) {
-			return fmt.Errorf("%s[%d]: must be a scalar", fieldPath, index)
+			return fmt.Errorf("%s[%d]: must be a scalar or placeholder", fieldPath, index)
 		}
 	}
 	return nil
@@ -232,7 +241,7 @@ func validateRange(node any, path string) error {
 		switch option {
 		case "gte", "gt", "lte", "lt", "format", "time_zone":
 			if !isScalar(bounds[option]) {
-				return fmt.Errorf("%s.%s: must be a scalar", fieldPath, option)
+				return fmt.Errorf("%s.%s: must be a scalar or placeholder", fieldPath, option)
 			}
 		default:
 			return fmt.Errorf("%s.%s: unknown range option", fieldPath, option)
@@ -258,6 +267,9 @@ func validateExists(node any, path string) error {
 	field, ok := value.(string)
 	if !ok {
 		return fmt.Errorf("%s.field: must be a field name", path)
+	}
+	if isPlaceholder(field) {
+		return fmt.Errorf("%s.field: must be a literal field name", path)
 	}
 	return validateFieldName(field, path+".field")
 }
@@ -313,11 +325,20 @@ func validateSource(node any) error {
 
 func validateStringList(values []any, path string) error {
 	for index, value := range values {
-		if !isString(value) {
+		field, ok := value.(string)
+		if !ok {
 			return fmt.Errorf("%s[%d]: must be a field name", path, index)
+		}
+		if isPlaceholder(field) {
+			return fmt.Errorf("%s[%d]: must be a literal field name", path, index)
 		}
 	}
 	return nil
+}
+
+// isPlaceholder reports whether value is a whole template placeholder.
+func isPlaceholder(value string) bool {
+	return strings.HasPrefix(value, "${parameters.") && strings.HasSuffix(value, "}")
 }
 
 func validateFieldName(field, path string) error {

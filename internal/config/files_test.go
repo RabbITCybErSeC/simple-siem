@@ -1580,6 +1580,8 @@ func TestIndexAllowed(t *testing.T) {
 		{name: "second entry matches", index: "edr-1", allowlist: []string{"auth-*", "edr-*"}, want: true},
 		{name: "case sensitive", index: "Auth-linux", allowlist: []string{"auth-*"}, want: false},
 		{name: "empty allowlist", index: "auth-linux", allowlist: nil, want: false},
+		{name: "comma cannot widen the index", index: "logs-a,secrets", allowlist: []string{"logs-*"}, want: false},
+		{name: "hidden index cannot ride a wildcard", index: "logs-x,.security-7", allowlist: []string{"logs-*"}, want: false},
 	}
 
 	for _, test := range tests {

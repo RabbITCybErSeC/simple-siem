@@ -17,7 +17,7 @@ func TestValidateQueryAcceptsAllowedNodes(t *testing.T) {
 		{
 			name: "term options",
 			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{
-				"user.name": map[string]any{"value": "root", "boost": 1, "case_insensitive": true},
+				"user.name": map[string]any{"value": "root", "boost": 1, "case_insensitive": true, "operator": "and"},
 			}}},
 		},
 		{
@@ -163,6 +163,61 @@ func TestValidateQueryRejectsDisallowedNodes(t *testing.T) {
 			name:     "bool unknown key",
 			rawQuery: map[string]any{"query": map[string]any{"bool": map[string]any{"minimum_should_match": 1, "script": "x"}}},
 			wantPath: "query.bool.script",
+		},
+		{
+			name:     "exists field is a placeholder",
+			rawQuery: map[string]any{"query": map[string]any{"exists": map[string]any{"field": "${parameters.field}"}}},
+			wantPath: "query.exists.field",
+		},
+		{
+			name:     "term option value is an object",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": map[string]any{"value": map[string]any{"nested": true}}}}},
+			wantPath: "query.term.a.value",
+		},
+		{
+			name:     "term option value is a list",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": map[string]any{"value": []any{"x"}}}}},
+			wantPath: "query.term.a.value",
+		},
+		{
+			name:     "term boost is not a number",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": map[string]any{"value": "x", "boost": "high"}}}},
+			wantPath: "query.term.a.boost",
+		},
+		{
+			name:     "term case_insensitive is not a bool",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": map[string]any{"value": "x", "case_insensitive": "yes"}}}},
+			wantPath: "query.term.a.case_insensitive",
+		},
+		{
+			name:     "term operator is an object",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": map[string]any{"value": "x", "operator": map[string]any{}}}}},
+			wantPath: "query.term.a.operator",
+		},
+		{
+			name:     "terms element is a list",
+			rawQuery: map[string]any{"query": map[string]any{"terms": map[string]any{"a": []any{[]any{"x"}}}}},
+			wantPath: "query.terms.a[0]",
+		},
+		{
+			name:     "range option is a list",
+			rawQuery: map[string]any{"query": map[string]any{"range": map[string]any{"@timestamp": map[string]any{"gte": []any{"now"}}}}},
+			wantPath: "query.range.@timestamp.gte",
+		},
+		{
+			name:     "source element is a placeholder",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": "b"}}, "_source": []any{"${parameters.field}"}},
+			wantPath: "_source[0]",
+		},
+		{
+			name:     "source includes element is a placeholder",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": "b"}}, "_source": map[string]any{"includes": []any{"${parameters.field}"}}},
+			wantPath: "_source.includes[0]",
+		},
+		{
+			name:     "source excludes element is a placeholder",
+			rawQuery: map[string]any{"query": map[string]any{"term": map[string]any{"a": "b"}}, "_source": map[string]any{"excludes": []any{"${parameters.field}"}}},
+			wantPath: "_source.excludes[0]",
 		},
 		{
 			name: "minimum_should_match is not an int",

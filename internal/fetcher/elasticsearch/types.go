@@ -20,7 +20,8 @@ const (
 type Fetcher struct {
 	instance      config.FetcherInstance
 	client        *http.Client
-	authorization string // precomputed header value; never logged
+	authorization string             // precomputed header value; never logged
+	onPIT         func(pitID string) // test hook: observes each point in time
 }
 
 // pitResponse is Elasticsearch's reply to opening or refreshing a point in
@@ -48,7 +49,16 @@ type searchHit struct {
 // errorResponse is Elasticsearch's error object.
 type errorResponse struct {
 	Error struct {
-		Type   string `json:"type"`
-		Reason string `json:"reason"`
+		Type      string       `json:"type"`
+		Reason    string       `json:"reason"`
+		RootCause []errorCause `json:"root_cause"`
+		CausedBy  *errorCause  `json:"caused_by"`
 	} `json:"error"`
+}
+
+// errorCause is one link in Elasticsearch's nested error cause chain.
+type errorCause struct {
+	Type     string      `json:"type"`
+	Reason   string      `json:"reason"`
+	CausedBy *errorCause `json:"caused_by"`
 }

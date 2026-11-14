@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -251,6 +252,18 @@ func TestFetchMapsResponseStatus(t *testing.T) {
 			retryable: true,
 		},
 		{
+			name:      "request timeout",
+			status:    http.StatusRequestTimeout,
+			code:      fetcher.ErrorCodeBackendUnavailable,
+			retryable: true,
+		},
+		{
+			name:      "too many requests",
+			status:    http.StatusTooManyRequests,
+			code:      fetcher.ErrorCodeBackendUnavailable,
+			retryable: true,
+		},
+		{
 			name:      "internal server error",
 			status:    http.StatusInternalServerError,
 			code:      fetcher.ErrorCodeBackendUnavailable,
@@ -394,6 +407,24 @@ func TestFetchPreflightSendsNoRequest(t *testing.T) {
 			request: func() fetcher.FetchRequest {
 				request := testFetchRequest()
 				request.Index = "edr-2026.11.13"
+				return request
+			},
+			want: fetcher.ErrorCodeIndexNotAllowed,
+		},
+		{
+			name: "comma in the index",
+			request: func() fetcher.FetchRequest {
+				request := testFetchRequest()
+				request.Index = "logs-a,secrets"
+				return request
+			},
+			want: fetcher.ErrorCodeIndexNotAllowed,
+		},
+		{
+			name: "hidden index with a comma",
+			request: func() fetcher.FetchRequest {
+				request := testFetchRequest()
+				request.Index = "logs-x,.security-7"
 				return request
 			},
 			want: fetcher.ErrorCodeIndexNotAllowed,
@@ -655,8 +686,150 @@ func TestFetchResultLimit(t *testing.T) {
 	if len(requests) != 3 || closeCount != 1 {
 		t.Errorf("searches/closes = %d/%d, want 3/1", len(requests), closeCount)
 	}
-	if got := requests[2]["size"]; got != float64(2) {
-		t.Errorf("last search size = %#v, want 2", got)
+	if got := requests[2]["size"]; got != float64(3) {
+		t.Errorf("last search size = %#v, want 3 (one probe hit beyond max_results)", got)
+	}
+}
+
+func TestFetchExactResultLimit(t *testing.T) {
+	tests := []struct {
+		name          string
+		pages         [][]map[string]any
+		wantStatus    fetcher.Status
+		wantTruncated bool
+	}{
+		{
+			name: "exactly max_results",
+			pages: [][]map[string]any{
+				{fakeHit("a", 1), fakeHit("b", 2), fakeHit("c", 3), fakeHit("d", 4), fakeHit("e", 5)},
+				{fakeHit("f", 6), fakeHit("g", 7), fakeHit("h", 8), fakeHit("i", 9), fakeHit("j", 10)},
+				{fakeHit("k", 11), fakeHit("l", 12)},
+			},
+			wantStatus:    fetcher.StatusOK,
+			wantTruncated: false,
+		},
+		{
+			name: "one more match",
+			pages: [][]map[string]any{
+				{fakeHit("a", 1), fakeHit("b", 2), fakeHit("c", 3), fakeHit("d", 4), fakeHit("e", 5)},
+				{fakeHit("f", 6), fakeHit("g", 7), fakeHit("h", 8), fakeHit("i", 9), fakeHit("j", 10)},
+				{fakeHit("k", 11), fakeHit("l", 12), fakeHit("m", 13)},
+			},
+			wantStatus:    fetcher.StatusPartial,
+			wantTruncated: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend(t, test.pages)
+			fetcherClient := newBackendFetcher(t, backend, func(instance *config.FetcherInstance) {
+				instance.Defaults.PageSize = 5
+				instance.Defaults.MaxResults = 12
+			})
+
+			var sizes []int
+			status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), func(page []fetcher.SourceRecord) error {
+				sizes = append(sizes, len(page))
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("Fetch() error = %v", err)
+			}
+			if status.Status != test.wantStatus || status.Truncated != test.wantTruncated {
+				t.Errorf("status = %q truncated = %t, want %q/%t", status.Status, status.Truncated, test.wantStatus, test.wantTruncated)
+			}
+			if status.RecordCount != 12 || len(sizes) != 3 || sizes[2] != 2 {
+				t.Errorf("record count = %d pages = %v, want 12 and [5 5 2]", status.RecordCount, sizes)
+			}
+			requests, _, _, _ := backend.requests()
+			if len(requests) != 3 || requests[2]["size"] != float64(3) {
+				t.Errorf("last search size = %#v, want 3", requests[len(requests)-1]["size"])
+			}
+			if test.wantTruncated {
+				requirePartial(t, status, fetcher.ErrorCodeResultLimitReached, false)
+			} else if len(status.Errors) != 0 {
+				t.Errorf("errors = %#v, want none", status.Errors)
+			}
+		})
+	}
+}
+
+func TestFetchExactResultLimitAtPageSize(t *testing.T) {
+	tests := []struct {
+		name       string
+		pages      [][]map[string]any
+		wantStatus fetcher.Status
+	}{
+		{
+			name:       "exactly one page",
+			pages:      [][]map[string]any{{fakeHit("a", 1), fakeHit("b", 2), fakeHit("c", 3), fakeHit("d", 4), fakeHit("e", 5)}},
+			wantStatus: fetcher.StatusOK,
+		},
+		{
+			name: "one more match",
+			pages: [][]map[string]any{
+				{fakeHit("a", 1), fakeHit("b", 2), fakeHit("c", 3), fakeHit("d", 4), fakeHit("e", 5)},
+				{fakeHit("f", 6)},
+			},
+			wantStatus: fetcher.StatusPartial,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend(t, test.pages)
+			fetcherClient := newBackendFetcher(t, backend, func(instance *config.FetcherInstance) {
+				instance.Defaults.PageSize = 5
+				instance.Defaults.MaxResults = 5
+			})
+
+			status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), discardPage)
+			if err != nil {
+				t.Fatalf("Fetch() error = %v", err)
+			}
+			if status.Status != test.wantStatus {
+				t.Errorf("status = %q, want %q", status.Status, test.wantStatus)
+			}
+			if status.RecordCount != 5 || status.PageCount != 1 {
+				t.Errorf("record/page count = %d/%d, want 5/1", status.RecordCount, status.PageCount)
+			}
+			requests, _, _, _ := backend.requests()
+			if len(requests) != 2 || requests[1]["size"] != float64(1) {
+				t.Errorf("requests = %d last size = %#v, want a single-hit probe", len(requests), requests[len(requests)-1]["size"])
+			}
+			if test.wantStatus == fetcher.StatusPartial {
+				requirePartial(t, status, fetcher.ErrorCodeResultLimitReached, false)
+			}
+		})
+	}
+}
+
+func TestFetchResultLimitNoProgress(t *testing.T) {
+	start := testFetchRequest().Window.Start.Format(time.RFC3339Nano)
+	pages := [][]map[string]any{
+		{fakeHitAtTime("a", start, 1), fakeHitAtTime("b", start, 2), fakeHitAtTime("c", start, 3), fakeHitAtTime("d", start, 4), fakeHitAtTime("e", start, 5)},
+		{fakeHitAtTime("f", start, 6), fakeHitAtTime("g", start, 7), fakeHitAtTime("h", start, 8), fakeHitAtTime("i", start, 9), fakeHitAtTime("j", start, 10)},
+		{fakeHitAtTime("k", start, 11), fakeHitAtTime("l", start, 12), fakeHitAtTime("m", start, 13), fakeHitAtTime("n", start, 14), fakeHitAtTime("o", start, 15)},
+	}
+	backend := newFakeBackend(t, pages)
+	fetcherClient := newBackendFetcher(t, backend, func(instance *config.FetcherInstance) {
+		instance.Defaults.PageSize = 5
+		instance.Defaults.MaxResults = 10
+	})
+
+	status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), discardPage)
+	requireFailure(t, status, err, fetcher.ErrorCodeResultLimitNoProgress, false)
+	if status.Truncated {
+		t.Error("Truncated = true, want false for FAILED")
+	}
+	if status.RecordCount != 10 || status.PageCount != 2 {
+		t.Errorf("record/page count = %d/%d, want 10/2", status.RecordCount, status.PageCount)
+	}
+	if !strings.Contains(err.Error(), "max_results") {
+		t.Errorf("Fetch() error = %q, want it to mention max_results", err)
+	}
+	if _, _, _, closeCount := backend.requests(); closeCount != 1 {
+		t.Errorf("PIT close count = %d, want 1", closeCount)
 	}
 }
 
@@ -695,38 +868,163 @@ func TestFetchByteLimit(t *testing.T) {
 	}
 }
 
-func TestFetchPITExpired(t *testing.T) {
-	backend := newFakeBackend(t, [][]map[string]any{
-		{fakeHit("a", 1), fakeHit("b", 2)},
+func TestFetchByteLimitBeforeAnyRecord(t *testing.T) {
+	backend := newFakeBackend(t, [][]map[string]any{{fakeHitWithPadding("a", 1, 500)}})
+	fetcherClient := newBackendFetcher(t, backend, func(instance *config.FetcherInstance) {
+		instance.Defaults.PageSize = 1
+		instance.Defaults.MaxBytes = 100
 	})
-	backend.searchOverride = func(request *http.Request, index int) (int, []byte, bool) {
-		if index != 1 {
-			return 0, nil, false
-		}
-		return http.StatusNotFound, []byte(`{"error":{"type":"search_context_missing_exception","reason":"no search context"},"status":404}`), true
-	}
-	fetcherClient := newBackendFetcher(t, backend, nil)
 
-	var pagesEmitted int
-	status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), func(page []fetcher.SourceRecord) error {
-		pagesEmitted++
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Fetch() error = %v, want nil for PARTIAL", err)
+	status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), discardPage)
+	requireFailure(t, status, err, fetcher.ErrorCodeByteLimitReached, false)
+	if status.RecordCount != 0 || status.PageCount != 0 {
+		t.Errorf("record/page count = %d/%d, want 0/0", status.RecordCount, status.PageCount)
 	}
-	if status.Status != fetcher.StatusPartial || !status.Truncated {
-		t.Errorf("status = %q truncated = %t, want PARTIAL/true", status.Status, status.Truncated)
+	if status.BytesRead != 0 {
+		t.Errorf("BytesRead = %d, want 0 (the over-limit page is not counted)", status.BytesRead)
 	}
-	if status.RecordCount != 2 || status.PageCount != 1 || pagesEmitted != 1 {
-		t.Errorf("record/page count = %d/%d emitted = %d, want 2/1/1", status.RecordCount, status.PageCount, pagesEmitted)
+	if status.Truncated {
+		t.Error("Truncated = true, want false for FAILED")
 	}
-	if status.LastRecord == nil || status.LastRecord.Key.DocumentID != "b" {
-		t.Errorf("LastRecord = %#v, want document b", status.LastRecord)
+	for _, fragment := range []string{"max_bytes", "page_size"} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("Fetch() error = %q, want it to mention %s", err, fragment)
+		}
 	}
-	requirePartial(t, status, fetcher.ErrorCodePITExpired, true)
 	if _, _, _, closeCount := backend.requests(); closeCount != 1 {
 		t.Errorf("PIT close count = %d, want 1", closeCount)
+	}
+}
+
+func TestFetchDoesNotRetryAfterRequestWasSent(t *testing.T) {
+	var secondRequests atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			t.Errorf("first server cannot hijack the connection")
+			return
+		}
+		connection, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = connection.Close()
+	}))
+	t.Cleanup(first.Close)
+
+	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		secondRequests.Add(1)
+		writer.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(second.Close)
+
+	instance := testInstance(first.URL)
+	instance.Addresses = []string{first.URL, second.URL}
+	fetcherClient := newTestFetcher(t, instance, apiKeyEnvironment())
+
+	status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), discardPage)
+	requireFailure(t, status, err, fetcher.ErrorCodeBackendUnavailable, true)
+	if got := secondRequests.Load(); got != 0 {
+		t.Errorf("second address received %d requests after a sent request failed, want 0", got)
+	}
+}
+
+func TestFetchClosesPITWhenOpenFails(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "malformed", body: []byte(`{"id":"pit-leak",`)},
+		{name: "oversized", body: []byte(`{"id":"pit-leak","padding":"` + strings.Repeat("x", maxControlBody+1) + `"}`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var opens, closes atomic.Int32
+			var closedID atomic.Value
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/_pit"):
+					opens.Add(1)
+					_, _ = writer.Write(test.body)
+				case request.Method == http.MethodDelete && request.URL.Path == "/_pit":
+					closes.Add(1)
+					var body map[string]any
+					_ = json.NewDecoder(request.Body).Decode(&body)
+					closedID.Store(body["id"])
+					writer.WriteHeader(http.StatusOK)
+				default:
+					writer.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			fetcherClient := newTestFetcher(t, testInstance(server.URL), apiKeyEnvironment())
+			status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), discardPage)
+			requireFailure(t, status, err, fetcher.ErrorCodeMalformedResponse, false)
+			if got := opens.Load(); got != 1 {
+				t.Errorf("PIT opens = %d, want 1", got)
+			}
+			if got := closes.Load(); got != 1 {
+				t.Errorf("PIT closes = %d, want 1", got)
+			}
+			if got, _ := closedID.Load().(string); got != "pit-leak" {
+				t.Errorf("closed PIT id = %q, want pit-leak", got)
+			}
+		})
+	}
+}
+
+func TestFetchPITExpired(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "root cause",
+			body: `{"error":{"root_cause":[{"type":"search_context_missing_exception","reason":"No search context found for id [1]"}],"type":"search_phase_execution_exception","reason":"all shards failed","phase":"query","grouped":true,"failed_shards":[{"reason":{"type":"search_context_missing_exception","reason":"No search context found for id [1]"}}]},"status":404}`,
+		},
+		{
+			name: "caused by",
+			body: `{"error":{"type":"search_phase_execution_exception","reason":"all shards failed","caused_by":{"type":"search_context_missing_exception","reason":"No search context found for id [2]"}},"status":404}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend(t, [][]map[string]any{
+				{fakeHit("a", 1), fakeHit("b", 2)},
+			})
+			backend.searchOverride = func(request *http.Request, index int) (int, []byte, bool) {
+				if index != 1 {
+					return 0, nil, false
+				}
+				return http.StatusNotFound, []byte(test.body), true
+			}
+			fetcherClient := newBackendFetcher(t, backend, nil)
+
+			var pagesEmitted int
+			status, err := fetcherClient.Fetch(context.Background(), testFetchRequest(), func(page []fetcher.SourceRecord) error {
+				pagesEmitted++
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("Fetch() error = %v, want nil for PARTIAL", err)
+			}
+			if status.Status != fetcher.StatusPartial || !status.Truncated {
+				t.Errorf("status = %q truncated = %t, want PARTIAL/true", status.Status, status.Truncated)
+			}
+			if status.RecordCount != 2 || status.PageCount != 1 || pagesEmitted != 1 {
+				t.Errorf("record/page count = %d/%d emitted = %d, want 2/1/1", status.RecordCount, status.PageCount, pagesEmitted)
+			}
+			if status.LastRecord == nil || status.LastRecord.Key.DocumentID != "b" {
+				t.Errorf("LastRecord = %#v, want document b", status.LastRecord)
+			}
+			requirePartial(t, status, fetcher.ErrorCodePITExpired, true)
+			if _, _, _, closeCount := backend.requests(); closeCount != 1 {
+				t.Errorf("PIT close count = %d, want 1", closeCount)
+			}
+		})
 	}
 }
 
@@ -931,6 +1229,15 @@ func fakeSearchResponse(pitID string, hits []map[string]any) []byte {
 
 func fakeHit(id string, shardDocument int) map[string]any {
 	return fakeHitWithPadding(id, shardDocument, 0)
+}
+
+func fakeHitAtTime(id, fetchTime string, shardDocument int) map[string]any {
+	return map[string]any{
+		"_index":  "logs-2026.11.13",
+		"_id":     id,
+		"_source": map[string]any{"@timestamp": fetchTime},
+		"sort":    []any{fetchTime, shardDocument},
+	}
 }
 
 func fakeHitWithPadding(id string, shardDocument, padding int) map[string]any {

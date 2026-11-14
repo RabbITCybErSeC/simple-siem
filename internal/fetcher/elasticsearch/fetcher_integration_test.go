@@ -3,6 +3,7 @@
 package elasticsearch
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -315,6 +316,46 @@ func TestIntegrationOptionalParameterUnset(t *testing.T) {
 	if len(alice) == 0 || len(alice) == len(expected) {
 		t.Errorf("the user filter is not selective: %d of %d", len(alice), len(expected))
 	}
+}
+
+func TestIntegrationPITExpiryAfterFirstPage(t *testing.T) {
+	environment := integrationEnvironment(t)
+	options := integrationOptions(t, 20)
+	integrationSeed(t, environment, options)
+	window := integrationFullWindow(options)
+	index := options.IndexPrefix + "-*"
+	instance := integrationInstance(environment, index)
+	instance.Defaults.PageSize = 7
+	fetcherClient := integrationFetcher(t, instance, os.Getenv)
+
+	var currentPIT atomic.Value
+	fetcherClient.onPIT = func(pitID string) { currentPIT.Store(pitID) }
+
+	var records []fetcher.SourceRecord
+	pages := 0
+	status, err := fetcherClient.Fetch(context.Background(), integrationFetchRequest(integrationTemplate(), index, window), func(page []fetcher.SourceRecord) error {
+		records = append(records, page...)
+		pages++
+		if pages != 1 {
+			return nil
+		}
+		pitID, _ := currentPIT.Load().(string)
+		if pitID == "" {
+			return errors.New("point in time id not captured")
+		}
+		integrationDeletePIT(t, environment, pitID)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Fetch() error = %v, want nil for PARTIAL", err)
+	}
+	if status.Status != fetcher.StatusPartial || !status.Truncated {
+		t.Errorf("status = %q truncated = %t, want PARTIAL/true", status.Status, status.Truncated)
+	}
+	if len(records) == 0 || status.PageCount != 1 || status.RecordCount != len(records) {
+		t.Errorf("records = %d page count = %d record count = %d, want the first page to stand", len(records), status.PageCount, status.RecordCount)
+	}
+	requirePartial(t, status, fetcher.ErrorCodePITExpired, true)
 }
 
 func TestIntegrationPITClosed(t *testing.T) {
@@ -659,6 +700,29 @@ func integrationWaitOpenContexts(t *testing.T, environment integrationEnvironmen
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Errorf("open search contexts = %d, want %d", integrationOpenContexts(t, environment), want)
+}
+
+func integrationDeletePIT(t *testing.T, environment integrationEnvironmentValues, pitID string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"id": pitID})
+	if err != nil {
+		t.Fatalf("marshal PIT close body: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodDelete, strings.TrimSuffix(environment.url, "/")+"/_pit", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build PIT close request: %v", err)
+	}
+	request.SetBasicAuth(environment.username, environment.password)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatalf("close point in time: %v", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("close point in time: status %d", response.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
 }
 
 func integrationHTTP(environment integrationEnvironmentValues, method, path string) (int, []byte, error) {

@@ -56,19 +56,20 @@ const (
 type ErrorCode string
 
 const (
-	ErrorCodeResultLimitReached ErrorCode = "RESULT_LIMIT_REACHED"
-	ErrorCodeByteLimitReached   ErrorCode = "BYTE_LIMIT_REACHED"
-	ErrorCodePITExpired         ErrorCode = "PIT_EXPIRED"
-	ErrorCodeAuthFailed         ErrorCode = "AUTH_FAILED"
-	ErrorCodeTLSFailed          ErrorCode = "TLS_FAILED"
-	ErrorCodeTimeout            ErrorCode = "TIMEOUT"
-	ErrorCodeCanceled           ErrorCode = "CANCELED"
-	ErrorCodeBackendUnavailable ErrorCode = "BACKEND_UNAVAILABLE"
-	ErrorCodeQueryRejected      ErrorCode = "QUERY_REJECTED"
-	ErrorCodeInvalidTemplate    ErrorCode = "INVALID_TEMPLATE"
-	ErrorCodeIndexNotAllowed    ErrorCode = "INDEX_NOT_ALLOWED"
-	ErrorCodeMalformedResponse  ErrorCode = "MALFORMED_RESPONSE"
-	ErrorCodeEmitFailed         ErrorCode = "EMIT_FAILED"
+	ErrorCodeResultLimitReached    ErrorCode = "RESULT_LIMIT_REACHED"
+	ErrorCodeResultLimitNoProgress ErrorCode = "RESULT_LIMIT_NO_PROGRESS"
+	ErrorCodeByteLimitReached      ErrorCode = "BYTE_LIMIT_REACHED"
+	ErrorCodePITExpired            ErrorCode = "PIT_EXPIRED"
+	ErrorCodeAuthFailed            ErrorCode = "AUTH_FAILED"
+	ErrorCodeTLSFailed             ErrorCode = "TLS_FAILED"
+	ErrorCodeTimeout               ErrorCode = "TIMEOUT"
+	ErrorCodeCanceled              ErrorCode = "CANCELED"
+	ErrorCodeBackendUnavailable    ErrorCode = "BACKEND_UNAVAILABLE"
+	ErrorCodeQueryRejected         ErrorCode = "QUERY_REJECTED"
+	ErrorCodeInvalidTemplate       ErrorCode = "INVALID_TEMPLATE"
+	ErrorCodeIndexNotAllowed       ErrorCode = "INDEX_NOT_ALLOWED"
+	ErrorCodeMalformedResponse     ErrorCode = "MALFORMED_RESPONSE"
+	ErrorCodeEmitFailed            ErrorCode = "EMIT_FAILED"
 )
 
 // FetchError is one structured error in a FetchStatus.
