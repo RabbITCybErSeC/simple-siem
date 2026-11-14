@@ -1,0 +1,16 @@
+{
+  "@timestamp": "2026-05-11T10:01:00.000Z",
+  "event.category": ["authentication"],
+  "event.type": ["info"],
+  "event.action": "ssh_login",
+  "event.outcome": "failure",
+  "event.ingested": "2026-05-11T10:01:04.000Z",
+  "process.name": "sshd",
+  "host.name": "web01",
+  "user.name": "alice",
+  "related.user": ["alice"],
+  "source.ip": "203.0.113.7",
+  "source.port": 52114,
+  "source.geo.country_iso_code": "US",
+  "system.auth.ssh.method": "password"
+}

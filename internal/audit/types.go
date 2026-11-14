@@ -1,9 +1,27 @@
 package audit
 
 import (
+	"errors"
 	"net"
 	"time"
 )
+
+// Filter narrows an audit event list; zero values do not filter.
+type Filter struct {
+	EventName     string
+	EventCategory string
+	EventOutcome  string
+	ActorID       string
+	Action        string
+	TargetType    string
+	TargetID      string
+	RequestID     string
+	TraceID       string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+}
+
+var ErrNotFound = errors.New("audit event not found")
 
 // Event is one audit record. The database supplies ID and CreatedAt.
 type Event struct {

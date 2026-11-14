@@ -28,6 +28,9 @@ make e2e        # browser tests (Playwright, axe) against the built binary
 make pnpm ARGS="add <package>"  # run pnpm in the web workspace
 make shadcn-mcp # shadcn registry MCP server on stdio
 make db-shell   # psql into the development database
+make run ARGS="config validate --config-dir config"  # check the file configuration (no database needed)
+make es         # single-node Elasticsearch for fetcher tests (basic auth, user elastic)
+make seed-auth-logs ARGS="--seed 1 --end 2026-11-13T12:00:00Z"  # synthetic sshd and Windows logons into auth-*
 make down       # stop containers, keep data
 make clean      # remove containers, volumes, and build output
 ```

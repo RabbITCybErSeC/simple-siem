@@ -5,13 +5,16 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"time"
 )
 
 const (
-	ProviderLocal = "local"
-	StatusActive  = "ACTIVE"
-	RoleAdmin     = "ADMIN"
+	ProviderLocal  = "local"
+	StatusActive   = "ACTIVE"
+	StatusDisabled = "DISABLED"
+	StatusInvited  = "INVITED"
+	RoleAdmin      = "ADMIN"
 )
 
 // User is one person who can sign in. The database supplies ID, CreatedAt,
@@ -106,6 +109,12 @@ type Actor struct {
 	Email       string
 	DisplayName string
 	Roles       []string
+	Permissions []string
+}
+
+// Can reports whether the actor's roles grant the permission.
+func (actor Actor) Can(permission string) bool {
+	return slices.Contains(actor.Permissions, permission)
 }
 
 type Settings struct {
@@ -126,6 +135,38 @@ type LoginResult struct {
 	Roles     []string
 }
 
+// UserFilter narrows a user list; an empty status means every status.
+type UserFilter struct {
+	Status   string
+	Page     int
+	PageSize int
+}
+
+// UserWithRoles is one user and the names of the roles assigned to them.
+type UserWithRoles struct {
+	User  User
+	Roles []string
+}
+
+// RoleWithPermissions is one role and the permissions it grants.
+type RoleWithPermissions struct {
+	Name        string
+	Description string
+	Permissions []string
+}
+
+type CreateUserRequest struct {
+	Email       string
+	DisplayName string
+	Roles       []string
+}
+
+type UpdateUserRequest struct {
+	Email       *string
+	DisplayName *string
+	Version     int
+}
+
 var (
 	ErrInvalidCredentials = errors.New("invalid email or password")
 	ErrUnauthenticated    = errors.New("authentication required")
@@ -134,6 +175,15 @@ var (
 	ErrInvalidDisplayName = errors.New("display name must be 1 to 200 characters without control characters")
 	ErrUserExists         = errors.New("a user with this email already exists")
 	ErrUserNotFound       = errors.New("no user with this email")
+)
+
+var (
+	ErrVersionConflict   = errors.New("the user was changed by someone else")
+	ErrStateConflict     = errors.New("state conflict")
+	ErrForbidden         = errors.New("only an admin can change an admin")
+	ErrUnknownRole       = errors.New("unknown role")
+	ErrInvalidResetToken = errors.New("invalid or expired token")
+	ErrInvalidStatus     = errors.New("status must be ACTIVE, DISABLED, or INVITED")
 )
 
 // RateLimitedError is returned when too many logins failed recently.

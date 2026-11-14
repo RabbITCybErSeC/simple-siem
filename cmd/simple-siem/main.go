@@ -32,12 +32,14 @@ commands:
   serve    run the HTTP API
   migrate  apply pending database migrations
   admin    create or recover admin accounts
+  config   validate the file configuration
   version  print the version`
 
 	serveUsage   = "usage: simple-siem serve [--migrate=true|false]"
 	migrateUsage = "usage: simple-siem migrate"
 	adminUsage   = `usage: simple-siem admin create --email <email> [--display-name <name>] [--password-file <path>]
 usage: simple-siem admin reset-password --email <email> [--password-file <path>]`
+	configUsage  = "usage: simple-siem config validate [--config-dir DIR]"
 	versionUsage = "usage: simple-siem version"
 
 	defaultDisplayNameRunes = 200
@@ -71,12 +73,56 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return runMigrate(ctx, args[1:], getenv, stderr, logger)
 	case "admin":
 		return runAdmin(ctx, args[1:], getenv, stdin, stdout, stderr, logger)
+	case "config":
+		return runConfig(args[1:], getenv, stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintln(stderr, topLevelUsage)
 		return 2
 	}
+}
+
+func runConfig(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "validate" {
+		_, _ = fmt.Fprintln(stderr, configUsage)
+		return 2
+	}
+
+	flags := newFlagSet("config validate", stderr, configUsage)
+	directory := flags.String("config-dir", "config", "configuration directory")
+	if status, done := parseFlags(flags, args[1:]); done {
+		return status
+	}
+
+	environment, err := config.ParseEnvironment(getenv("SIMPLE_SIEM_ENV"))
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
+
+	files, err := config.LoadFiles(*directory, environment, getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	datasets := 0
+	for _, pipeline := range files.Pipelines {
+		datasets += len(pipeline.Outputs)
+	}
+	_, _ = fmt.Fprintf(stdout, "config valid: %s, %s, %s\n",
+		countLabel(len(files.Fetchers), "fetcher instance"),
+		countLabel(len(files.Pipelines), "pipeline"),
+		countLabel(datasets, "dataset"))
+	return 0
+}
+
+func countLabel(count int, singular string) string {
+	if count == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %ss", count, singular)
 }
 
 func runAdmin(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, logger *slog.Logger) int {
@@ -336,15 +382,16 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 		logger.Error("get database connection pool", "error", err)
 		return 1
 	}
-	server := newHTTPServer(settings, sqlDatabase, authService, logger)
+	server := newHTTPServer(settings, sqlDatabase, db, authService, logger)
 	return serveHTTP(ctx, server, settings.ShutdownTimeout)
 }
 
-func newHTTPServer(settings config.Config, database api.ReadinessChecker, authService *auth.Service, logger *slog.Logger) *http.Server {
+func newHTTPServer(settings config.Config, database api.ReadinessChecker, auditDatabase *gorm.DB, authService *auth.Service, logger *slog.Logger) *http.Server {
 	return &http.Server{
 		Addr: settings.Listen,
 		Handler: api.NewRouter(api.Dependencies{
 			Database:       database,
+			AuditDatabase:  auditDatabase,
 			Logger:         logger,
 			Auth:           authService,
 			Web:            web.Files(),

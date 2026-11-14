@@ -1,0 +1,44 @@
+id: ecs-ssh-login
+version: 1
+description: Linux sshd logons in ECS shape (Filebeat system module).
+
+match:
+  - field: event.category
+    equals: authentication
+  - field: process.name
+    equals: sshd
+
+constants:
+  metadata.event_type: USER_LOGIN
+  metadata.vendor_name: OpenSSH
+  metadata.product_name: sshd
+  target.application: sshd
+  network.application_protocol: SSH
+
+fields:
+  - to: metadata.event_timestamp
+    from: "@timestamp"
+  - to: metadata.ingested_timestamp
+    from: event.ingested
+  - to: metadata.product_event_type
+    from: event.action
+  - to: target.user.userid
+    from: [user.name, related.user]
+  - to: target.hostname
+    from: host.name
+  - to: principal.ip
+    from: source.ip
+  - to: principal.port
+    from: source.port
+  - to: extensions.auth.mechanism
+    from: system.auth.ssh.method
+    values: { password: USERNAME_PASSWORD }
+    default: MECHANISM_OTHER
+  - to: security_result.action
+    from: event.outcome
+    values: { success: ALLOW, failure: BLOCK }
+    default: UNKNOWN_ACTION
+
+additional:
+  - key: source_country
+    from: source.geo.country_iso_code

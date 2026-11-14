@@ -1,0 +1,53 @@
+{
+  "@timestamp": "2026-05-11T10:05:00.000Z",
+  "event": {
+    "category": ["authentication"],
+    "type": ["start"],
+    "code": "4625",
+    "action": "logon-failed",
+    "outcome": "failure",
+    "ingested": "2026-05-11T10:05:03.000Z",
+    "provider": "Microsoft-Windows-Security-Auditing",
+    "module": "security",
+    "kind": "event"
+  },
+  "host": {
+    "name": "dc01",
+    "hostname": "dc01",
+    "os": {
+      "type": "windows"
+    }
+  },
+  "user": {
+    "name": "-",
+    "domain": "-"
+  },
+  "source": {
+    "ip": "203.0.113.20",
+    "port": 50211
+  },
+  "winlog": {
+    "channel": "Security",
+    "event_id": "4625",
+    "record_id": 918275,
+    "provider_name": "Microsoft-Windows-Security-Auditing",
+    "computer_name": "dc01.corp.example",
+    "event_data": {
+      "TargetUserName": "-",
+      "TargetDomainName": "-",
+      "TargetUserSid": "-",
+      "LogonType": "3",
+      "IpAddress": "203.0.113.20",
+      "IpPort": "50211",
+      "WorkstationName": "-",
+      "SubStatus": "0xc000006a"
+    },
+    "logon": {
+      "type": "Network",
+      "failure": {
+        "reason": "Unknown user name or bad password."
+      }
+    }
+  },
+  "message": "An account failed to log on."
+}

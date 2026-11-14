@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -161,6 +163,116 @@ func TestRolesRejectDelimiterInName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "roles_name_check") {
 		t.Errorf("inserting READ,WRITE error = %v, want the roles_name_check violation", err)
+	}
+}
+
+// TestDefaultRolePermissions compares the migration with a second,
+// independent copy of the reviewed mapping in rbac-admin-api decision 3.
+func TestDefaultRolePermissions(t *testing.T) {
+	test := newTestService(t)
+	want := map[string][]string{
+		RoleAdmin: {
+			"alert:read",
+			"audit:read",
+			"case:close",
+			"case:merge",
+			"case:read",
+			"case:write",
+			"config:read",
+			"config:write",
+			"dataset:read",
+			"detection:read",
+			"detection:reload",
+			"detection:run",
+			"detection:write",
+			"pipeline:read",
+			"pipeline:run",
+			"pipeline:write",
+			"role:assign",
+			"suppression:broad_write",
+			"suppression:read",
+			"suppression:write",
+			"tag:manage",
+			"task:read",
+			"task:write",
+			"template:write",
+			"user:on_call",
+			"user:read",
+			"user:write",
+			"view:share",
+			"webhook:read",
+			"webhook:write",
+		},
+		"SECURITY_ENGINEER": {
+			"alert:read",
+			"audit:read",
+			"case:read",
+			"config:read",
+			"config:write",
+			"dataset:read",
+			"detection:read",
+			"detection:reload",
+			"detection:run",
+			"detection:write",
+			"pipeline:read",
+			"pipeline:run",
+			"pipeline:write",
+			"suppression:broad_write",
+			"suppression:read",
+			"suppression:write",
+			"tag:manage",
+			"task:read",
+			"template:write",
+			"view:share",
+			"webhook:read",
+			"webhook:write",
+		},
+		"ANALYST": {
+			"alert:read",
+			"case:close",
+			"case:merge",
+			"case:read",
+			"case:write",
+			"dataset:read",
+			"detection:read",
+			"pipeline:read",
+			"suppression:read",
+			"suppression:write",
+			"task:read",
+			"task:write",
+			"view:share",
+		},
+		"READ_ONLY": {
+			"alert:read",
+			"case:read",
+			"detection:read",
+			"pipeline:read",
+			"suppression:read",
+			"task:read",
+		},
+		"SERVICE": {},
+	}
+
+	var rows []struct {
+		Role       string `gorm:"column:role_name"`
+		Permission string `gorm:"column:permission"`
+	}
+	err := test.database.Raw(
+		"SELECT role_name, permission FROM role_permissions ORDER BY role_name, permission",
+	).Scan(&rows).Error
+	if err != nil {
+		t.Fatalf("read role permissions: %v", err)
+	}
+
+	got := make(map[string][]string, len(want))
+	for role := range want {
+		got[role] = []string{}
+	}
+	for _, row := range rows {
+		got[row.Role] = append(got[row.Role], row.Permission)
+	}
+	if !maps.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("role permissions = %v, want %v", got, want)
 	}
 }
 
@@ -631,6 +743,118 @@ func TestAuthenticateReturnsActor(t *testing.T) {
 	}
 }
 
+func TestAuthenticateLoadsAnalystPermissions(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID, "ANALYST")
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	for _, permission := range []string{"case:write", "alert:read"} {
+		if !slices.Contains(actor.Permissions, permission) {
+			t.Errorf("actor permissions %v do not contain %q", actor.Permissions, permission)
+		}
+		if !actor.Can(permission) {
+			t.Errorf("Can(%q) = false, want true", permission)
+		}
+	}
+	if slices.Contains(actor.Permissions, "user:read") {
+		t.Errorf("actor permissions %v contain user:read, want none", actor.Permissions)
+	}
+	if actor.Can("user:read") {
+		t.Error("Can(user:read) = true, want false")
+	}
+	if !slices.Equal(actor.Roles, []string{"ANALYST"}) {
+		t.Errorf("actor roles = %v, want [ANALYST]", actor.Roles)
+	}
+}
+
+func TestAuthenticateWithoutRolesHasNoPermissions(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID)
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if len(actor.Permissions) != 0 {
+		t.Errorf("actor permissions = %v (%d entries), want none", actor.Permissions, len(actor.Permissions))
+	}
+	if actor.Can("alert:read") {
+		t.Error("Can(alert:read) = true, want false")
+	}
+}
+
+func TestAuthenticatePermissionsAreSortedAndUnique(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID, "ANALYST", "READ_ONLY")
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if !slices.IsSorted(actor.Permissions) {
+		t.Errorf("actor permissions %v are not sorted", actor.Permissions)
+	}
+	unique := slices.Compact(slices.Clone(actor.Permissions))
+	if len(unique) != len(actor.Permissions) {
+		t.Errorf("actor permissions %v contain duplicates", actor.Permissions)
+	}
+	if !slices.Equal(actor.Roles, []string{"ANALYST", "READ_ONLY"}) {
+		t.Errorf("actor roles = %v, want [ANALYST READ_ONLY]", actor.Roles)
+	}
+}
+
+func TestAuthenticateReloadsRolesOnNextRequest(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	setRoles(t, test.database, user.ID)
+	login := test.login(t, testEmail, testPassword)
+
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if actor.Can("case:read") {
+		t.Fatal("Can(case:read) before the role is assigned = true, want false")
+	}
+
+	if err := test.database.Exec(
+		"INSERT INTO user_roles (user_id, role_name) VALUES (?, 'READ_ONLY')", user.ID,
+	).Error; err != nil {
+		t.Fatalf("assign READ_ONLY: %v", err)
+	}
+
+	actor, err = test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate after the role is assigned: %v", err)
+	}
+	if !actor.Can("case:read") {
+		t.Errorf("actor permissions %v after the role is assigned lack case:read", actor.Permissions)
+	}
+}
+
+func setRoles(t *testing.T, db *gorm.DB, userID string, roles ...string) {
+	t.Helper()
+	if err := db.Exec("DELETE FROM user_roles WHERE user_id = ?", userID).Error; err != nil {
+		t.Fatalf("clear user roles: %v", err)
+	}
+	for _, role := range roles {
+		if err := db.Exec(
+			"INSERT INTO user_roles (user_id, role_name) VALUES (?, ?)", userID, role,
+		).Error; err != nil {
+			t.Fatalf("assign role %s: %v", role, err)
+		}
+	}
+}
+
 func TestAuthenticateRejectsExpiredSessions(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -821,6 +1045,52 @@ func TestLogout(t *testing.T) {
 		if strings.Contains(string(event.Changes), secret) {
 			t.Errorf("logout audit changes contain the secret %q: %s", secret, event.Changes)
 		}
+	}
+}
+
+func TestRecordPermissionDenied(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	login := test.login(t, testEmail, testPassword)
+	actor, err := test.service.Authenticate(context.Background(), login.Token)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	required := []string{"user:read", "role:assign"}
+	err = test.service.RecordPermissionDenied(
+		context.Background(), actor, testClient(), "/api/v1/users", http.MethodGet, required,
+	)
+	if err != nil {
+		t.Fatalf("RecordPermissionDenied: %v", err)
+	}
+
+	events := auditEventsForTarget(t, test.database, "/api/v1/users")
+	if len(events) != 1 {
+		t.Fatalf("permission denial wrote %d audit events, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventName != "simple_siem.auth.permission_denied" || event.EventCategory != "AUTHORIZATION" ||
+		event.EventOutcome != "DENIED" {
+		t.Errorf("denial audit = %q/%q/%q, want simple_siem.auth.permission_denied/AUTHORIZATION/DENIED",
+			event.EventName, event.EventCategory, event.EventOutcome)
+	}
+	if event.ActorType != "USER" || event.ActorID == nil || *event.ActorID != user.ID {
+		t.Errorf("denial audit actor = %s/%v, want USER/%q", event.ActorType, event.ActorID, user.ID)
+	}
+	if event.ActorSessionID == nil || *event.ActorSessionID != actor.SessionID {
+		t.Errorf("denial audit actor session id = %v, want %q", event.ActorSessionID, actor.SessionID)
+	}
+	if event.TargetType != "ROUTE" || event.TargetID != "/api/v1/users" || event.Action != http.MethodGet {
+		t.Errorf("denial audit target = %q/%q action %q, want ROUTE//api/v1/users GET",
+			event.TargetType, event.TargetID, event.Action)
+	}
+	if event.RequestID != "request-1" || event.SourceIP == nil || *event.SourceIP != "192.0.2.7" {
+		t.Errorf("denial audit request/source = %q/%v, want request-1/192.0.2.7", event.RequestID, event.SourceIP)
+	}
+	storedRequired, ok := storedChanges(t, event)["required"].([]any)
+	if !ok || !slices.Equal(storedRequired, []any{"user:read", "role:assign"}) {
+		t.Errorf("denial audit required = %v, want [user:read role:assign]", storedRequired)
 	}
 }
 
@@ -1266,7 +1536,7 @@ func TestLoginRejectsIdentityDeletedBeforeSession(t *testing.T) {
 		loginResult <- err
 	}()
 
-	waitForLoginLockWait(t, test.database)
+	waitForLockWaits(t, test.database, 1)
 	close(releaseDelete)
 	if err := <-deleteResult; err != nil {
 		t.Fatalf("delete identity: %v", err)
@@ -1295,23 +1565,129 @@ func TestLoginRejectsIdentityDeletedBeforeSession(t *testing.T) {
 	}
 }
 
-func waitForLoginLockWait(t *testing.T, db *gorm.DB) {
+func waitForLockWaits(t *testing.T, db *gorm.DB, want int64) {
 	t.Helper()
+	var waiting int64
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var waiting int64
 		err := db.Raw(`
 			SELECT count(*) FROM pg_stat_activity
 			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting).Error
 		if err != nil {
 			t.Fatalf("read postgres activity: %v", err)
 		}
-		if waiting > 0 {
+		if waiting >= want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("login did not wait on the identity lock")
+	t.Fatalf("%d sessions waited on a lock, want %d", waiting, want)
+}
+
+// TestConcurrentLoginAndResetTokenUse races a login with the redemption of a
+// reset token for the same user. Both take the user row lock first, so they
+// serialize instead of deadlocking on the identity row.
+func TestConcurrentLoginAndResetTokenUse(t *testing.T) {
+	test := newTestService(t)
+	admin := test.createAdmin(t, testEmail)
+	actor := testActorFor(admin)
+
+	// The real hash runs before UseResetToken opens its transaction, so a fast
+	// hash keeps both calls in the lock race; Login uses a fixed provider and
+	// never verifies this hash.
+	original := hashPasswordFunction
+	hashPasswordFunction = func(context.Context, string) (string, error) {
+		return "test-password-hash", nil
+	}
+	t.Cleanup(func() { hashPasswordFunction = original })
+
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
+		email := fmt.Sprintf("login%02d@example.com", round)
+		user := test.createAdmin(t, email)
+
+		var identity Identity
+		if err := test.database.Where(
+			"user_id = ? AND provider = ?", user.ID, ProviderLocal,
+		).First(&identity).Error; err != nil {
+			t.Fatalf("round %d: read identity: %v", round, err)
+		}
+		test.service.provider = fixedProvider{identity: ExternalIdentity{
+			Provider:          ProviderLocal,
+			Subject:           user.ID,
+			CredentialVersion: identity.Version,
+		}}
+
+		token, _, err := test.service.CreateResetToken(
+			context.Background(), actor, testClient(), user.ID,
+		)
+		if err != nil {
+			t.Fatalf("round %d: CreateResetToken: %v", round, err)
+		}
+
+		// Hold the identity row so Login queues on it before UseResetToken
+		// reaches it. Releasing it then leaves each call waiting for a row
+		// lock the other holds, which is the inversion this test guards
+		// against.
+		identityLocked := make(chan struct{})
+		releaseIdentity := make(chan struct{})
+		lockResult := make(chan error, 1)
+		go func() {
+			lockResult <- test.database.WithContext(context.Background()).Transaction(
+				func(tx *gorm.DB) error {
+					if err := tx.Exec(
+						"SELECT id FROM user_identities WHERE id = ? FOR UPDATE", identity.ID,
+					).Error; err != nil {
+						return err
+					}
+					close(identityLocked)
+					<-releaseIdentity
+					return nil
+				},
+			)
+		}()
+		<-identityLocked
+
+		var wait sync.WaitGroup
+		var loginErr, resetErr error
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			_, loginErr = test.service.Login(
+				context.Background(),
+				LoginRequest{Email: email, Password: testPassword},
+				testClient(),
+			)
+		}()
+		waitForLockWaits(t, test.database, 1)
+		go func() {
+			defer wait.Done()
+			resetErr = test.service.UseResetToken(
+				context.Background(), token, testNewPassword, testClient(),
+			)
+		}()
+		waitForLockWaits(t, test.database, 2)
+		close(releaseIdentity)
+		if err := <-lockResult; err != nil {
+			t.Fatalf("round %d: release the identity lock: %v", round, err)
+		}
+		wait.Wait()
+
+		if resetErr != nil {
+			t.Fatalf("round %d: UseResetToken = %v, want nil", round, resetErr)
+		}
+		for _, callErr := range []error{loginErr, resetErr} {
+			if callErr == nil {
+				continue
+			}
+			if strings.Contains(strings.ToLower(callErr.Error()), "deadlock") {
+				t.Fatalf("round %d: %v", round, callErr)
+			}
+			if !errors.Is(callErr, ErrInvalidCredentials) {
+				t.Fatalf("round %d: unexpected error %v", round, callErr)
+			}
+		}
+	}
 }
 
 func TestLoginDiscardsAttemptOnProviderError(t *testing.T) {

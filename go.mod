@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/gin-gonic/gin v1.12.0
+	github.com/goccy/go-yaml v1.19.2
 	github.com/pressly/goose/v3 v3.30.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/term v0.48.0
@@ -22,7 +23,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/pgx/v5 v5.12.0 // indirect

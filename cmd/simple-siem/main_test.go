@@ -85,7 +85,7 @@ func TestRunUnknownCommand(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("run() stdout = %q, want empty", stdout.String())
 	}
-	for _, command := range []string{"serve", "migrate", "admin", "version"} {
+	for _, command := range []string{"serve", "migrate", "admin", "config", "version"} {
 		if !strings.Contains(stderr.String(), command) {
 			t.Errorf("run() stderr %q does not list command %q", stderr.String(), command)
 		}
@@ -109,6 +109,189 @@ func TestRunUnknownFlag(t *testing.T) {
 	if !strings.Contains(stderr.String(), "usage: simple-siem serve") {
 		t.Errorf("run() stderr %q does not print the serve usage", stderr.String())
 	}
+}
+
+func TestRunConfigValidate(t *testing.T) {
+	// SIMPLE_SIEM_DATABASE_URL is deliberately unset: config validate must not
+	// need the database.
+	environment := map[string]string{
+		"SIMPLE_SIEM_ENV":      "development",
+		"ELASTIC_PROD_API_KEY": "test-api-key",
+		"ELASTIC_PROD_CA":      "test-ca",
+		"ELASTIC_EDR_USERNAME": "test-user",
+		"ELASTIC_EDR_PASSWORD": "test-password",
+	}
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", "../../internal/config/testdata/valid"}, environment)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	if want := "config valid: 2 fetcher instances, 1 pipeline, 1 dataset\n"; stdout != want {
+		t.Errorf("run() stdout = %q, want %q", stdout, want)
+	}
+	if stderr != "" {
+		t.Errorf("run() stderr = %q, want empty", stderr)
+	}
+}
+
+func TestRunConfigValidateSingularCounts(t *testing.T) {
+	directory := writeConfigDirectory(t, map[string]string{
+		"system.yaml": "version: \"0.1\"\n",
+		"fetchers.yaml": `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    allowed_indexes: [auth-*]
+`,
+		"pipelines/auth.yaml": `id: auth-events
+version: 0.1.0
+schedule:
+  timeout: 2m
+fetchers:
+  - id: auth
+    ref: elastic-dev
+    inputs:
+      index: auth-*
+processors:
+  - id: to-udm
+    type: converter
+    from: auth.records
+    mappings: [mappings/auth.yaml]
+    output: udm.auth_events
+outputs:
+  auth_events:
+    from: udm.auth_events
+`,
+		"mappings/auth.yaml": "id: auth\n",
+	})
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", directory},
+		map[string]string{"SIMPLE_SIEM_ENV": "development", "ELASTIC_DEV_API_KEY": "test-key"})
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	if want := "config valid: 1 fetcher instance, 1 pipeline, 1 dataset\n"; stdout != want {
+		t.Errorf("run() stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunConfigValidateReportsEveryProblem(t *testing.T) {
+	directory := writeConfigDirectory(t, map[string]string{
+		"system.yaml":   "version: \"0.1\"\nscheduler: {}\n",
+		"fetchers.yaml": "fetchers:\n  elastic-dev:\n    type: elasticsearch\n    adresses: []\n",
+	})
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", directory},
+		map[string]string{"SIMPLE_SIEM_ENV": "development"})
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("run() stderr has %d lines, want 2:\n%s", len(lines), stderr)
+	}
+	for _, fragment := range []string{"system.yaml", "scheduler", "fetchers.yaml", "adresses"} {
+		if !strings.Contains(stderr, fragment) {
+			t.Errorf("run() stderr %q does not contain %q", stderr, fragment)
+		}
+	}
+	if strings.Contains(stderr, "SIMPLE_SIEM_DATABASE_URL") {
+		t.Errorf("run() stderr %q mentions the database", stderr)
+	}
+}
+
+func TestRunConfigUsage(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantFragments []string
+	}{
+		{
+			name:          "no action",
+			args:          []string{"config"},
+			wantFragments: []string{"usage: simple-siem config validate"},
+		},
+		{
+			name:          "unknown action",
+			args:          []string{"config", "frobnicate"},
+			wantFragments: []string{"usage: simple-siem config validate"},
+		},
+		{
+			name:          "unknown flag",
+			args:          []string{"config", "validate", "--no-such-flag"},
+			wantFragments: []string{"no-such-flag", "usage: simple-siem config validate"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, stdout, stderr := runCLI(t, test.args, nil)
+
+			if status != 2 {
+				t.Fatalf("run() status = %d, want 2; stderr: %s", status, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("run() stdout = %q, want empty", stdout)
+			}
+			for _, fragment := range test.wantFragments {
+				if !strings.Contains(stderr, fragment) {
+					t.Errorf("run() stderr %q does not contain %q", stderr, fragment)
+				}
+			}
+		})
+	}
+}
+
+func TestRunConfigInvalidEnvironment(t *testing.T) {
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", filepath.Join(t.TempDir(), "missing")},
+		map[string]string{"SIMPLE_SIEM_ENV": "staging"})
+
+	if status != 2 {
+		t.Fatalf("run() status = %d, want 2; stderr: %s", status, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, `SIMPLE_SIEM_ENV must be "development" or "production"`) {
+		t.Errorf("run() stderr = %q, want the environment error", stderr)
+	}
+	if strings.Contains(stderr, "system.yaml") {
+		t.Errorf("run() stderr = %q, must not load the configuration before the environment check", stderr)
+	}
+}
+
+func runCLI(t *testing.T, args []string, environment map[string]string) (status int, stdout, stderr string) {
+	t.Helper()
+	var stdoutBuffer, stderrBuffer bytes.Buffer
+	status = run(context.Background(), args, mapGetenv(environment), strings.NewReader(""), &stdoutBuffer, &stderrBuffer)
+	return status, stdoutBuffer.String(), stderrBuffer.String()
+}
+
+func writeConfigDirectory(t *testing.T, files map[string]string) string {
+	t.Helper()
+	directory := t.TempDir()
+	for name, content := range files {
+		path := filepath.Join(directory, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create config directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write config file %s: %v", name, err)
+		}
+	}
+	return directory
 }
 
 func TestRunInvalidConfiguration(t *testing.T) {
@@ -162,7 +345,7 @@ func TestRunMigrateAppliesPendingMigrations(t *testing.T) {
 
 func TestNewHTTPServerSetsTimeouts(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, nil, logger)
+	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, nil, nil, logger)
 
 	timeouts := []struct {
 		name string
@@ -603,7 +786,7 @@ func TestNewHTTPServerWiresAuthService(t *testing.T) {
 	database, _ := newAdminTestDatabase(t)
 	service := newAdminTestService(t, database)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, service, logger)
+	server := newHTTPServer(config.Config{Listen: "127.0.0.1:0"}, nil, database, service, logger)
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil)
 	response := httptest.NewRecorder()
@@ -628,7 +811,7 @@ func TestNewHTTPServerSetsSecureBrowserCookie(t *testing.T) {
 		Listen:      "127.0.0.1:0",
 		Environment: config.EnvironmentProduction,
 		PublicURL:   "https://siem.example.com",
-	}, nil, service, logger)
+	}, nil, database, service, logger)
 
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(
 		fmt.Sprintf(`{"email":%q,"password":%q}`, "admin@example.com", cliTestPassword),

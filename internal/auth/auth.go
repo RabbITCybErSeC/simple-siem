@@ -42,12 +42,13 @@ type createdSession struct {
 }
 
 type sessionActor struct {
-	SessionID   string `gorm:"column:session_id"`
-	UserID      string `gorm:"column:user_id"`
-	Email       string `gorm:"column:email"`
-	DisplayName string `gorm:"column:display_name"`
-	SlideDue    bool   `gorm:"column:slide_due"`
-	RoleNames   string `gorm:"column:role_names"`
+	SessionID       string `gorm:"column:session_id"`
+	UserID          string `gorm:"column:user_id"`
+	Email           string `gorm:"column:email"`
+	DisplayName     string `gorm:"column:display_name"`
+	SlideDue        bool   `gorm:"column:slide_due"`
+	RoleNames       string `gorm:"column:role_names"`
+	PermissionNames string `gorm:"column:permission_names"`
 }
 
 type localAccount struct {
@@ -395,16 +396,20 @@ func (service *Service) Authenticate(ctx context.Context, token string) (Actor, 
 	}
 	tokenHash := sha256.Sum256(rawToken)
 
-	// The roles.name check constraint keeps the comma out of every role name,
-	// so the aggregate delimiter below is unambiguous.
+	// The roles.name and permissions.name check constraints keep the comma out
+	// of every role name and permission, so the aggregate delimiters below are
+	// unambiguous. Joining permissions multiplies the rows per role, so both
+	// aggregates are DISTINCT.
 	var session sessionActor
 	err = service.database.WithContext(ctx).Raw(`
 		SELECT sessions.id::text AS session_id, users.id::text AS user_id, users.email,
 		       users.display_name, sessions.last_used_at < now() - interval '1 minute' AS slide_due,
-		       COALESCE(string_agg(user_roles.role_name, ',' ORDER BY user_roles.role_name), '') AS role_names
+		       COALESCE(string_agg(DISTINCT user_roles.role_name, ',' ORDER BY user_roles.role_name), '') AS role_names,
+		       COALESCE(string_agg(DISTINCT role_permissions.permission, ',' ORDER BY role_permissions.permission), '') AS permission_names
 		FROM sessions
 		JOIN users ON users.id = sessions.user_id
 		LEFT JOIN user_roles ON user_roles.user_id = users.id
+		LEFT JOIN role_permissions ON role_permissions.role_name = user_roles.role_name
 		WHERE sessions.token_hash = ? AND sessions.idle_expires_at > now()
 		  AND sessions.absolute_expires_at > now() AND users.status = ?
 		GROUP BY sessions.id, users.id`,
@@ -420,6 +425,10 @@ func (service *Service) Authenticate(ctx context.Context, token string) (Actor, 
 	var roles []string
 	if session.RoleNames != "" {
 		roles = strings.Split(session.RoleNames, ",")
+	}
+	var permissions []string
+	if session.PermissionNames != "" {
+		permissions = strings.Split(session.PermissionNames, ",")
 	}
 
 	// shortcut: one write per minute per session; move to a batched touch if session writes show up in Phase 7 profiles.
@@ -441,6 +450,7 @@ func (service *Service) Authenticate(ctx context.Context, token string) (Actor, 
 		Email:       session.Email,
 		DisplayName: session.DisplayName,
 		Roles:       roles,
+		Permissions: permissions,
 	}, nil
 }
 
@@ -478,6 +488,29 @@ func (service *Service) Logout(ctx context.Context, actor Actor, client ClientIn
 			TargetType:     "SESSION",
 			TargetID:       actor.SessionID,
 			Action:         "logout",
+		})
+	})
+}
+
+// RecordPermissionDenied audits a request the actor's roles do not allow.
+func (service *Service) RecordPermissionDenied(ctx context.Context, actor Actor, client ClientInfo, route, method string, required []string) error {
+	client.IP = normalizedIP(client.IP)
+	return service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		actorID := actor.UserID
+		sessionID := actor.SessionID
+		return audit.Record(tx, audit.Event{
+			EventName:      "simple_siem.auth.permission_denied",
+			EventCategory:  "AUTHORIZATION",
+			EventOutcome:   "DENIED",
+			ActorType:      "USER",
+			ActorID:        &actorID,
+			ActorSessionID: &sessionID,
+			RequestID:      client.RequestID,
+			SourceIP:       client.IP,
+			TargetType:     "ROUTE",
+			TargetID:       route,
+			Action:         method,
+			Changes:        map[string]any{"required": required},
 		})
 	})
 }
@@ -639,6 +672,13 @@ func (service *Service) startSession(ctx context.Context, user User, identity Ex
 	var roles []string
 	credentialRejected := false
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Take the user row first, then the identity, the same order as the
+		// reset-token paths. NO KEY UPDATE still serializes the writers but
+		// does not block the foreign-key check of the session below.
+		if _, err := loadUserForNoKeyUpdate(tx, user.ID); err != nil {
+			return err
+		}
+
 		var lockedIdentity struct {
 			Version *int `gorm:"column:version"`
 		}
