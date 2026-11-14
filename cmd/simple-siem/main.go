@@ -349,6 +349,8 @@ func newHTTPServer(settings config.Config, database api.ReadinessChecker, authSe
 			Auth:           authService,
 			Web:            web.Files(),
 			TrustedProxies: settings.TrustedProxies,
+			PublicURL:      settings.PublicURL,
+			Development:    settings.Environment == config.EnvironmentDevelopment,
 			Version:        version.Version,
 			Commit:         version.Commit,
 		}),

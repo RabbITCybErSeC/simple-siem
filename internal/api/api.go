@@ -42,11 +42,12 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	router.Match(readMethods, "/version", health.version)
 	router.Match(readMethods, "/assets/*filepath", web.assets)
 
-	authentication := authHandler{service: dependencies.Auth, logger: dependencies.Logger}
+	policy := newOriginPolicy(dependencies.PublicURL, dependencies.Development, dependencies.Logger)
+	authentication := authHandler{service: dependencies.Auth, logger: dependencies.Logger, policy: policy}
 	v1 := router.Group("/api/v1")
 	v1.GET("/auth/providers", authentication.providers)
 	v1.POST("/auth/login", authentication.login)
-	authenticated := v1.Group("", requireSession(dependencies.Auth, dependencies.Logger))
+	authenticated := v1.Group("", requireSession(dependencies.Auth, dependencies.Logger, policy))
 	authenticated.POST("/auth/logout", authentication.logout)
 	authenticated.GET("/me", authentication.me)
 

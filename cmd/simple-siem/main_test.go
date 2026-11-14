@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -613,6 +614,40 @@ func TestNewHTTPServerWiresAuthService(t *testing.T) {
 	}
 	if got, want := response.Body.String(), `{"data":[{"id":"local"}]}`; got != want {
 		t.Errorf("providers body = %s, want %s", got, want)
+	}
+}
+
+func TestNewHTTPServerSetsSecureBrowserCookie(t *testing.T) {
+	database, _ := newAdminTestDatabase(t)
+	service := newAdminTestService(t, database)
+	if _, err := service.CreateAdmin(context.Background(), "admin@example.com", "Admin User", cliTestPassword); err != nil {
+		t.Fatalf("CreateAdmin: %v", err)
+	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	server := newHTTPServer(config.Config{
+		Listen:      "127.0.0.1:0",
+		Environment: config.EnvironmentProduction,
+		PublicURL:   "https://siem.example.com",
+	}, nil, service, logger)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(
+		fmt.Sprintf(`{"email":%q,"password":%q}`, "admin@example.com", cliTestPassword),
+	))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Requested-With", "simple-siem")
+	request.Header.Set("Origin", "https://siem.example.com")
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("browser login = %d, want 200: %s", response.Code, response.Body)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("browser login set %d cookies, want 1: %v", len(cookies), cookies)
+	}
+	if !cookies[0].Secure {
+		t.Error("browser login over an https public URL set no Secure cookie")
 	}
 }
 

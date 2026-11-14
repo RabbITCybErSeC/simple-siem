@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,16 @@ import (
 const (
 	maxLoginBodyBytes = 4096
 
+	sessionCookieName  = "simple_siem_session"
+	browserHeader      = "X-Requested-With"
+	browserHeaderValue = "simple-siem"
+
+	credentialKey    = "credential"
+	credentialCookie = "cookie"
+	credentialBearer = "bearer"
+
 	codeAuthenticationRequired = "AUTHENTICATION_REQUIRED"
+	codeForbidden              = "FORBIDDEN"
 	codeValidationError        = "VALIDATION_ERROR"
 	codeRateLimited            = "RATE_LIMITED"
 )
@@ -26,14 +36,121 @@ const (
 type authHandler struct {
 	service *auth.Service
 	logger  *slog.Logger
+	policy  originPolicy
 }
 
-// requireSession accepts only a bearer token for a live session of an active
-// user and puts the actor on the context for the handlers in its group.
-func requireSession(service *auth.Service, logger *slog.Logger) gin.HandlerFunc {
+// newOriginPolicy reads the public URL once so every request compares against
+// the same origin without parsing the configuration again.
+func newOriginPolicy(publicURL string, development bool, logger *slog.Logger) originPolicy {
+	policy := originPolicy{development: development}
+	if publicURL == "" {
+		return policy
+	}
+	parsed, err := url.Parse(publicURL)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		logger.Error("public URL is not usable as an origin", "public_url", publicURL, "error", err)
+		return policy
+	}
+	policy.publicOrigin = originFromURL(parsed)
+	policy.secureCookie = parsed.Scheme == "https"
+	return policy
+}
+
+// originFromURL renders scheme://host[:port] and drops a default port.
+func originFromURL(publicURL *url.URL) string {
+	host := publicURL.Host
+	if (publicURL.Scheme == "http" && publicURL.Port() == "80") ||
+		(publicURL.Scheme == "https" && publicURL.Port() == "443") {
+		host = publicURL.Hostname()
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+	}
+	return publicURL.Scheme + "://" + host
+}
+
+// allows reports whether origin may drive a browser session. An empty or
+// opaque origin never matches; development only adds the loopback origins of
+// the Vite dev server.
+func (policy originPolicy) allows(origin string) bool {
+	if origin == "" || origin == "null" {
+		return false
+	}
+	if policy.publicOrigin != "" && origin == policy.publicOrigin {
+		return true
+	}
+	if !policy.development {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "http" || parsed.Host == "" ||
+		parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	host := parsed.Hostname()
+	return host == "localhost" || host == "127.0.0.1"
+}
+
+// rejectCrossSite blocks a browser login or cookie request that did not come
+// from the console itself. The log line names the origin, never the cookie.
+func rejectCrossSite(c *gin.Context, logger *slog.Logger) {
+	logger.Warn("cross-site request rejected",
+		"request_id", c.GetString(RequestIDKey),
+		"origin", c.GetHeader("Origin"),
+	)
+	c.AbortWithStatusJSON(http.StatusForbidden, errorResponse{
+		Error: errorDetail{Code: codeForbidden, Message: "cross-site request rejected"},
+	})
+}
+
+// sessionCookie is the one place that defines the browser session attributes.
+func sessionCookie(token string, maxAge int, policy originPolicy) *http.Cookie {
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/api",
+		HttpOnly: true,
+		Secure:   policy.secureCookie,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   maxAge,
+	}
+}
+
+func clearSessionCookie(c *gin.Context, policy originPolicy) {
+	http.SetCookie(c.Writer, sessionCookie("", -1, policy))
+}
+
+// requireSession accepts a bearer token or the browser cookie for a live
+// session of an active user, rejects a request that carries both, and puts the
+// actor and its credential on the context for the handlers in its group.
+func requireSession(service *auth.Service, logger *slog.Logger, policy originPolicy) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		scheme, token, found := strings.Cut(c.GetHeader("Authorization"), " ")
-		if !found || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.Contains(token, " ") {
+		cookieToken, _ := c.Cookie(sessionCookieName)
+		bearerToken := ""
+		if authorization := c.GetHeader("Authorization"); authorization != "" {
+			scheme, token, found := strings.Cut(authorization, " ")
+			if !found || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.Contains(token, " ") {
+				if cookieToken != "" {
+					clearSessionCookie(c, policy)
+				}
+				abortAuthenticationRequired(c)
+				return
+			}
+			bearerToken = token
+		}
+
+		if bearerToken != "" && cookieToken != "" {
+			clearSessionCookie(c, policy)
+			abortAuthenticationRequired(c)
+			return
+		}
+
+		token, credential := bearerToken, credentialBearer
+		if token == "" {
+			token, credential = cookieToken, credentialCookie
+		}
+		if token == "" {
 			abortAuthenticationRequired(c)
 			return
 		}
@@ -41,6 +158,9 @@ func requireSession(service *auth.Service, logger *slog.Logger) gin.HandlerFunc 
 		actor, err := service.Authenticate(c.Request.Context(), token)
 		if err != nil {
 			if errors.Is(err, auth.ErrUnauthenticated) {
+				if credential == credentialCookie {
+					clearSessionCookie(c, policy)
+				}
 				abortAuthenticationRequired(c)
 				return
 			}
@@ -48,6 +168,13 @@ func requireSession(service *auth.Service, logger *slog.Logger) gin.HandlerFunc 
 			return
 		}
 		c.Set(ActorKey, actor)
+		c.Set(credentialKey, credential)
+		if credential == credentialCookie && c.Request.Method != http.MethodGet &&
+			c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions &&
+			(c.GetHeader(browserHeader) != browserHeaderValue || !policy.allows(c.GetHeader("Origin"))) {
+			rejectCrossSite(c, logger)
+			return
+		}
 		c.Next()
 	}
 }
@@ -82,6 +209,11 @@ func (authentication authHandler) providers(c *gin.Context) {
 
 func (authentication authHandler) login(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
+	browser := c.GetHeader(browserHeader) == browserHeaderValue
+	if browser && !authentication.policy.allows(c.GetHeader("Origin")) {
+		rejectCrossSite(c, authentication.logger)
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxLoginBodyBytes)
 
 	decoder := json.NewDecoder(c.Request.Body)
@@ -124,15 +256,23 @@ func (authentication authHandler) login(c *gin.Context) {
 	if roles == nil {
 		roles = []string{}
 	}
+	user := loginUser{
+		ID:          result.User.ID,
+		Email:       result.User.Email,
+		DisplayName: result.User.DisplayName,
+		Roles:       roles,
+	}
+	expiresAt := result.ExpiresAt.UTC().Format(time.RFC3339)
+	if browser {
+		maxAge := int(math.Ceil(time.Until(result.ExpiresAt).Seconds()))
+		http.SetCookie(c.Writer, sessionCookie(result.Token, maxAge, authentication.policy))
+		c.JSON(http.StatusOK, browserLoginResponse{ExpiresAt: expiresAt, User: user})
+		return
+	}
 	c.JSON(http.StatusOK, loginResponse{
 		SessionToken: result.Token,
-		ExpiresAt:    result.ExpiresAt.UTC().Format(time.RFC3339),
-		User: loginUser{
-			ID:          result.User.ID,
-			Email:       result.User.Email,
-			DisplayName: result.User.DisplayName,
-			Roles:       roles,
-		},
+		ExpiresAt:    expiresAt,
+		User:         user,
 	})
 }
 
@@ -140,11 +280,17 @@ func (authentication authHandler) logout(c *gin.Context) {
 	actor := c.MustGet(ActorKey).(auth.Actor)
 	if err := authentication.service.Logout(c.Request.Context(), actor, clientInfo(c)); err != nil {
 		if errors.Is(err, auth.ErrUnauthenticated) {
+			if c.GetString(credentialKey) == credentialCookie {
+				clearSessionCookie(c, authentication.policy)
+			}
 			abortAuthenticationRequired(c)
 			return
 		}
 		internalError(c, authentication.logger, err)
 		return
+	}
+	if c.GetString(credentialKey) == credentialCookie {
+		clearSessionCookie(c, authentication.policy)
 	}
 	c.Status(http.StatusNoContent)
 }

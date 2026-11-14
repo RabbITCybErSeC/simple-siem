@@ -21,6 +21,13 @@ type ReadinessChecker interface {
 	PingContext(ctx context.Context) error
 }
 
+// originPolicy decides which request origins may use a browser session.
+type originPolicy struct {
+	publicOrigin string // scheme://host[:port] with default ports removed; "" when unparsable
+	development  bool
+	secureCookie bool // public URL scheme is https
+}
+
 // Dependencies are the collaborators NewRouter needs.
 type Dependencies struct {
 	Database       ReadinessChecker
@@ -28,6 +35,8 @@ type Dependencies struct {
 	Auth           *auth.Service
 	Web            fs.FS
 	TrustedProxies []string
+	PublicURL      string
+	Development    bool
 	Version        string
 	Commit         string
 }
@@ -66,6 +75,11 @@ type loginResponse struct {
 	SessionToken string    `json:"sessionToken"`
 	ExpiresAt    string    `json:"expiresAt"`
 	User         loginUser `json:"user"`
+}
+
+type browserLoginResponse struct {
+	ExpiresAt string    `json:"expiresAt"`
+	User      loginUser `json:"user"`
 }
 
 type loginUser struct {
