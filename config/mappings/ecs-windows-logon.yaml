@@ -24,8 +24,10 @@ fields:
     from: winlog.record_id
   - to: target.user.userid
     from: winlog.event_data.TargetUserName
+    transforms: [dash_as_empty]
   - to: target.user.windows_sid
     from: winlog.event_data.TargetUserSid
+    transforms: [dash_as_empty]
   - to: target.hostname
     from: host.name
   - to: principal.ip
@@ -50,5 +52,6 @@ fields:
 additional:
   - key: target_domain
     from: winlog.event_data.TargetDomainName
+    transforms: [dash_as_empty]
   - key: logon_type
     from: winlog.event_data.LogonType

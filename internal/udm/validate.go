@@ -2,8 +2,8 @@ package udm
 
 import (
 	"fmt"
-	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -70,20 +70,20 @@ func Validate(event Event) []ValidationError {
 		})
 	}
 
-	problems = append(problems, invalidIPs("principal.ip", event.Principal.IP)...)
-	problems = append(problems, invalidIPs("target.ip", event.Target.IP)...)
+	problems = append(problems, canonicalValues(event)...)
+	problems = append(problems, canonicalIPs("principal.ip", event.Principal.IP)...)
+	problems = append(problems, canonicalIPs("target.ip", event.Target.IP)...)
 
-	if event.Principal.Port < 0 || event.Principal.Port > 65535 {
-		problems = append(problems, ValidationError{
-			Path:    "principal.port",
-			Message: "must be a port number between 0 and 65535",
-		})
-	}
-	if event.Target.Port < 0 || event.Target.Port > 65535 {
-		problems = append(problems, ValidationError{
-			Path:    "target.port",
-			Message: "must be a port number between 0 and 65535",
-		})
+	for _, check := range []struct {
+		path string
+		port int
+	}{
+		{"principal.port", event.Principal.Port},
+		{"target.port", event.Target.Port},
+	} {
+		if _, err := parsePort(strconv.Itoa(check.port)); err != nil {
+			problems = append(problems, ValidationError{Path: check.path, Message: err.Error()})
+		}
 	}
 
 	for _, field := range catalog {
@@ -121,20 +121,46 @@ func Validate(event Event) []ValidationError {
 	return problems
 }
 
-func invalidIPs(path string, addresses []string) []ValidationError {
+func canonicalValues(event Event) []ValidationError {
+	var problems []ValidationError
+	for _, check := range []struct {
+		path      string
+		value     string
+		canonical func(string) (string, error)
+		message   string
+	}{
+		{"principal.user.userid", event.Principal.User.UserID, parseUserID, "must be a canonical user id"},
+		{"target.user.userid", event.Target.User.UserID, parseUserID, "must be a canonical user id"},
+		{"principal.hostname", event.Principal.Hostname, parseHostname, "must be a canonical hostname"},
+		{"target.hostname", event.Target.Hostname, parseHostname, "must be a canonical hostname"},
+	} {
+		if check.value == "" {
+			continue
+		}
+		canonical, err := check.canonical(check.value)
+		if err != nil {
+			problems = append(problems, ValidationError{Path: check.path, Message: err.Error()})
+			continue
+		}
+		if canonical != check.value {
+			problems = append(problems, ValidationError{Path: check.path, Message: check.message})
+		}
+	}
+	return problems
+}
+
+func canonicalIPs(path string, addresses []string) []ValidationError {
 	var problems []ValidationError
 	for _, address := range addresses {
-		parsed, err := netip.ParseAddr(address)
-		switch {
-		case err != nil:
+		canonical, err := parseIP(address)
+		if err != nil {
+			problems = append(problems, ValidationError{Path: path, Message: err.Error()})
+			continue
+		}
+		if canonical != address {
 			problems = append(problems, ValidationError{
 				Path:    path,
-				Message: fmt.Sprintf("must be an IP address, got %s", quoteValue(address)),
-			})
-		case parsed.Zone() != "":
-			problems = append(problems, ValidationError{
-				Path:    path,
-				Message: fmt.Sprintf("IP address must not have a zone, got %s", quoteValue(address)),
+				Message: fmt.Sprintf("must be the canonical form %s", quoteValue(canonical)),
 			})
 		}
 	}

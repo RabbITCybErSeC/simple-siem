@@ -69,6 +69,6 @@ type Counts struct {
 
 // Converter converts raw source payloads with an ordered set of mappings.
 type Converter struct {
-	mappings  []Mapping
+	mappings  []compiledMapping
 	retention time.Duration
 }

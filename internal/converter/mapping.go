@@ -232,7 +232,7 @@ func validateMapping(mapping Mapping) error {
 		}
 	}
 
-	setPaths := make(map[string]struct{}, len(mapping.Constants)+len(mapping.Fields))
+	setPaths := make(map[string]struct{}, len(mapping.Constants)+len(mapping.Fields)+len(mapping.Additional))
 	for _, key := range sortedKeys(mapping.Constants) {
 		if _, ok := udm.Lookup(key); !ok {
 			return fail("constants."+key, fmt.Sprintf("unknown field %q", key))
@@ -261,16 +261,16 @@ func validateMapping(mapping Mapping) error {
 		}
 	}
 
-	seenAdditional := make(map[string]struct{}, len(mapping.Additional))
 	for index, additional := range mapping.Additional {
 		path := fmt.Sprintf("additional[%d]", index)
-		if _, ok := udm.Lookup("additional." + additional.Key); !ok {
+		additionalPath := "additional." + additional.Key
+		if _, ok := udm.Lookup(additionalPath); !ok {
 			return fail(path+".key", fmt.Sprintf("invalid key %q", additional.Key))
 		}
-		if _, duplicate := seenAdditional[additional.Key]; duplicate {
-			return fail(path+".key", fmt.Sprintf("duplicate key %q", additional.Key))
+		if _, duplicate := setPaths[additionalPath]; duplicate {
+			return fail(path+".key", fmt.Sprintf("%s is set more than once", additionalPath))
 		}
-		seenAdditional[additional.Key] = struct{}{}
+		setPaths[additionalPath] = struct{}{}
 		if err := validateSources(additional.From); err != nil {
 			return fail(path+".from", err.Error())
 		}

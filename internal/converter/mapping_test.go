@@ -459,7 +459,38 @@ additional:
   - {key: source_country, from: source.country}
   - {key: source_country, from: destination.country}
 `,
-			[]string{"additional[1].key", "duplicate"},
+			[]string{"additional[1].key", "set more than once"},
+		},
+		{
+			"field and additional set the same path",
+			`
+id: test
+version: 1
+match: [{field: event.category, equals: authentication}]
+constants:
+  metadata.event_type: GENERIC_EVENT
+  metadata.event_timestamp: "2026-05-11T10:01:00Z"
+fields:
+  - {to: additional.source_country, from: source.country}
+additional:
+  - {key: source_country, from: source.country}
+`,
+			[]string{"additional[0].key", "set more than once"},
+		},
+		{
+			"constant and additional set the same path",
+			`
+id: test
+version: 1
+match: [{field: event.category, equals: authentication}]
+constants:
+  metadata.event_type: GENERIC_EVENT
+  metadata.event_timestamp: "2026-05-11T10:01:00Z"
+  additional.source_country: US
+additional:
+  - {key: source_country, from: source.country}
+`,
+			[]string{"additional[0].key", "set more than once"},
 		},
 		{
 			"additional without from",

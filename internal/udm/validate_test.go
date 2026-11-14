@@ -161,6 +161,62 @@ func TestValidateRejectsInvalidIPs(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNonCanonicalValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		path   string
+		mutate func(*udm.Event)
+	}{
+		{
+			"uppercase user id",
+			"target.user.userid",
+			func(event *udm.Event) { event.Target.User.UserID = "Alice" },
+		},
+		{
+			"untrimmed hostname",
+			"target.hostname",
+			func(event *udm.Event) { event.Target.Hostname = " web01" },
+		},
+		{
+			"uppercase hostname",
+			"target.hostname",
+			func(event *udm.Event) { event.Target.Hostname = "WEB01" },
+		},
+		{
+			"mapped IPv4 address",
+			"target.ip",
+			func(event *udm.Event) {
+				event.Target.Hostname = ""
+				event.Target.IP = []string{"::ffff:10.0.0.1"}
+			},
+		},
+		{
+			"uppercase IPv6 address",
+			"target.ip",
+			func(event *udm.Event) {
+				event.Target.Hostname = ""
+				event.Target.IP = []string{"2001:DB8::1"}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			event := validFailedLogon()
+			test.mutate(&event)
+			problems := udm.Validate(event)
+			if len(problems) != 1 {
+				t.Fatalf("Validate = %v, want one error", problems)
+			}
+			if problems[0].Path != test.path {
+				t.Errorf("path = %q, want %q", problems[0].Path, test.path)
+			}
+			if !strings.Contains(problems[0].Message, "canonical") {
+				t.Errorf("message = %q, want it to mention the canonical form", problems[0].Message)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsPortsOutOfRange(t *testing.T) {
 	event := validFailedLogon()
 	event.Principal.Port = -1

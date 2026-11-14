@@ -1,0 +1,47 @@
+{
+  "@timestamp": "2026-05-11T10:06:00.000Z",
+  "event": {
+    "category": ["authentication"],
+    "type": ["start"],
+    "action": "ssh_login",
+    "outcome": "success",
+    "ingested": "2026-05-11T10:06:04.000Z",
+    "dataset": "system.auth",
+    "module": "system",
+    "kind": "event"
+  },
+  "process": {
+    "name": "sshd",
+    "pid": 4242
+  },
+  "host": {
+    "name": "web01",
+    "hostname": "web01",
+    "os": {
+      "type": "linux"
+    }
+  },
+  "user": {
+    "name": "alice"
+  },
+  "related": {
+    "user": ["alice"],
+    "ip": ["203.0.113.7"]
+  },
+  "source": {
+    "ip": "203.0.113.7",
+    "port": 52114,
+    "geo": {
+      "country_iso_code": "US"
+    }
+  },
+  "system": {
+    "auth": {
+      "ssh": {
+        "event": "Accepted",
+        "method": "publickey"
+      }
+    }
+  },
+  "message": "Accepted publickey for alice from 203.0.113.7 port 52114 ssh2"
+}

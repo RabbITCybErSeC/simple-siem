@@ -137,6 +137,83 @@ func TestConvertFirstNonEmptySource(t *testing.T) {
 	}
 }
 
+func TestConvertFirstNonEmptyAfterTransforms(t *testing.T) {
+	mapping := mustParse(t, `
+id: fallback-test
+version: 1
+match: [{field: event.category, equals: authentication}]
+constants:
+  metadata.event_type: GENERIC_EVENT
+  security_result.action: ALLOW
+fields:
+  - {to: metadata.event_timestamp, from: "@timestamp"}
+  - {to: principal.ip, from: [winlog.event_data.IpAddress, source.ip], transforms: [dash_as_empty]}
+  - {to: target.user.userid, from: [user.name, related.user]}
+`)
+	result := convertPayload(t, mapping, `{
+		"@timestamp": "2026-05-11T10:01:00Z",
+		"event": {"category": "authentication"},
+		"winlog": {"event_data": {"IpAddress": "-"}},
+		"source": {"ip": "203.0.113.7"},
+		"user": {"name": "  "},
+		"related": {"user": ["bob"]}
+	}`)
+	if result.Outcome != converter.OutcomeConverted {
+		t.Fatalf("outcome = %q, want CONVERTED; errors = %v", result.Outcome, result.Errors)
+	}
+	if len(result.Event.Principal.IP) != 1 || result.Event.Principal.IP[0] != "203.0.113.7" {
+		t.Errorf("principal ip = %v, want source.ip after the dash source became empty", result.Event.Principal.IP)
+	}
+	if result.Event.Target.User.UserID != "bob" {
+		t.Errorf("target user = %q, want bob after the whitespace source became empty", result.Event.Target.User.UserID)
+	}
+}
+
+func TestConvertResolutionErrorFallsThrough(t *testing.T) {
+	result := convertPayload(t, mustParse(t, convertLoginMapping), `{
+		"@timestamp": "2026-05-11T10:01:00Z",
+		"event": {"category": "authentication", "outcome": "failure"},
+		"process": {"name": "sshd"},
+		"user": {"name": {"first": "alice"}},
+		"related": {"user": ["bob"]},
+		"host": {"name": "web01"}
+	}`)
+	if result.Outcome != converter.OutcomeConverted {
+		t.Fatalf("outcome = %q, want CONVERTED; errors = %v", result.Outcome, result.Errors)
+	}
+	if result.Event.Target.User.UserID != "bob" {
+		t.Errorf("target user = %q, want the next source bob", result.Event.Target.User.UserID)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("errors = %v, want none when a later source resolves", result.Errors)
+	}
+}
+
+func TestConvertDropsDuplicateValidationError(t *testing.T) {
+	result := convertPayload(t, mustParse(t, convertLoginMapping), `{
+		"@timestamp": "not-a-date",
+		"event": {"category": "authentication", "outcome": "failure"},
+		"process": {"name": "sshd"},
+		"user": {"name": "alice"},
+		"host": {"name": "web01"}
+	}`)
+	if result.Outcome != converter.OutcomeQuarantined {
+		t.Fatalf("outcome = %q, want QUARANTINED", result.Outcome)
+	}
+	var timestampErrors []udm.ValidationError
+	for _, problem := range result.Errors {
+		if problem.Path == "metadata.event_timestamp" {
+			timestampErrors = append(timestampErrors, problem)
+		}
+	}
+	if len(timestampErrors) != 1 {
+		t.Fatalf("metadata.event_timestamp errors = %v, want exactly one", timestampErrors)
+	}
+	if !strings.Contains(timestampErrors[0].Message, "RFC 3339") {
+		t.Errorf("message = %q, want the Set error to be kept", timestampErrors[0].Message)
+	}
+}
+
 func TestConvertValuesAndDefault(t *testing.T) {
 	mapping := mustParse(t, `
 id: values-test
@@ -489,7 +566,11 @@ constants:
   metadata.vendor_name: Second
 fields: [{to: metadata.event_timestamp, from: "@timestamp"}]
 `)
-	result := converter.New([]converter.Mapping{first, second}, testRetention).Convert([]byte(`{
+	converterInstance, err := converter.New([]converter.Mapping{first, second}, testRetention)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result := converterInstance.Convert([]byte(`{
 		"@timestamp": "2026-05-11T10:01:00Z",
 		"event": {"category": "authentication"}
 	}`), testNow)
@@ -506,7 +587,29 @@ fields: [{to: metadata.event_timestamp, from: "@timestamp"}]
 
 func convertPayload(t *testing.T, mapping converter.Mapping, payload string) converter.Result {
 	t.Helper()
-	return converter.New([]converter.Mapping{mapping}, testRetention).Convert([]byte(payload), testNow)
+	converterInstance, err := converter.New([]converter.Mapping{mapping}, testRetention)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return converterInstance.Convert([]byte(payload), testNow)
+}
+
+func TestNewRejectsInvalidArguments(t *testing.T) {
+	mapping := mustParse(t, convertLoginMapping)
+
+	if _, err := converter.New(nil, testRetention); err == nil {
+		t.Error("New(nil, 72h) = nil error, want an error")
+	} else if !strings.Contains(err.Error(), "mapping") {
+		t.Errorf("error = %q, want it to mention mappings", err)
+	}
+
+	for _, retention := range []time.Duration{0, -time.Hour} {
+		if _, err := converter.New([]converter.Mapping{mapping}, retention); err == nil {
+			t.Errorf("New(mapping, %v) = nil error, want an error", retention)
+		} else if !strings.Contains(err.Error(), "retention") {
+			t.Errorf("error = %q, want it to mention retention", err)
+		}
+	}
 }
 
 func hasValidationError(errors []udm.ValidationError, path string) bool {

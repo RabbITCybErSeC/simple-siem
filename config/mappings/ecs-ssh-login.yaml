@@ -14,7 +14,6 @@ constants:
   metadata.product_name: sshd
   target.application: sshd
   network.application_protocol: SSH
-  extensions.auth.mechanism: USERNAME_PASSWORD
 
 fields:
   - to: metadata.event_timestamp
@@ -31,6 +30,10 @@ fields:
     from: source.ip
   - to: principal.port
     from: source.port
+  - to: extensions.auth.mechanism
+    from: system.auth.ssh.method
+    values: { password: USERNAME_PASSWORD }
+    default: MECHANISM_OTHER
   - to: security_result.action
     from: event.outcome
     values: { success: ALLOW, failure: BLOCK }

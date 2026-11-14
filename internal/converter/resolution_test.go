@@ -40,7 +40,7 @@ func TestResolve(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := resolve(decodeTestObject(t, test.payload), test.path)
+			got, err := resolveSegments(decodeTestObject(t, test.payload), strings.Split(test.path, "."))
 			if test.wantError {
 				if err == nil {
 					t.Fatalf("resolve(%q) = %v, want an error", test.path, got)
@@ -155,8 +155,12 @@ func TestMatches(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
+			compiled, err := compileMapping(test.mapping)
+			if err != nil {
+				t.Fatalf("compileMapping: %v", err)
+			}
 			object := decodeTestObject(t, test.payload)
-			if got := matches(test.mapping, object); got != test.want {
+			if got := matches(compiled, object); got != test.want {
 				t.Errorf("matches = %v, want %v", got, test.want)
 			}
 		})

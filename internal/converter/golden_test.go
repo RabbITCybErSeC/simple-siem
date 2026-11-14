@@ -26,7 +26,10 @@ func TestShippedMappingsGolden(t *testing.T) {
 		t.Fatalf("mapping ids = [%s %s], want [ecs-ssh-login ecs-windows-logon]", mappings[0].ID, mappings[1].ID)
 	}
 
-	converterInstance := converter.New(mappings, 72*time.Hour)
+	converterInstance, err := converter.New(mappings, 72*time.Hour)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	now := time.Date(2026, time.May, 11, 12, 0, 0, 0, time.UTC)
 	entries, err := os.ReadDir("testdata/ecs")
 	if err != nil {
@@ -63,7 +66,7 @@ func TestShippedMappingsGolden(t *testing.T) {
 			}
 		})
 	}
-	if fixtures != 7 {
-		t.Errorf("fixture count = %d, want 7", fixtures)
+	if fixtures != 9 {
+		t.Errorf("fixture count = %d, want 9", fixtures)
 	}
 }
