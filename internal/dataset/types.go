@@ -91,6 +91,7 @@ var (
 	ErrUnknownDataset     = errors.New("unknown dataset")
 	ErrDatasetOwned       = errors.New("dataset is owned by another pipeline")
 	ErrInvalidDatasetName = errors.New("invalid dataset name")
+	ErrInvalidRetention   = errors.New("invalid dataset retention interval")
 	ErrOutsideRetention   = errors.New("event time is outside the dataset retention")
 )
 
@@ -111,6 +112,14 @@ type datasetRow struct {
 
 func (datasetRow) TableName() string {
 	return "datasets"
+}
+
+// datasetLoad is a datasets row plus the database clock read in the same
+// statement. The embedded tag flattens the row; GORM skips unexported
+// anonymous fields, so the row is a named exported field.
+type datasetLoad struct {
+	Dataset     datasetRow `gorm:"embedded"`
+	DatabaseNow time.Time  `gorm:"column:database_now"`
 }
 
 // eventRow is one dataset_events row. source_key_hash is SourceKey.Hash, and
@@ -135,9 +144,12 @@ func (eventRow) TableName() string {
 	return "dataset_events"
 }
 
-// quarantineRow is one dataset_quarantine row.
+// quarantineRow is one dataset_quarantine row. The unique index on
+// (dataset, source_key_hash) makes repeated failures of one document an
+// upsert.
 type quarantineRow struct {
 	Dataset           string               `gorm:"column:dataset"`
+	SourceKeyHash     []byte               `gorm:"column:source_key_hash"`
 	FetcherInstanceID string               `gorm:"column:fetcher_instance_id"`
 	SourceIndex       string               `gorm:"column:source_index"`
 	DocumentID        string               `gorm:"column:document_id"`

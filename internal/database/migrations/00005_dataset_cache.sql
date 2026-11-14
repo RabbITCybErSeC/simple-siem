@@ -30,6 +30,7 @@ CREATE TABLE dataset_events (
 CREATE TABLE dataset_quarantine (
     id uuid PRIMARY KEY DEFAULT uuidv7(),
     dataset text NOT NULL REFERENCES datasets(name),
+    source_key_hash bytea NOT NULL,
     fetcher_instance_id text NOT NULL, source_index text NOT NULL, document_id text NOT NULL,
     payload bytea NOT NULL,
     payload_truncated boolean NOT NULL,
@@ -38,6 +39,8 @@ CREATE TABLE dataset_quarantine (
     pipeline_run_id text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX dataset_quarantine_dataset_source_key
+    ON dataset_quarantine (dataset, source_key_hash);
 CREATE INDEX dataset_quarantine_dataset_created ON dataset_quarantine (dataset, created_at);
 
 -- +goose Down

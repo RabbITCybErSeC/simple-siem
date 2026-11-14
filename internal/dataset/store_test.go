@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/config"
+	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/RabbITCybErSeC/simple-siem/internal/udm"
 	"gorm.io/gorm"
@@ -198,7 +200,7 @@ func dayPartitionExists(t *testing.T, db *gorm.DB, datasetName string, day time.
 		SELECT EXISTS (
 			SELECT 1 FROM pg_inherits
 			WHERE inhrelid = to_regclass(?) AND inhparent = to_regclass(?)
-		)`, "ds_"+datasetName+"_"+day.Format("20060102"), "ds_"+datasetName).Scan(&exists).Error
+		)`, dayPartitionName(datasetName, day), listPartitionName(datasetName)).Scan(&exists).Error
 	if err != nil {
 		t.Fatalf("look up day partition for %q: %v", datasetName, err)
 	}
@@ -209,7 +211,7 @@ func listPartitionChildren(t *testing.T, db *gorm.DB, datasetName string) int64 
 	t.Helper()
 	var count int64
 	err := db.Raw(`
-		SELECT count(*) FROM pg_inherits WHERE inhparent = to_regclass(?)`, "ds_"+datasetName).
+		SELECT count(*) FROM pg_inherits WHERE inhparent = to_regclass(?)`, listPartitionName(datasetName)).
 		Scan(&count).Error
 	if err != nil {
 		t.Fatalf("count partitions of %q: %v", datasetName, err)
@@ -738,8 +740,10 @@ func TestWriteBatchRollsBackWithCaller(t *testing.T) {
 	if got := countQuarantineRows(t, db, registration.Name); got != 0 {
 		t.Errorf("dataset_quarantine holds %d rows after rollback, want none", got)
 	}
-	if got := listPartitionChildren(t, db, registration.Name); got != 0 {
-		t.Errorf("list partition has %d children after rollback, want none", got)
+	// The day partition is created in its own transaction before the caller's
+	// write, so it survives the rollback; an empty early partition is harmless.
+	if got := listPartitionChildren(t, db, registration.Name); got != 1 {
+		t.Errorf("list partition has %d children after rollback, want the early day partition", got)
 	}
 	assertNoWatermark(t, readWatermark(t, db, registration.Name))
 }
@@ -1056,6 +1060,396 @@ func TestExpireUnknownDataset(t *testing.T) {
 	}
 }
 
+// Partition bounds are stored as timestamptz literals; without an explicit
+// offset PostgreSQL reads them in the writing session's time zone, so a
+// non-UTC session would shift every day partition.
+func TestWriteBatchPartitionBoundsUseUTC(t *testing.T) {
+	db, storeDatabase := newDatabaseWithSessionTimeZone(t, "Europe/Amsterdam")
+	store := NewPostgresStore(storeDatabase)
+	registration := Dataset{
+		Name:            "tz_events",
+		PipelineID:      "tz-events",
+		Retention:       365 * 24 * time.Hour,
+		AllowedLateness: time.Minute,
+	}
+	if err := registerDataset(t, store, db, registration); err != nil {
+		t.Fatalf("RegisterDataset: %v", err)
+	}
+	eventTime := time.Date(2026, time.January, 1, 23, 30, 0, 0, time.UTC)
+	batch := Batch{
+		RunID:          "run-1",
+		Records:        []Record{newRecord(1, eventTime, "run-1", udm.EventTypeUserLogin)},
+		FetchWatermark: eventTime.Add(time.Hour),
+	}
+
+	err := db.Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Exec("SET LOCAL TimeZone = 'Europe/Amsterdam'").Error; err != nil {
+			return err
+		}
+		return store.WriteBatch(context.Background(), transaction, registration.Name, batch)
+	})
+	if err != nil {
+		t.Fatalf("WriteBatch with a non-UTC session: %v", err)
+	}
+
+	var read []Record
+	for record, err := range store.ReadWindow(context.Background(), registration.Name, eventTime.Add(-time.Hour), eventTime.Add(time.Hour), Filter{}) {
+		if err != nil {
+			t.Fatalf("ReadWindow: %v", err)
+		}
+		read = append(read, record)
+	}
+	if len(read) != 1 || !read[0].EventTime.Equal(eventTime) {
+		t.Fatalf("ReadWindow returned %+v, want the record at %s", read, eventTime)
+	}
+
+	want := "FOR VALUES FROM ('2026-01-01 00:00:00+00') TO ('2026-01-02 00:00:00+00')"
+	if got := readPartitionBound(t, db, dayPartitionName(registration.Name, eventTime)); got != want {
+		t.Errorf("partition bound = %q, want %q", got, want)
+	}
+}
+
+// A dataset named a_20260101 used to claim the day partition name of dataset a
+// for 2026-01-01, so the two collided in either registration order.
+func TestWriteBatchSeparatesDatasetAndDayPartitionNames(t *testing.T) {
+	orders := []struct {
+		name     string
+		datasets []string
+	}{
+		{name: "short name first", datasets: []string{"a", "a_20260101"}},
+		{name: "long name first", datasets: []string{"a_20260101", "a"}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			db := databasetest.New(t)
+			store := NewPostgresStore(db)
+			eventTime := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+			for index, name := range order.datasets {
+				registration := Dataset{
+					Name:            name,
+					PipelineID:      "pipeline-" + name,
+					Retention:       365 * 24 * time.Hour,
+					AllowedLateness: time.Minute,
+				}
+				if err := registerDataset(t, store, db, registration); err != nil {
+					t.Fatalf("RegisterDataset(%q): %v", name, err)
+				}
+				batch := Batch{
+					RunID: "run-" + name,
+					Records: []Record{
+						newRecord(index+1, eventTime.Add(time.Duration(index)*time.Minute), "run-"+name, udm.EventTypeUserLogin),
+					},
+					FetchWatermark: eventTime.Add(time.Hour),
+				}
+				if err := writeBatch(t, store, db, name, batch); err != nil {
+					t.Fatalf("WriteBatch(%q): %v", name, err)
+				}
+			}
+			for _, name := range order.datasets {
+				if !dayPartitionExists(t, db, name, eventTime) {
+					t.Errorf("dataset %q has no day partition", name)
+				}
+				if got := countEventRows(t, db, name); got != 1 {
+					t.Errorf("dataset %q holds %d rows, want 1", name, got)
+				}
+				if got := partitionDefinition(t, db, name); got == "" {
+					t.Errorf("dataset %q has no list partition", name)
+				}
+			}
+		})
+	}
+}
+
+// One batch may repeat a record; PostgreSQL refuses an upsert that would touch
+// the same row twice, so only the last record per key may reach the statement.
+func TestWriteBatchDeduplicatesRecordsInOneBatch(t *testing.T) {
+	db := databasetest.New(t)
+	store := NewPostgresStore(db)
+	registration := registerTestDataset(t, store, db)
+	base := time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)
+	first := newRecord(1, base, "run-a", udm.EventTypeUserLogin)
+	second := newRecord(1, base, "run-b", udm.EventTypeUserLogin)
+	second.Event.Metadata.Description = "written by run-b"
+	batch := Batch{
+		RunID:          "run-b",
+		Records:        []Record{first, second},
+		FetchWatermark: base.Add(time.Hour),
+	}
+
+	if err := writeBatch(t, store, db, registration.Name, batch); err != nil {
+		t.Fatalf("WriteBatch with a duplicate record: %v", err)
+	}
+	if got := countEventRows(t, db, registration.Name); got != 1 {
+		t.Fatalf("dataset_events holds %d rows, want 1", got)
+	}
+	stored := readEvent(t, db, "doc-1")
+	if stored.PipelineRunID != "run-b" {
+		t.Errorf("pipeline_run_id = %q, want run-b", stored.PipelineRunID)
+	}
+	var event udm.Event
+	if err := json.Unmarshal(stored.EventJSON, &event); err != nil {
+		t.Fatalf("decode stored event: %v", err)
+	}
+	if event.Metadata.Description != "written by run-b" {
+		t.Errorf("stored event was not the last duplicate: %q", event.Metadata.Description)
+	}
+}
+
+func TestRegisterDatasetConcurrent(t *testing.T) {
+	t.Run("same pipeline", func(t *testing.T) {
+		db := databasetest.New(t)
+		store := NewPostgresStore(db)
+		registration := Dataset{
+			Name:            "auth_events",
+			PipelineID:      "auth-events",
+			Retention:       72 * time.Hour,
+			AllowedLateness: 10 * time.Minute,
+		}
+		results := registerConcurrently(t, store, db, registration, registration)
+		for index, err := range results {
+			if err != nil {
+				t.Errorf("registration %d = %v, want success", index, err)
+			}
+		}
+		if got := countDatasets(t, db); got != 1 {
+			t.Errorf("datasets holds %d rows, want 1", got)
+		}
+		if got := partitionDefinition(t, db, registration.Name); got == "" {
+			t.Error("list partition is missing")
+		}
+		if stored := readDataset(t, db, registration.Name); stored.Version != 2 {
+			t.Errorf("version = %d, want 2 after both registrations", stored.Version)
+		}
+	})
+
+	t.Run("different pipelines", func(t *testing.T) {
+		db := databasetest.New(t)
+		store := NewPostgresStore(db)
+		first := Dataset{
+			Name:            "auth_events",
+			PipelineID:      "auth-events",
+			Retention:       72 * time.Hour,
+			AllowedLateness: 10 * time.Minute,
+		}
+		second := first
+		second.PipelineID = "other"
+
+		results := registerConcurrently(t, store, db, first, second)
+		succeeded := 0
+		owned := 0
+		for _, err := range results {
+			switch {
+			case err == nil:
+				succeeded++
+			case errors.Is(err, ErrDatasetOwned):
+				owned++
+			default:
+				t.Errorf("registration = %v, want success or ErrDatasetOwned", err)
+			}
+		}
+		if succeeded != 1 || owned != 1 {
+			t.Errorf("%d registrations succeeded and %d got ErrDatasetOwned, want 1 and 1", succeeded, owned)
+		}
+		if got := countDatasets(t, db); got != 1 {
+			t.Errorf("datasets holds %d rows, want 1", got)
+		}
+		if got := partitionDefinition(t, db, first.Name); got == "" {
+			t.Error("list partition is missing")
+		}
+	})
+}
+
+// The partition DDL takes ACCESS EXCLUSIVE on the list partition. Creating it in
+// the caller's transaction would block every reader until that transaction
+// commits, so WriteBatch must commit the DDL on its own first.
+func TestWriteBatchCreatesPartitionsOutsideCallerTransaction(t *testing.T) {
+	db := databasetest.New(t)
+	store := NewPostgresStore(db)
+	registration := registerTestDataset(t, store, db)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)
+	batch := Batch{
+		RunID:          "run-1",
+		Records:        []Record{newRecord(1, base, "run-1", udm.EventTypeUserLogin)},
+		FetchWatermark: base.Add(time.Hour),
+	}
+	readResult := make(chan error, 1)
+	blocked := errors.New("ReadWindow blocked on the caller's uncommitted partition DDL")
+
+	err := db.Transaction(func(transaction *gorm.DB) error {
+		if err := store.WriteBatch(ctx, transaction, registration.Name, batch); err != nil {
+			return err
+		}
+		go func() {
+			for _, err := range store.ReadWindow(ctx, registration.Name, base.Add(-time.Hour), base.Add(time.Hour), Filter{}) {
+				if err != nil {
+					readResult <- err
+					return
+				}
+			}
+			readResult <- nil
+		}()
+		select {
+		case err := <-readResult:
+			return err
+		case <-time.After(2 * time.Second):
+			return blocked
+		}
+	})
+	if err != nil {
+		t.Fatalf("WriteBatch and concurrent read: %v", err)
+	}
+	if !dayPartitionExists(t, db, registration.Name, utcDay(base)) {
+		t.Error("day partition is missing after the commit")
+	}
+	if got := countEventRows(t, db, registration.Name); got != 1 {
+		t.Errorf("dataset_events holds %d rows after the commit, want 1", got)
+	}
+}
+
+// time.Duration cannot express months. Reading a month interval as zero would
+// silently disable the retention bounds and expiry.
+func TestWriteBatchAndExpireRejectMonthIntervals(t *testing.T) {
+	db := databasetest.New(t)
+	store := NewPostgresStore(db)
+	registration := registerTestDataset(t, store, db)
+	now := time.Now().UTC()
+	base := now.Truncate(time.Minute).Add(-time.Hour)
+	batch := Batch{
+		RunID:          "run-1",
+		Records:        []Record{newRecord(1, base, "run-1", udm.EventTypeUserLogin)},
+		FetchWatermark: base,
+	}
+
+	if err := db.Exec("UPDATE datasets SET retention = '1 mon' WHERE name = ?", registration.Name).Error; err != nil {
+		t.Fatalf("set month retention: %v", err)
+	}
+	if err := writeBatch(t, store, db, registration.Name, batch); !errors.Is(err, ErrInvalidRetention) {
+		t.Errorf("WriteBatch with a month retention = %v, want ErrInvalidRetention", err)
+	}
+	if err := expireDataset(t, store, db, registration.Name, now); !errors.Is(err, ErrInvalidRetention) {
+		t.Errorf("Expire with a month retention = %v, want ErrInvalidRetention", err)
+	}
+	if got := countEventRows(t, db, registration.Name); got != 0 {
+		t.Errorf("dataset_events holds %d rows after a rejected batch, want none", got)
+	}
+
+	if err := db.Exec(
+		"UPDATE datasets SET retention = '72 hours', allowed_lateness = '1 mon' WHERE name = ?",
+		registration.Name,
+	).Error; err != nil {
+		t.Fatalf("set month lateness: %v", err)
+	}
+	if err := writeBatch(t, store, db, registration.Name, batch); !errors.Is(err, ErrInvalidRetention) {
+		t.Errorf("WriteBatch with a month lateness = %v, want ErrInvalidRetention", err)
+	}
+}
+
+// The same document may be quarantined by several runs; one row per
+// (dataset, source key) keeps the newest failure.
+func TestWriteBatchUpsertsQuarantine(t *testing.T) {
+	db := databasetest.New(t)
+	store := NewPostgresStore(db)
+	registration := registerTestDataset(t, store, db)
+	base := time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)
+	record := QuarantinedRecord{
+		Key:            SourceKey{FetcherInstanceID: "fetcher", Index: "logs", DocumentID: "bad-1"},
+		Payload:        []byte("first payload"),
+		MappingID:      "mapping-1",
+		MappingVersion: 1,
+		Errors:         []udm.ValidationError{{Path: "target.user.userid", Message: "is required"}},
+	}
+
+	if err := writeBatch(t, store, db, registration.Name, Batch{
+		RunID:          "run-a",
+		Quarantined:    []QuarantinedRecord{record},
+		FetchWatermark: base,
+	}); err != nil {
+		t.Fatalf("WriteBatch run A: %v", err)
+	}
+
+	record.Payload = []byte("second payload")
+	record.MappingVersion = 2
+	record.Errors = []udm.ValidationError{{Path: "target.hostname", Message: "is required"}}
+	if err := writeBatch(t, store, db, registration.Name, Batch{
+		RunID:          "run-b",
+		Quarantined:    []QuarantinedRecord{record},
+		FetchWatermark: base,
+	}); err != nil {
+		t.Fatalf("WriteBatch run B: %v", err)
+	}
+
+	if got := countQuarantineRows(t, db, registration.Name); got != 1 {
+		t.Fatalf("dataset_quarantine holds %d rows, want 1", got)
+	}
+	stored := readQuarantine(t, db, "bad-1")
+	if stored.PipelineRunID != "run-b" {
+		t.Errorf("pipeline_run_id = %q, want run-b", stored.PipelineRunID)
+	}
+	if string(stored.Payload) != "second payload" {
+		t.Errorf("payload = %q, want the second payload", stored.Payload)
+	}
+	if stored.MappingID == nil || *stored.MappingID != "mapping-1" {
+		t.Errorf("mapping_id = %v, want mapping-1", stored.MappingID)
+	}
+	if stored.MappingVersion == nil || *stored.MappingVersion != 2 {
+		t.Errorf("mapping_version = %v, want 2", stored.MappingVersion)
+	}
+	var problems []struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(stored.ErrorsJSON, &problems); err != nil {
+		t.Fatalf("decode quarantine errors: %v", err)
+	}
+	if len(problems) != 1 || problems[0].Path != "target.hostname" {
+		t.Errorf("quarantine errors = %+v, want the second run's error", problems)
+	}
+}
+
+// One partition lookup and one clock read per batch keep the write path at a
+// fixed number of round trips instead of one per day plus one for now().
+func TestWriteBatchRoundTrips(t *testing.T) {
+	db := databasetest.New(t)
+	store := NewPostgresStore(db)
+	registration := registerTestDataset(t, store, db)
+	counter := &statementCounter{Interface: db.Logger}
+	counting := db.Session(&gorm.Session{Logger: counter})
+	countedStore := NewPostgresStore(counting)
+	today := utcDay(time.Now().UTC())
+	records := make([]Record, 0, 3)
+	for offset := 2; offset >= 0; offset-- {
+		eventTime := today.Add(-time.Duration(offset) * 24 * time.Hour).Add(12 * time.Hour)
+		records = append(records, newRecord(offset, eventTime, "run-1", udm.EventTypeUserLogin))
+	}
+	batch := Batch{RunID: "run-1", Records: records, FetchWatermark: today.Add(24 * time.Hour)}
+
+	err := counting.Transaction(func(transaction *gorm.DB) error {
+		return countedStore.WriteBatch(context.Background(), transaction, registration.Name, batch)
+	})
+	if err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	if got := counter.countStatements("FROM pg_inherits"); got != 1 {
+		t.Errorf("WriteBatch issued %d pg_inherits queries, want 1", got)
+	}
+	if got := counter.countStatements("AS database_now"); got != 1 {
+		t.Errorf("WriteBatch read the database clock %d times with the dataset, want 1", got)
+	}
+	if got := counter.countStatements("SELECT now()"); got != 0 {
+		t.Errorf("WriteBatch read the database clock %d times on its own, want 0", got)
+	}
+	for offset := 2; offset >= 0; offset-- {
+		day := today.Add(-time.Duration(offset) * 24 * time.Hour)
+		if !dayPartitionExists(t, db, registration.Name, day) {
+			t.Errorf("partition for %s is missing", day.Format("2006-01-02"))
+		}
+	}
+	if got := countEventRows(t, db, registration.Name); got != 3 {
+		t.Errorf("dataset_events holds %d rows, want 3", got)
+	}
+}
+
 func registerDataset(t *testing.T, store *PostgresStore, db *gorm.DB, registration Dataset) error {
 	t.Helper()
 	return db.Transaction(func(transaction *gorm.DB) error {
@@ -1105,7 +1499,7 @@ func partitionDefinition(t *testing.T, db *gorm.DB, datasetName string) string {
 		SELECT pg_get_partkeydef(class.oid) AS key_definition,
 		       pg_get_expr(class.relpartbound, class.oid) AS bound
 		FROM pg_class AS class
-		WHERE class.oid = to_regclass(?)`, "ds_"+datasetName).Scan(&row).Error
+		WHERE class.oid = to_regclass(?)`, listPartitionName(datasetName)).Scan(&row).Error
 	if err != nil {
 		t.Fatalf("read partition definition for %q: %v", datasetName, err)
 	}
@@ -1124,12 +1518,13 @@ func expireDataset(t *testing.T, store *PostgresStore, db *gorm.DB, datasetName 
 
 func insertQuarantine(t *testing.T, db *gorm.DB, datasetName, documentID string, createdAt time.Time) {
 	t.Helper()
+	key := SourceKey{FetcherInstanceID: "fetcher", Index: "logs", DocumentID: documentID}
 	err := db.Exec(`
 		INSERT INTO dataset_quarantine
-			(dataset, fetcher_instance_id, source_index, document_id, payload,
-			 payload_truncated, errors, pipeline_run_id, created_at)
-		VALUES (?, ?, ?, ?, ?, false, ?, ?, ?)`,
-		datasetName, "fetcher", "logs", documentID, []byte("payload"),
+			(dataset, source_key_hash, fetcher_instance_id, source_index, document_id,
+			 payload, payload_truncated, errors, pipeline_run_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, false, ?, ?, ?)`,
+		datasetName, key.Hash(), key.FetcherInstanceID, key.Index, documentID, []byte("payload"),
 		[]byte("[]"), "run-1", createdAt).Error
 	if err != nil {
 		t.Fatalf("insert quarantined record %q: %v", documentID, err)
@@ -1140,8 +1535,8 @@ func createDayPartition(t *testing.T, db *gorm.DB, datasetName string, day time.
 	t.Helper()
 	statement := fmt.Sprintf(
 		`CREATE TABLE "%s" PARTITION OF "%s" FOR VALUES FROM ('%s') TO ('%s')`,
-		"ds_"+datasetName+"_"+day.Format("20060102"),
-		"ds_"+datasetName,
+		dayPartitionName(datasetName, day),
+		listPartitionName(datasetName),
 		day.Format("2006-01-02"),
 		day.Add(24*time.Hour).Format("2006-01-02"),
 	)
@@ -1210,4 +1605,92 @@ func (counter *statementCounter) countStatements(fragment string) int {
 		}
 	}
 	return count
+}
+
+// readPartitionBound deparses a day partition's bound in a UTC session, so the
+// text shows the stored instants as this package wrote them.
+func readPartitionBound(t *testing.T, db *gorm.DB, partitionName string) string {
+	t.Helper()
+	var bound string
+	err := db.Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Exec("SET LOCAL TimeZone = 'UTC'").Error; err != nil {
+			return err
+		}
+		return transaction.Raw(
+			"SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE oid = to_regclass(?)",
+			partitionName,
+		).Scan(&bound).Error
+	})
+	if err != nil {
+		t.Fatalf("read partition bound of %q: %v", partitionName, err)
+	}
+	if bound == "" {
+		t.Fatalf("partition %q does not exist", partitionName)
+	}
+	return bound
+}
+
+func countDatasets(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var count int64
+	if err := db.Raw("SELECT count(*) FROM datasets").Scan(&count).Error; err != nil {
+		t.Fatalf("count datasets: %v", err)
+	}
+	return count
+}
+
+// registerConcurrently starts one transaction per registration, lets them all
+// reach RegisterDataset before any of them returns, and collects the errors.
+func registerConcurrently(t *testing.T, store *PostgresStore, db *gorm.DB, registrations ...Dataset) []error {
+	t.Helper()
+	ready := make(chan struct{}, len(registrations))
+	start := make(chan struct{})
+	results := make([]error, len(registrations))
+	var wait sync.WaitGroup
+	for index, registration := range registrations {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			results[index] = db.Transaction(func(transaction *gorm.DB) error {
+				ready <- struct{}{}
+				<-start
+				return store.RegisterDataset(context.Background(), transaction, registration)
+			})
+		}()
+	}
+	for range registrations {
+		<-ready
+	}
+	close(start)
+	wait.Wait()
+	return results
+}
+
+// newDatabaseWithSessionTimeZone migrates a fresh database and returns a
+// second pool whose sessions start in timeZone, so the store's own connection
+// runs in a non-UTC zone while the caller keeps the server default. The value
+// stays unescaped because GORM reads it with a regular expression before pgx
+// decodes the URL.
+func newDatabaseWithSessionTimeZone(t *testing.T, timeZone string) (*gorm.DB, *gorm.DB) {
+	t.Helper()
+	db, databaseURL := databasetest.NewUnmigrated(t)
+	if _, err := database.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+	separator := "?"
+	if strings.Contains(databaseURL, "?") {
+		separator = "&"
+	}
+	storeDatabase, err := database.Open(context.Background(), config.Config{
+		DatabaseURL: databaseURL + separator + "TimeZone=" + timeZone,
+	})
+	if err != nil {
+		t.Fatalf("open database in time zone %q: %v", timeZone, err)
+	}
+	t.Cleanup(func() {
+		if sqlDatabase, err := storeDatabase.DB(); err == nil {
+			_ = sqlDatabase.Close()
+		}
+	})
+	return db, storeDatabase
 }

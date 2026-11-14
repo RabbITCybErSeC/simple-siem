@@ -15,7 +15,12 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const maxQuarantinePayload = 65536
+const (
+	maxQuarantinePayload = 65536
+	// partitionBoundLayout always carries an explicit offset, so a session
+	// time zone can never shift a partition's bounds.
+	partitionBoundLayout = "2006-01-02 15:04:05-07:00"
+)
 
 // datasetNamePattern matches the names the datasets table accepts. The store
 // checks it again even though config validated the name, immediately before
@@ -41,12 +46,17 @@ func NewPostgresStore(database *gorm.DB) *PostgresStore {
 }
 
 // RegisterDataset records the dataset's writing pipeline, retention, and
-// allowed lateness, and creates its list partition.
+// allowed lateness, and creates its list partition. The advisory lock comes
+// first so two registrations of one dataset cannot race the insert and the
+// partition DDL.
 func (store *PostgresStore) RegisterDataset(ctx context.Context, transaction *gorm.DB, dataset Dataset) error {
 	if err := validateDatasetName(dataset.Name); err != nil {
 		return err
 	}
 	database := transaction.WithContext(ctx)
+	if err := lockDataset(database, dataset.Name); err != nil {
+		return err
+	}
 
 	var existing datasetRow
 	err := database.Where("name = ?", dataset.Name).Take(&existing).Error
@@ -88,36 +98,44 @@ func (store *PostgresStore) RegisterDataset(ctx context.Context, transaction *go
 }
 
 // WriteBatch upserts the records by source key, stores the quarantined
-// records, and advances the watermarks, all in the caller's transaction.
+// records, and advances the watermarks, all in the caller's transaction. The
+// day partition DDL runs in its own short transaction before the caller's
+// write.
 func (store *PostgresStore) WriteBatch(ctx context.Context, transaction *gorm.DB, datasetName string, batch Batch) error {
 	if err := validateDatasetName(datasetName); err != nil {
 		return err
 	}
 	database := transaction.WithContext(ctx)
-	if err := lockDataset(database, datasetName); err != nil {
-		return err
-	}
-	dataset, err := loadDataset(database, datasetName)
+	stored, now, err := loadDatasetWithClock(database, datasetName)
 	if err != nil {
 		return err
 	}
-
-	var now time.Time
-	if err := database.Raw("SELECT now()").Scan(&now).Error; err != nil {
-		return fmt.Errorf("read database clock: %w", err)
+	retention, err := datasetDurations(stored)
+	if err != nil {
+		return fmt.Errorf("dataset %q: %w", datasetName, err)
 	}
-	if err := checkRetention(batch.Records, now, durationFromInterval(dataset.Retention)); err != nil {
+	if err := checkRetention(batch.Records, now, retention); err != nil {
 		return err
 	}
 
-	if err := createDayPartitions(database, datasetName, batch.Records); err != nil {
+	// The caller's transaction may stay open for the rest of the run. Commit
+	// the day partitions first so the ACCESS EXCLUSIVE lock of PARTITION OF is
+	// not held against every reader until that transaction ends. An empty
+	// early partition is harmless.
+	if err := store.ensureDayPartitions(ctx, datasetName, batch.Records); err != nil {
 		return err
 	}
+	if err := lockDataset(database, datasetName); err != nil {
+		return err
+	}
+
 	if len(batch.Records) > 0 {
-		rows := make([]eventRow, len(batch.Records))
-		for index, record := range batch.Records {
+		records := lastRecordPerKey(batch.Records)
+		rows := make([]eventRow, len(records))
+		for index, record := range records {
 			rows[index] = eventRowFromRecord(datasetName, record, now)
 		}
+		// shortcut: dataset writes go through GORM batch upserts; switch this store to pgx CopyFrom if the smoke budget misses.
 		err := database.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "dataset"}, {Name: "event_time"}, {Name: "source_key_hash"},
@@ -137,7 +155,17 @@ func (store *PostgresStore) WriteBatch(ctx context.Context, transaction *gorm.DB
 		for index, record := range batch.Quarantined {
 			rows[index] = quarantineRowFromRecord(datasetName, batch.RunID, record)
 		}
-		if err := database.CreateInBatches(&rows, 1000).Error; err != nil {
+		err := database.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "dataset"}, {Name: "source_key_hash"}},
+			DoUpdates: append(
+				clause.AssignmentColumns([]string{
+					"payload", "payload_truncated", "mapping_id", "mapping_version",
+					"errors", "pipeline_run_id",
+				}),
+				clause.Assignment{Column: clause.Column{Name: "created_at"}, Value: gorm.Expr("now()")},
+			),
+		}).CreateInBatches(&rows, 1000).Error
+		if err != nil {
 			return fmt.Errorf("write dataset %q quarantine: %w", datasetName, err)
 		}
 	}
@@ -173,13 +201,49 @@ func loadDataset(database *gorm.DB, datasetName string) (datasetRow, error) {
 	return row, nil
 }
 
+// loadDatasetWithClock reads the dataset row and takes the database clock in
+// the same statement, one round trip instead of two.
+func loadDatasetWithClock(database *gorm.DB, datasetName string) (datasetRow, time.Time, error) {
+	var loaded datasetLoad
+	err := database.Table("datasets").
+		Select("datasets.*, now() AS database_now").
+		Where("datasets.name = ?", datasetName).
+		Take(&loaded).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return datasetRow{}, time.Time{}, fmt.Errorf("%w: %q", ErrUnknownDataset, datasetName)
+	case err != nil:
+		return datasetRow{}, time.Time{}, fmt.Errorf("read dataset %q: %w", datasetName, err)
+	}
+	return loaded.Dataset, loaded.DatabaseNow, nil
+}
+
+// datasetDurations returns the retention a write must respect. It also refuses
+// month-based lateness so both stored intervals stay convertible.
+func datasetDurations(row datasetRow) (time.Duration, error) {
+	retention, err := durationFromInterval(row.Retention)
+	if err != nil {
+		return 0, fmt.Errorf("retention: %w", err)
+	}
+	if _, err := durationFromInterval(row.AllowedLateness); err != nil {
+		return 0, fmt.Errorf("allowed lateness: %w", err)
+	}
+	return retention, nil
+}
+
 func intervalFromDuration(duration time.Duration) pgtype.Interval {
 	return pgtype.Interval{Microseconds: duration.Microseconds(), Valid: true}
 }
 
-func durationFromInterval(interval pgtype.Interval) time.Duration {
+// durationFromInterval converts a stored interval. Months have no fixed
+// duration, so an interval with a month part is refused instead of being read
+// as zero.
+func durationFromInterval(interval pgtype.Interval) (time.Duration, error) {
+	if interval.Months != 0 {
+		return 0, fmt.Errorf("%w: interval has a month part", ErrInvalidRetention)
+	}
 	return time.Duration(interval.Microseconds)*time.Microsecond +
-		time.Duration(interval.Days)*24*time.Hour
+		time.Duration(interval.Days)*24*time.Hour, nil
 }
 
 func checkRetention(records []Record, now time.Time, retention time.Duration) error {
@@ -227,6 +291,7 @@ func quarantineRowFromRecord(datasetName, runID string, record QuarantinedRecord
 	}
 	return quarantineRow{
 		Dataset:           datasetName,
+		SourceKeyHash:     record.Key.Hash(),
 		FetcherInstanceID: record.Key.FetcherInstanceID,
 		SourceIndex:       record.Key.Index,
 		DocumentID:        record.Key.DocumentID,
@@ -253,15 +318,44 @@ func nullableInt(value int) *int {
 	return &value
 }
 
-// createDayPartitions creates the UTC day partitions the batch needs. The
-// name is checked again right before the DDL is formatted.
-func createDayPartitions(transaction *gorm.DB, datasetName string, records []Record) error {
-	if err := validateDatasetName(datasetName); err != nil {
-		return err
+// recordKey is the upsert conflict key inside one batch. Event times are
+// compared at PostgreSQL's microsecond resolution so two times that the column
+// stores as one value also dedupe as one value.
+type recordKey struct {
+	eventTime int64
+	hash      string
+}
+
+// lastRecordPerKey keeps the last record per (event time, source key hash) in
+// input order. PostgreSQL refuses an upsert that would touch one row twice.
+func lastRecordPerKey(records []Record) []Record {
+	seen := make(map[recordKey]struct{}, len(records))
+	kept := make([]Record, 0, len(records))
+	for index := len(records) - 1; index >= 0; index-- {
+		record := records[index]
+		key := recordKey{
+			eventTime: record.EventTime.UTC().Truncate(time.Microsecond).UnixNano(),
+			hash:      string(record.Key.Hash()),
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		kept = append(kept, record)
 	}
+	slices.Reverse(kept)
+	return kept
+}
+
+// ensureDayPartitions creates the UTC day partitions the batch needs in a
+// short transaction on the store's own connection.
+func (store *PostgresStore) ensureDayPartitions(ctx context.Context, datasetName string, records []Record) error {
 	days := make(map[time.Time]struct{}, len(records))
 	for _, record := range records {
 		days[utcDay(record.EventTime)] = struct{}{}
+	}
+	if len(days) == 0 {
+		return nil
 	}
 	ordered := make([]time.Time, 0, len(days))
 	for day := range days {
@@ -269,22 +363,36 @@ func createDayPartitions(transaction *gorm.DB, datasetName string, records []Rec
 	}
 	slices.SortFunc(ordered, func(left, right time.Time) int { return left.Compare(right) })
 
-	listPartition := "ds_" + datasetName
-	for _, day := range ordered {
-		partitionName := listPartition + "_" + day.Format("20060102")
-		exists, err := partitionExists(transaction, partitionName, listPartition)
-		if err != nil {
+	database := store.database.WithContext(ctx)
+	return database.Transaction(func(transaction *gorm.DB) error {
+		if err := lockDataset(transaction, datasetName); err != nil {
 			return err
 		}
-		if exists {
+		return createMissingDayPartitions(transaction, datasetName, ordered)
+	})
+}
+
+// createMissingDayPartitions creates the day partitions among ordered that do
+// not exist yet. The name is checked again right before the DDL is formatted.
+func createMissingDayPartitions(transaction *gorm.DB, datasetName string, ordered []time.Time) error {
+	if err := validateDatasetName(datasetName); err != nil {
+		return err
+	}
+	existing, err := listDayPartitionNames(transaction, datasetName)
+	if err != nil {
+		return err
+	}
+	for _, day := range ordered {
+		partitionName := dayPartitionName(datasetName, day)
+		if _, present := existing[partitionName]; present {
 			continue
 		}
 		statement := fmt.Sprintf(
 			`CREATE TABLE "%s" PARTITION OF "%s" FOR VALUES FROM ('%s') TO ('%s')`,
 			partitionName,
-			listPartition,
-			day.Format("2006-01-02"),
-			day.Add(24*time.Hour).Format("2006-01-02"),
+			listPartitionName(datasetName),
+			day.Format(partitionBoundLayout),
+			day.Add(24*time.Hour).Format(partitionBoundLayout),
 		)
 		if err := transaction.Exec(statement).Error; err != nil {
 			return fmt.Errorf("create partition %q: %w", partitionName, err)
@@ -293,9 +401,36 @@ func createDayPartitions(transaction *gorm.DB, datasetName string, records []Rec
 	return nil
 }
 
+// listDayPartitionNames reads every child of the dataset's list partition with
+// one catalog query.
+func listDayPartitionNames(transaction *gorm.DB, datasetName string) (map[string]struct{}, error) {
+	var names []string
+	err := transaction.Raw(`
+		SELECT child.relname
+		FROM pg_inherits
+		JOIN pg_class AS child ON child.oid = pg_inherits.inhrelid
+		WHERE pg_inherits.inhparent = to_regclass(?)`, listPartitionName(datasetName)).Scan(&names).Error
+	if err != nil {
+		return nil, fmt.Errorf("list partitions of dataset %q: %w", datasetName, err)
+	}
+	existing := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		existing[name] = struct{}{}
+	}
+	return existing, nil
+}
+
 func utcDay(value time.Time) time.Time {
 	utc := value.UTC()
 	return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func listPartitionName(datasetName string) string {
+	return "dsl_" + datasetName
+}
+
+func dayPartitionName(datasetName string, day time.Time) string {
+	return "dsd_" + datasetName + "_" + day.Format("20060102")
 }
 
 // advanceWatermark moves the fetch watermark forward, never backwards, and
@@ -425,7 +560,9 @@ func (store *PostgresStore) Watermark(ctx context.Context, datasetName string) (
 }
 
 // Expire drops the day partitions that ended at or before now minus the
-// dataset's retention, and deletes quarantine rows older than that.
+// dataset's retention, and deletes quarantine rows older than that. The DROP
+// stays in the caller's transaction: the runner calls Expire in a short
+// transaction of its own, so the locks are not held while it writes a batch.
 func (store *PostgresStore) Expire(ctx context.Context, transaction *gorm.DB, datasetName string, now time.Time) error {
 	if err := validateDatasetName(datasetName); err != nil {
 		return err
@@ -434,11 +571,15 @@ func (store *PostgresStore) Expire(ctx context.Context, transaction *gorm.DB, da
 	if err := lockDataset(database, datasetName); err != nil {
 		return err
 	}
-	dataset, err := loadDataset(database, datasetName)
+	stored, err := loadDataset(database, datasetName)
 	if err != nil {
 		return err
 	}
-	cutoff := now.Add(-durationFromInterval(dataset.Retention))
+	retention, err := datasetDurations(stored)
+	if err != nil {
+		return fmt.Errorf("dataset %q: %w", datasetName, err)
+	}
+	cutoff := now.Add(-retention)
 	if err := dropExpiredDayPartitions(database, datasetName, cutoff); err != nil {
 		return err
 	}
@@ -453,23 +594,18 @@ func (store *PostgresStore) Expire(ctx context.Context, transaction *gorm.DB, da
 }
 
 // dropExpiredDayPartitions derives each day partition's upper bound from its
-// name, which only this package writes: ds_<dataset>_<yyyymmdd>.
+// name, which only this package writes: dsd_<dataset>_<yyyymmdd>.
 func dropExpiredDayPartitions(transaction *gorm.DB, datasetName string, cutoff time.Time) error {
 	if err := validateDatasetName(datasetName); err != nil {
 		return err
 	}
-	var children []string
-	err := transaction.Raw(`
-		SELECT child.relname
-		FROM pg_inherits
-		JOIN pg_class AS child ON child.oid = pg_inherits.inhrelid
-		WHERE pg_inherits.inhparent = to_regclass(?)`, "ds_"+datasetName).Scan(&children).Error
+	partitions, err := listDayPartitionNames(transaction, datasetName)
 	if err != nil {
-		return fmt.Errorf("list partitions of dataset %q: %w", datasetName, err)
+		return err
 	}
 
-	prefix := "ds_" + datasetName + "_"
-	for _, partitionName := range children {
+	prefix := "dsd_" + datasetName + "_"
+	for partitionName := range partitions {
 		dayText, found := strings.CutPrefix(partitionName, prefix)
 		if !found || len(dayText) != 8 {
 			continue
@@ -503,14 +639,14 @@ func partitionExists(transaction *gorm.DB, relationName, parentName string) (boo
 	return exists, nil
 }
 
-// createListPartition creates ds_<name> under dataset_events when it is
+// createListPartition creates dsl_<name> under dataset_events when it is
 // missing. It validates the name itself, so every fmt.Sprintf below runs
 // only on a name that matches the dataset pattern.
 func createListPartition(transaction *gorm.DB, datasetName string) error {
 	if err := validateDatasetName(datasetName); err != nil {
 		return err
 	}
-	partitionName := "ds_" + datasetName
+	partitionName := listPartitionName(datasetName)
 
 	exists, err := partitionExists(transaction, partitionName, "dataset_events")
 	if err != nil {
