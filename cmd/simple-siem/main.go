@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
+	"github.com/RabbITCybErSeC/simple-siem/internal/fetcher/elasticsearch"
 	"github.com/RabbITCybErSeC/simple-siem/internal/version"
 	"github.com/RabbITCybErSeC/simple-siem/web"
 	"golang.org/x/term"
@@ -103,6 +106,18 @@ func runConfig(args []string, getenv func(string) string, stdout, stderr io.Writ
 
 	files, err := config.LoadFiles(*directory, environment, getenv)
 	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	var templateProblems []error
+	for _, id := range slices.Sorted(maps.Keys(files.QueryTemplates)) {
+		template := files.QueryTemplates[id]
+		if err := elasticsearch.ValidateQuery(template.RawQuery); err != nil {
+			templateProblems = append(templateProblems, fmt.Errorf("query template %s: %w", template.File, err))
+		}
+	}
+	if err := errors.Join(templateProblems...); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}

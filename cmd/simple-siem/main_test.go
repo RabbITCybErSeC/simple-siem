@@ -136,6 +136,45 @@ func TestRunConfigValidate(t *testing.T) {
 	}
 }
 
+func TestRunConfigValidateRejectsDialectErrors(t *testing.T) {
+	directory := writeConfigDirectory(t, map[string]string{
+		"system.yaml": "version: \"0.1\"\n",
+		"fetchers.yaml": `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    allowed_indexes: [auth-*]
+`,
+		"query_templates/auth-logins.yaml": `id: auth-logins
+fetcherType: elasticsearch
+version: 0.1.0
+rawQuery:
+  query:
+    term: { event.category: authentication }
+  sort:
+    - "@timestamp": asc
+`,
+	})
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"config", "validate", "--config-dir", directory},
+		map[string]string{"SIMPLE_SIEM_ENV": "development", "ELASTIC_DEV_API_KEY": "test-key"})
+
+	if status != 1 {
+		t.Fatalf("run() status = %d, want 1; stdout: %s", status, stdout)
+	}
+	if stdout != "" {
+		t.Errorf("run() stdout = %q, want empty", stdout)
+	}
+	for _, fragment := range []string{"query_templates/auth-logins.yaml", "sort"} {
+		if !strings.Contains(stderr, fragment) {
+			t.Errorf("run() stderr %q does not contain %q", stderr, fragment)
+		}
+	}
+}
+
 func TestRunConfigValidateSingularCounts(t *testing.T) {
 	directory := writeConfigDirectory(t, map[string]string{
 		"system.yaml": "version: \"0.1\"\n",
