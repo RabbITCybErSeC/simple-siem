@@ -92,6 +92,23 @@ export interface AssignRequest {
   version: number;
 }
 
+export interface AssignCaseVariables {
+  caseId: string;
+  caseNumber: number;
+  request: AssignRequest;
+}
+
+export interface CloseCaseVariables {
+  caseId: string;
+  caseNumber: number;
+  request: CloseRequest;
+}
+
+export interface CaseActionFailure {
+  message: string;
+  reload: boolean;
+}
+
 export interface AlertDisposition {
   alertId: string;
   outcome: CaseOutcome;

@@ -12,8 +12,7 @@ import {
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routes } from "../../App";
-import { writeTimeZone } from "../shell/timeZone";
-import type { CaseDetail } from "./detail/types";
+import { writeTimeZone } from "../shell/timeZone";import type { CaseDetail } from "./detail/types";
 import type {
   CaseCounts,
   CaseHistogram,
@@ -245,12 +244,12 @@ function defaultDetail(url: URL): Response {
 function renderCases(
   initialPath = "/cases",
   responders: Parameters<typeof stubApi>[0] = {},
+  queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  }),
 ) {
   const stub = stubApi(responders);
   const router = createMemoryRouter(routes, { initialEntries: [initialPath] });
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
 
   render(
     <QueryClientProvider client={queryClient}>
@@ -258,7 +257,7 @@ function renderCases(
     </QueryClientProvider>,
   );
 
-  return { ...stub, router };
+  return { ...stub, router, queryClient };
 }
 
 function caseRow(table: HTMLElement, caseNumber: number): HTMLElement {
@@ -1749,6 +1748,174 @@ describe("bulk close", () => {
     );
     expect(within(dialog).getByLabelText("Conclusion")).toHaveValue(
       "Pentest, SEC-41.",
+    );
+  });
+});
+
+describe("review fixes: row shortcuts and detail state", () => {
+  it("ignores row shortcuts with meta, ctrl, or alt", async () => {
+    const { recorded, router } = renderCases("/cases?scope=all");
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(table).findByText("Brute force → success");
+    await screen.findByText("Alice Analyst", { selector: "header span" });
+    const rows = dataRows(table);
+    rows[0].focus();
+
+    fireEvent.keyDown(rows[0], { key: "a", ctrlKey: true });
+    fireEvent.keyDown(rows[0], { key: "x", metaKey: true });
+    fireEvent.keyDown(rows[0], { key: "e", altKey: true });
+    fireEvent.keyDown(rows[0], { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(rows[0], { key: "j", metaKey: true });
+    fireEvent.keyDown(rows[0], { key: "k", altKey: true });
+
+    expect(recorded.filter((request) => request.method === "PATCH")).toHaveLength(
+      0,
+    );
+    expect(rowCheckbox(table, 312)).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/cases");
+    expect(rows[0]).toHaveAttribute("tabindex", "0");
+    expect(rows[1]).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("keeps the open case view and layout when a queue filter changes", async () => {
+    const { router } = renderCases(
+      "/cases/312?scope=all&view=timeline&layout=full",
+    );
+    await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+
+    fireEvent.mouseDown(
+      screen.getByRole("tab", { name: /^Closed/, hidden: true }),
+    );
+
+    await waitFor(() => {
+      expect(
+        new URLSearchParams(router.state.location.search).get("tab"),
+      ).toBe("closed");
+    });
+    const parameters = new URLSearchParams(router.state.location.search);
+    expect(parameters.get("view")).toBe("timeline");
+    expect(parameters.get("layout")).toBe("full");
+  });
+
+  it("drops the close dialog state when another case opens", async () => {
+    const { router } = renderCases("/cases/312?scope=all");
+    await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close case" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Close case #312",
+    });
+    fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
+      target: { value: "draft for 312" },
+    });
+
+    await act(async () => {
+      await router.navigate("/cases/311?scope=all");
+    });
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/cases/311");
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("does not open the close dialog for a case already closed", async () => {
+    const { router } = renderCases("/cases?scope=all", {
+      detail: (url) => {
+        const caseRef = url.pathname.split("/").pop();
+        if (caseRef === "311") {
+          return jsonResponse(caseDetail(OPEN_CASES[1]));
+        }
+        return jsonResponse(
+          caseDetail({
+            ...OPEN_CASES[0],
+            status: "CLOSED",
+            outcome: "MALICIOUS",
+            closureReason: "CONFIRMED_THREAT",
+            closedAt: "2026-11-09T12:00:00Z",
+          }),
+        );
+      },
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(table).findByText("Brute force → success");
+    const row = caseRow(table, 312);
+    row.focus();
+
+    fireEvent.keyDown(row, { key: "e" });
+
+    await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await router.navigate("/cases/311?scope=all");
+    });
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/cases/311");
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("invalidates the case alerts, timeline, and detail after a bulk close", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    renderCases(
+      "/cases",
+      {
+        bulkClose: () =>
+          jsonResponse({
+            results: [
+              { caseId: "case_312", status: "CLOSED" },
+              { caseId: "case_311", status: "CLOSED" },
+            ],
+          }),
+      },
+      queryClient,
+    );
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    fireEvent.click(rowCheckbox(table, 311));
+
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    expect(
+      await within(dialog).findByText("2 closed, 0 not closed"),
+    ).toBeInTheDocument();
+    const keys = invalidate.mock.calls.map(
+      ([filters]) => filters?.queryKey,
+    );
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        ["case", "case_312", "alerts"],
+        ["case", "case_312", "timeline"],
+        ["case", 312],
+        ["case", "case_311", "alerts"],
+        ["case", "case_311", "timeline"],
+        ["case", 311],
+      ]),
     );
   });
 });

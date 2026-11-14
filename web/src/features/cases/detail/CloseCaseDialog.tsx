@@ -4,7 +4,6 @@ import type { FormEvent } from "react";
 import { Controller, useForm } from "react-hook-form";
 import type { UseFormReturn } from "react-hook-form";
 import { z } from "zod";
-import { ApiError } from "../../../api/client";
 import { Button } from "../../../components/ui/button";
 import {
   Dialog,
@@ -34,9 +33,11 @@ import {
 import { Textarea } from "../../../components/ui/textarea";
 import { OUTCOME_LABELS } from "../CaseTable";
 import type { CaseOutcome } from "../types";
+import { describeCaseFailure } from "./failures";
 import { useAllCaseAlerts, useCloseCase } from "./queries";
 import type {
   AlertSummary,
+  CaseActionFailure,
   CaseDetail,
   ClosureReason,
   StoredClosureReason,
@@ -112,11 +113,6 @@ type AlertOverride = {
   closureReason: ClosureReason | typeof SAME;
 };
 
-interface CloseFailure {
-  message: string;
-  reload: boolean;
-}
-
 export interface CloseCaseDialogProps {
   detail: CaseDetail;
   open: boolean;
@@ -138,7 +134,7 @@ export function CloseCaseDialog({
     defaultValues: { conclusion: "" },
     shouldFocusError: true,
   });
-  const [failure, setFailure] = useState<CloseFailure | null>(null);
+  const [failure, setFailure] = useState<CaseActionFailure | null>(null);
   const [overrides, setOverrides] = useState<Record<string, AlertOverride>>({});
   const [opener, setOpener] = useState<HTMLElement | null>(null);
   const closedSuccessfully = useRef(false);
@@ -496,27 +492,11 @@ function buildDispositions(
   });
 }
 
-function describeCloseFailure(error: unknown): CloseFailure {
-  if (error instanceof ApiError) {
-    if (error.status === 409 && error.code === "VERSION_CONFLICT") {
-      return {
-        message:
-          "This case changed since you opened it. Reload it and close again.",
-        reload: true,
-      };
-    }
-    if (error.status === 409 && error.code === "STATE_CONFLICT") {
-      return { message: "This case is already closed.", reload: false };
-    }
-    if (error.status === 403) {
-      return {
-        message: "You do not have permission to close this case.",
-        reload: false,
-      };
-    }
-    if (error.code === "NETWORK_ERROR") {
-      return { message: "Cannot reach Simple SIEM. Try again.", reload: false };
-    }
-  }
-  return { message: "Something went wrong. Try again.", reload: false };
+function describeCloseFailure(error: unknown): CaseActionFailure {
+  return describeCaseFailure(error, {
+    versionConflict:
+      "This case changed since you opened it. Reload it and close again.",
+    stateConflict: "This case is already closed.",
+    forbidden: "You do not have permission to close this case.",
+  });
 }

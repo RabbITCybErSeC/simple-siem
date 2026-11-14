@@ -153,7 +153,10 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
       if (
         cases.length === 0 ||
         isTextEntryTarget(event.target) ||
-        dialogOpen()
+        dialogOpen() ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
       ) {
         return;
       }

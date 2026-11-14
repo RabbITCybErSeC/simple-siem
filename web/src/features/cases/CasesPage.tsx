@@ -26,9 +26,12 @@ import {
   CaseDetail,
   describeAssignFailure,
 } from "./detail/CaseDetail";
-import type { CaseActionFailure } from "./detail/CaseDetail";
+import type {
+  CaseActionFailure,
+  CaseDetail as CaseDetailData,
+} from "./detail/types";
 import { BulkCloseDialog } from "./detail/BulkCloseDialog";
-import { useAssignCase } from "./detail/queries";
+import { caseQueryKey, useAssignCase } from "./detail/queries";
 import { TimeRangePicker } from "./TimeRangePicker";
 import { TrendChart } from "./TrendChart";
 import {
@@ -51,6 +54,7 @@ import type {
 } from "./types";
 import {
   caseDetailPath,
+  caseDetailSearch,
   caseQueuePath,
   caseQueueSearch,
   defaultCaseDetailState,
@@ -150,13 +154,16 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
     ids: new Set(),
     bulkCloseOpen: false,
   });
-  const [closeRequested, setCloseRequested] = useState(false);
+  const [closeRequestedFor, setCloseRequestedFor] = useState<
+    number | undefined
+  >();
   const [bulkCloseKey, setBulkCloseKey] = useState(0);
   const stateRef = useRef(state);
   const firstPageRef = useRef<CaseSummary[] | undefined>(undefined);
   const restoreFocus = useRef(false);
   const tableRef = useRef<CaseTableHandle>(null);
   const pendingRowFocus = useRef<string | undefined>(undefined);
+  const pendingAssignments = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     stateRef.current = state;
@@ -167,9 +174,13 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
     changes: Partial<CaseQueueState>,
     replace: boolean,
   ) => {
-    // Defaults are omitted from the URL so the default view is /cases.
+    // Defaults are omitted from the URL so the default view is /cases. The
+    // detail parameters stay when the queue is filtered under an open case.
     const next = { ...state, ...changes };
-    const search = caseQueueSearch(next);
+    const search =
+      caseNumber === undefined
+        ? caseQueueSearch(next)
+        : caseDetailSearch(next, detailState);
     // Radix tabs can report the same selection twice (focus and pointer);
     // one history entry per view is what Back steps through.
     if (sameSearch(search, window.location.search)) {
@@ -263,6 +274,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   };
 
   const openCase = (item: CaseSummary) => {
+    setCloseRequestedFor(undefined);
     navigate(caseDetailPath(item.caseNumber, state, defaultCaseDetailState));
   };
 
@@ -346,24 +358,33 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
     if (caseNumber !== item.caseNumber) {
       openCase(item);
     }
-    setCloseRequested(true);
+    setCloseRequestedFor(item.caseNumber);
   };
 
   const assignRow = (item: CaseSummary) => {
-    if (me === undefined) {
+    if (me === undefined || pendingAssignments.current.has(item.id)) {
       return;
     }
+    const cached = queryClient.getQueryData<CaseDetailData>(
+      caseQueryKey(item.caseNumber),
+    );
+    const assignee = cached?.assignee ?? item.assignee;
+    const version = cached?.version ?? item.version;
     setRowAssignFailure(null);
+    pendingAssignments.current.add(item.id);
     assignRowMutation.mutate(
       {
         caseId: item.id,
         caseNumber: item.caseNumber,
         request: {
-          assigneeId: item.assignee?.id === me.id ? null : me.id,
-          version: item.version,
+          assigneeId: assignee?.id === me.id ? null : me.id,
+          version,
         },
       },
-      { onError: (error) => setRowAssignFailure(describeAssignFailure(error)) },
+      {
+        onError: (error) => setRowAssignFailure(describeAssignFailure(error)),
+        onSettled: () => pendingAssignments.current.delete(item.id),
+      },
     );
   };
 
@@ -375,7 +396,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const closeDetail = () => {
     const listed = cases.find((item) => item.caseNumber === caseNumber);
     pendingRowFocus.current = listed?.id;
-    setCloseRequested(false);
+    setCloseRequestedFor(undefined);
     navigate(caseQueuePath(state));
   };
 
@@ -639,13 +660,14 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
               </div>
             )}
             <CaseDetail
+              key={caseNumber}
               caseNumber={caseNumber}
               view={detailState.view}
               layout={detailState.layout}
               queueState={state}
               timeZone={timeZone}
-              closeRequested={closeRequested}
-              onCloseRequestHandled={() => setCloseRequested(false)}
+              closeRequested={closeRequestedFor === caseNumber}
+              onCloseRequestHandled={() => setCloseRequestedFor(undefined)}
               onViewChange={changeView}
               onLayoutChange={changeLayout}
               onClose={closeDetail}

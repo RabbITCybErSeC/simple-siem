@@ -2,6 +2,16 @@ import type { LucideIcon } from "lucide-react";
 
 export type TimeZoneSetting = "local" | "utc";
 
+export interface CaseCommands {
+  caseNumber: number;
+  assignLabel?: "Assign to me" | "Unassign";
+  assign?: () => void;
+  close?: () => void;
+  copyLink?: () => void;
+  closeDetail: () => void;
+  toggleFullPage: () => void;
+}
+
 export interface ShellCommand {
   id: string;
   label: string;

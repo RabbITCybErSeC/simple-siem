@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -35,10 +36,10 @@ interface RequestLog {
 }
 
 interface Responders {
-  detail?: () => Response;
+  detail?: () => Response | Promise<Response>;
   alerts?: (search: URLSearchParams) => Response;
   timeline?: (search: URLSearchParams) => Response;
-  assign?: (body: unknown) => Response;
+  assign?: (body: unknown) => Response | Promise<Response>;
 }
 
 interface RenderDetailResult {
@@ -884,5 +885,134 @@ describe("case commands", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/cases");
     });
+  });
+});
+
+async function openPalette(): Promise<HTMLElement> {
+  fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+  return screen.findByPlaceholderText("Type a command…");
+}
+
+describe("review fixes: row assign and palette commands", () => {
+  it("uses the detail cache version for the next row assign", async () => {
+    const { api } = renderDetail("/cases?scope=all", {
+      assign: () =>
+        jsonResponse(
+          makeDetail({
+            status: "IN_PROGRESS",
+            assignee: ALICE,
+            version: 4,
+          }),
+        ),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    const cell = await within(table).findByText("#312");
+    const row = cell.closest("tr");
+    if (row === null) {
+      throw new Error("no row for case 312");
+    }
+    row.focus();
+
+    fireEvent.keyDown(row, { key: "a" });
+    await waitFor(() => {
+      expect(patchRequests(api)).toHaveLength(1);
+    });
+    fireEvent.keyDown(row, { key: "a" });
+    await waitFor(() => {
+      expect(patchRequests(api)).toHaveLength(2);
+    });
+
+    expect(patchRequests(api)[1].body).toEqual({
+      assigneeId: null,
+      version: 4,
+    });
+  });
+
+  it("ignores a while an assign for that case is pending", async () => {
+    let release: ((response: Response) => void) | undefined;
+    const { api } = renderDetail("/cases?scope=all", {
+      assign: () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    const cell = await within(table).findByText("#312");
+    const row = cell.closest("tr");
+    if (row === null) {
+      throw new Error("no row for case 312");
+    }
+    row.focus();
+
+    fireEvent.keyDown(row, { key: "a" });
+    fireEvent.keyDown(row, { key: "a" });
+
+    await waitFor(() => {
+      expect(patchRequests(api)).toHaveLength(1);
+    });
+    await act(async () => {
+      release?.(
+        jsonResponse(
+          makeDetail({ status: "IN_PROGRESS", assignee: ALICE, version: 4 }),
+        ),
+      );
+    });
+    expect(patchRequests(api)).toHaveLength(1);
+  });
+
+  it("does not register assign or close for a closed case", async () => {
+    renderDetail("/cases/312?scope=all", {
+      detail: () => jsonResponse(CLOSED_DETAIL),
+    });
+    await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    const input = await openPalette();
+
+    expect(screen.queryByText("Assign to me")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unassign")).not.toBeInTheDocument();
+    expect(screen.queryByText("Close case…")).not.toBeInTheDocument();
+    expect(screen.getByText("Close case detail")).toBeInTheDocument();
+    expect(screen.getByText("Toggle full page")).toBeInTheDocument();
+    expect(input).toBeInTheDocument();
+  });
+
+  it("registers detail commands while the case is loading", async () => {
+    let release: ((response: Response) => void) | undefined;
+    renderDetail("/cases/312?scope=all", {
+      detail: () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    });
+    await screen.findByRole("heading", { name: "#312", level: 2 });
+    const input = await openPalette();
+
+    expect(screen.getByText("Close case detail")).toBeInTheDocument();
+    expect(screen.getByText("Toggle full page")).toBeInTheDocument();
+    expect(input).toBeInTheDocument();
+
+    await act(async () => {
+      release?.(jsonResponse(makeDetail()));
+    });
+  });
+
+  it("registers detail commands when the case is not found", async () => {
+    renderDetail("/cases/312?scope=all", {
+      detail: () => errorResponse(404, "NOT_FOUND", "Not found"),
+    });
+    await screen.findByText("Case #312 was not found.");
+    const input = await openPalette();
+
+    expect(screen.getByText("Close case detail")).toBeInTheDocument();
+    expect(screen.getByText("Toggle full page")).toBeInTheDocument();
+    expect(screen.queryByText("Assign to me")).not.toBeInTheDocument();
+    expect(screen.queryByText("Close case…")).not.toBeInTheDocument();
+    expect(input).toBeInTheDocument();
   });
 });

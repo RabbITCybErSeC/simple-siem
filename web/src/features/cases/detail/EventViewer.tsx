@@ -10,12 +10,14 @@ import {
   TableRow,
 } from "../../../components/ui/table";
 import type { TimeZoneSetting } from "../../shell/types";
-import { formatExact, relativeTime } from "../timeRange";
+import { TimeCell } from "../CaseTable";
+import { formatExact } from "../timeRange";
 import type { TimelineEvidenceEntry } from "./types";
 
 export interface EventViewerProps {
   entries: TimelineEvidenceEntry[];
   timeZone: TimeZoneSetting;
+  now: Date;
   onCopy: (value: string) => Promise<boolean>;
 }
 
@@ -45,12 +47,6 @@ interface FieldTableProps {
   onCopy: (value: string) => void;
 }
 
-interface TimeCellProps {
-  value: string;
-  timeZone: TimeZoneSetting;
-  now: Date;
-}
-
 const SUMMARY_COLUMNS: SummaryColumn[] = [
   { header: "User", path: "principal.user.userid" },
   { header: "Host", path: "principal.hostname" },
@@ -58,11 +54,14 @@ const SUMMARY_COLUMNS: SummaryColumn[] = [
   { header: "Source IP", path: "principal.ip[0]" },
 ];
 
-const MINUTE_MILLISECONDS = 60_000;
 const STATUS_MILLISECONDS = 2_000;
 
-export function EventViewer({ entries, timeZone, onCopy }: EventViewerProps) {
-  const now = useMinuteNow();
+export function EventViewer({
+  entries,
+  timeZone,
+  now,
+  onCopy,
+}: EventViewerProps) {
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -262,23 +261,7 @@ function FieldTable({ fields, onCopy }: FieldTableProps) {
   );
 }
 
-function TimeCell({ value, timeZone, now }: TimeCellProps) {
-  const exact = formatExact(value, timeZone, "timestamp");
-
-  return (
-    <time dateTime={value} title={exact}>
-      {relativeTime(value, now)}
-      <span className="sr-only">{` ${exact}`}</span>
-    </time>
-  );
-}
-
-export function flattenUdm(
-  udm: Record<string, unknown> | null,
-): UdmField[] {
-  if (udm === null) {
-    return [];
-  }
+export function flattenUdm(udm: Record<string, unknown>): UdmField[] {
   const fields: UdmField[] = [];
   appendFields(udm, "", fields);
   return fields;
@@ -322,19 +305,4 @@ function toggled(current: ReadonlySet<string>, id: string): Set<string> {
     next.add(id);
   }
   return next;
-}
-
-/** Relative labels tick once a minute while the viewer stays open. */
-function useMinuteNow(): Date {
-  const [now, setNow] = useState(() => new Date());
-
-  useEffect(() => {
-    const timer = window.setInterval(
-      () => setNow(new Date()),
-      MINUTE_MILLISECONDS,
-    );
-    return () => window.clearInterval(timer);
-  }, []);
-
-  return now;
 }

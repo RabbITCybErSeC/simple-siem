@@ -55,10 +55,15 @@ export function BulkCloseDialog({
     setSubmittedCases(cases);
     try {
       const response = await bulkClose.mutateAsync({
-        cases: cases.map((item) => ({ id: item.id, version: item.version })),
-        outcome: values.outcome,
-        closureReason: values.closureReason,
-        conclusion: values.conclusion,
+        request: {
+          cases: cases.map((item) => ({ id: item.id, version: item.version })),
+          outcome: values.outcome,
+          closureReason: values.closureReason,
+          conclusion: values.conclusion,
+        },
+        caseNumbers: Object.fromEntries(
+          cases.map((item) => [item.id, item.caseNumber]),
+        ),
       });
       setResults(response.results);
       onClosed(

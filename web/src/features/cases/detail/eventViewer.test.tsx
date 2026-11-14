@@ -13,6 +13,7 @@ import type { TimelineEvidenceEntry } from "./types";
 
 const AT = "2026-11-09T10:04:02Z";
 const LATER_AT = "2026-11-09T10:06:00Z";
+const NOW = new Date("2026-11-09T12:00:00Z");
 
 const UDM: Record<string, unknown> = {
   metadata: { event_type: "USER_LOGIN" },
@@ -45,7 +46,12 @@ function renderViewer(
   onCopy: (value: string) => Promise<boolean> = async () => true,
 ) {
   return render(
-    <EventViewer entries={entries} timeZone="utc" onCopy={onCopy} />,
+    <EventViewer
+      entries={entries}
+      timeZone="utc"
+      now={NOW}
+      onCopy={onCopy}
+    />,
   );
 }
 
@@ -181,7 +187,12 @@ describe("EventViewer", () => {
     ]);
 
     rerender(
-      <EventViewer entries={[ENTRY, later]} timeZone="utc" onCopy={onCopy} />,
+      <EventViewer
+        entries={[ENTRY, later]}
+        timeZone="utc"
+        now={NOW}
+        onCopy={onCopy}
+      />,
     );
     expect(showFieldsButton(rowAt(container, AT))).toHaveAttribute(
       "aria-expanded",
@@ -214,7 +225,7 @@ describe("EventViewer", () => {
     const copyButtons = within(detail).getAllByRole("button", {
       name: /^Copy /,
     });
-    expect(copyButtons).toHaveLength(flattenUdm(ENTRY.udm).length);
+    expect(copyButtons).toHaveLength(flattenUdm(UDM).length);
 
     fireEvent.click(
       within(detail).getByRole("button", {

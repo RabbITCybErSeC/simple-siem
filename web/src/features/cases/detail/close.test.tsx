@@ -180,21 +180,20 @@ function stubApi(responders: Responders = {}) {
 function renderClose(
   responders: Responders = {},
   initialPath = "/cases/312?scope=all",
+  queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  }),
 ) {
   const api = stubApi(responders);
   const router = createMemoryRouter(routes, {
     initialEntries: [initialPath],
   });
   render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
+    <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
-  return { api, router };
+  return { api, router, queryClient };
 }
 
 async function openCloseDialog(): Promise<HTMLElement> {
@@ -613,5 +612,50 @@ describe("close case dialog", () => {
     expect(
       await screen.findByRole("dialog", { name: "Close case #312" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("review fixes: close invalidation", () => {
+  it("invalidates the case alerts and timeline after closing", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    renderClose(
+      {
+        close: () =>
+          jsonResponse(
+            makeDetail({
+              status: "CLOSED",
+              outcome: "ACCEPTED",
+              closureReason: "AUTHORIZED_ACTIVITY",
+              closedAt: "2026-11-09T12:00:00Z",
+              closedBy: ALICE,
+              conclusion: "Authorized pentest.",
+              version: 4,
+            }),
+          ),
+      },
+      "/cases/312?scope=all&view=alerts",
+      queryClient,
+    );
+    const dialog = await openCloseDialog();
+    await fillClosureFields(dialog);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close case" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Close case #312" }),
+      ).not.toBeInTheDocument();
+    });
+
+    const keys = invalidate.mock.calls.map(
+      ([filters]) => filters?.queryKey,
+    );
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        ["case", "case_312", "alerts"],
+        ["case", "case_312", "timeline"],
+      ]),
+    );
   });
 });

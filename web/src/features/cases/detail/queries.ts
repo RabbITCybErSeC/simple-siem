@@ -7,28 +7,22 @@ import {
 import { apiRequest, get } from "../../../api/client";
 import type {
   AlertSummary,
-  AssignRequest,
+  AssignCaseVariables,
   BulkCloseRequest,
   BulkCloseResponse,
   CaseAlertsResponse,
   CaseDetail,
   CaseTimelineResponse,
-  CloseRequest,
+  CloseCaseVariables,
 } from "./types";
 
 const PAGE_LIMIT = 50;
 const ALL_ALERTS_LIMIT = 100;
 
-export interface AssignCaseVariables {
-  caseId: string;
-  caseNumber: number;
-  request: AssignRequest;
-}
-
-export interface CloseCaseVariables {
-  caseId: string;
-  caseNumber: number;
-  request: CloseRequest;
+export interface BulkCloseVariables {
+  request: BulkCloseRequest;
+  /** Case numbers by id, for the per-case detail cache keys. */
+  caseNumbers: Record<string, number>;
 }
 
 /** One cache key per case number for the detail and the actions on it. */
@@ -96,6 +90,12 @@ export function useCloseCase() {
       // the chart refresh here, and the next refresh tick finds row changes.
       void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
       void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["case", variables.caseId, "alerts"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["case", variables.caseId, "timeline"],
+      });
     },
   });
 }
@@ -104,11 +104,25 @@ export function useBulkCloseCases() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (request: BulkCloseRequest) =>
+    mutationFn: ({ request }: BulkCloseVariables) =>
       apiRequest<BulkCloseResponse>("POST", "/cases/bulk-close", request),
-    onSuccess: () => {
+    onSuccess: (_response, { request, caseNumbers }) => {
       void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
       void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
+      for (const { id } of request.cases) {
+        void queryClient.invalidateQueries({
+          queryKey: ["case", id, "alerts"],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["case", id, "timeline"],
+        });
+        const caseNumber = caseNumbers[id];
+        if (caseNumber !== undefined) {
+          void queryClient.invalidateQueries({
+            queryKey: ["case", caseNumber],
+          });
+        }
+      }
     },
   });
 }

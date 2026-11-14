@@ -98,6 +98,14 @@ export function caseDetailPath(
   queue: CaseQueueState,
   detail: CaseDetailState,
 ): string {
+  return `/cases/${caseNumber}${caseDetailSearch(queue, detail)}`;
+}
+
+/** The query string for an open case: queue parameters plus view/layout. */
+export function caseDetailSearch(
+  queue: CaseQueueState,
+  detail: CaseDetailState,
+): string {
   const detailParameters = new URLSearchParams();
   if (detail.view !== defaultCaseDetailState.view) {
     detailParameters.set("view", detail.view);
@@ -109,10 +117,10 @@ export function caseDetailPath(
   const detailSearch = detailParameters.toString();
   const queueSearch = caseQueueSearch(queue);
   if (detailSearch === "") {
-    return `/cases/${caseNumber}${queueSearch}`;
+    return queueSearch;
   }
   const separator = queueSearch === "" ? "?" : "&";
-  return `/cases/${caseNumber}${queueSearch}${separator}${detailSearch}`;
+  return `${queueSearch}${separator}${detailSearch}`;
 }
 
 export function caseQueueSearch(state: CaseQueueState): string {

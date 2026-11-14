@@ -2,18 +2,11 @@ import { useSyncExternalStore } from "react";
 import type { CaseScope, CaseTab } from "../cases/types";
 import { caseQueueSearch, parseCaseQueueState } from "../cases/urlState";
 import type { ThemePreference } from "../../theme/theme";
-import type { ShellCommand, TimeZoneSetting } from "./types";
-
-export interface CaseCommands {
-  caseNumber: number;
-  assignLabel: "Assign to me" | "Unassign";
-  assign: () => void;
-  canClose: boolean;
-  close: () => void;
-  copyLink: () => void;
-  closeDetail: () => void;
-  toggleFullPage: () => void;
-}
+import type {
+  CaseCommands,
+  ShellCommand,
+  TimeZoneSetting,
+} from "./types";
 
 export interface ShellCommandContext {
   pathname: string;
@@ -91,7 +84,7 @@ export function buildShellCommands(
       label,
       group: "Navigation" as const,
       keywords: ["case", "queue", "status", tab],
-      movesFocus: true,
+      movesFocus: false,
       run: () =>
         context.onNavigate(
           `/cases${caseQueueSearch({ ...queueState, tab })}`,
@@ -102,7 +95,7 @@ export function buildShellCommands(
       label,
       group: "Navigation" as const,
       keywords: ["case", "queue", "assignee", scope],
-      movesFocus: true,
+      movesFocus: false,
       run: () =>
         context.onNavigate(
           `/cases${caseQueueSearch({ ...queueState, scope })}`,
@@ -154,10 +147,11 @@ function caseDetailCommands(
     return [];
   }
 
-  return [
-    {
+  const result: ShellCommand[] = [];
+  if (commands.assign !== undefined) {
+    result.push({
       id: "case-assign",
-      label: commands.assignLabel,
+      label: commands.assignLabel ?? "Assign to me",
       group: "Case",
       keywords: [
         "case",
@@ -168,27 +162,29 @@ function caseDetailCommands(
       ],
       movesFocus: false,
       run: commands.assign,
-    },
-    ...(commands.canClose
-      ? [
-          {
-            id: "case-close",
-            label: "Close case…",
-            group: "Case" as const,
-            keywords: ["case", String(commands.caseNumber), "close", "resolve"],
-            movesFocus: true,
-            run: commands.close,
-          },
-        ]
-      : []),
-    {
+    });
+  }
+  if (commands.close !== undefined) {
+    result.push({
+      id: "case-close",
+      label: "Close case…",
+      group: "Case",
+      keywords: ["case", String(commands.caseNumber), "close", "resolve"],
+      movesFocus: true,
+      run: commands.close,
+    });
+  }
+  if (commands.copyLink !== undefined) {
+    result.push({
       id: "case-copy-link",
       label: "Copy link with absolute times",
       group: "Case",
       keywords: ["case", "share", "url", "clipboard"],
       movesFocus: false,
       run: commands.copyLink,
-    },
+    });
+  }
+  result.push(
     {
       id: "case-close-detail",
       label: "Close case detail",
@@ -205,7 +201,8 @@ function caseDetailCommands(
       movesFocus: false,
       run: commands.toggleFullPage,
     },
-  ];
+  );
+  return result;
 }
 
 function withCurrent(label: string, current: boolean): string {

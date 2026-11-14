@@ -364,3 +364,24 @@ describe("CommandPalette and shortcuts", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("review fixes: palette focus", () => {
+  it("returns focus to the palette opener for a search-only case command", async () => {
+    const router = renderShell("/cases");
+    const opener = await screen.findByRole("button", {
+      name: /Search or run a command/,
+    });
+    opener.focus();
+    fireEvent.click(opener);
+    const input = await screen.findByPlaceholderText("Type a command…");
+    fireEvent.change(input, { target: { value: "Cases: Closed" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(
+        new URLSearchParams(router.state.location.search).get("tab"),
+      ).toBe("closed");
+    });
+    expect(opener).toHaveFocus();
+  });
+});
