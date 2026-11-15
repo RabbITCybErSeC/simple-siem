@@ -16,9 +16,19 @@ import (
 // names an unknown mode or severity. Nothing is written.
 var ErrInvalidProposal = errors.New("invalid proposal")
 
+// shadowReason is recorded when the case-rate guardrail switches a detection.
+const shadowReason = "case_rate_exceeded"
+
 // evidenceHashRow reads one source_key_hash from alert_evidence.
 type evidenceHashRow struct {
 	SourceKeyHash []byte `gorm:"column:source_key_hash"`
+}
+
+// hashedEvidence is one evidence item with its source key hash, so the hash
+// runs once per item.
+type hashedEvidence struct {
+	Evidence
+	hash []byte
 }
 
 // Apply applies one proposal inside the caller's transaction.
@@ -156,10 +166,10 @@ func openCoalescingAlert(tx *gorm.DB, proposal Proposal, mode Mode) (*alertRow, 
 
 // unseenEvidence drops evidence already attached to an alert of this identity
 // that is recent enough to cover the proposal.
-func unseenEvidence(tx *gorm.DB, proposal Proposal, policy Policy, evidence []Evidence, earliest time.Time) ([]Evidence, error) {
+func unseenEvidence(tx *gorm.DB, proposal Proposal, policy Policy, evidence []hashedEvidence, earliest time.Time) ([]hashedEvidence, error) {
 	hashes := make([][]byte, len(evidence))
 	for index, item := range evidence {
-		hashes[index] = item.SourceKey.Hash()
+		hashes[index] = item.hash
 	}
 
 	var existing []evidenceHashRow
@@ -178,9 +188,9 @@ func unseenEvidence(tx *gorm.DB, proposal Proposal, policy Policy, evidence []Ev
 	for _, row := range existing {
 		seen[string(row.SourceKeyHash)] = struct{}{}
 	}
-	newEvidence := make([]Evidence, 0, len(evidence))
+	newEvidence := make([]hashedEvidence, 0, len(evidence))
 	for _, item := range evidence {
-		if _, ok := seen[string(item.SourceKey.Hash())]; ok {
+		if _, ok := seen[string(item.hash)]; ok {
 			continue
 		}
 		newEvidence = append(newEvidence, item)
@@ -190,21 +200,22 @@ func unseenEvidence(tx *gorm.DB, proposal Proposal, policy Policy, evidence []Ev
 
 // uniqueEvidence drops repeated source keys inside one proposal, keeping the
 // first occurrence.
-func uniqueEvidence(evidence []Evidence) []Evidence {
-	unique := make([]Evidence, 0, len(evidence))
+func uniqueEvidence(evidence []Evidence) []hashedEvidence {
+	unique := make([]hashedEvidence, 0, len(evidence))
 	seen := make(map[string]struct{}, len(evidence))
 	for _, item := range evidence {
-		key := string(item.SourceKey.Hash())
+		hash := item.SourceKey.Hash()
+		key := string(hash)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		unique = append(unique, item)
+		unique = append(unique, hashedEvidence{Evidence: item, hash: hash})
 	}
 	return unique
 }
 
-func eventRange(evidence []Evidence) (time.Time, time.Time) {
+func eventRange(evidence []hashedEvidence) (time.Time, time.Time) {
 	earliest := evidence[0].EventTime
 	latest := evidence[0].EventTime
 	for _, item := range evidence[1:] {
@@ -220,7 +231,7 @@ func eventRange(evidence []Evidence) (time.Time, time.Time) {
 
 // create writes one new alert with its evidence, first occurrence, and audit
 // event.
-func (service *Service) create(ctx context.Context, tx *gorm.DB, proposal Proposal, policy Policy, newEvidence []Evidence, first, last time.Time, previousAlertID *string) (Outcome, error) {
+func (service *Service) create(ctx context.Context, tx *gorm.DB, proposal Proposal, policy Policy, newEvidence []hashedEvidence, first, last time.Time, previousAlertID *string) (Outcome, error) {
 	details := proposal.Details
 	if details == nil {
 		details = map[string]string{}
@@ -247,15 +258,8 @@ func (service *Service) create(ctx context.Context, tx *gorm.DB, proposal Propos
 	if err := tx.Create(evidenceRows(alert.ID, newEvidence)).Error; err != nil {
 		return Outcome{}, fmt.Errorf("insert alert evidence: %w", err)
 	}
-	occurrence := occurrenceRow{
-		AlertID:          alert.ID,
-		DetectionRunID:   proposal.DetectionRunID,
-		NewEvidenceCount: len(newEvidence),
-		FirstEventAt:     first,
-		LastEventAt:      last,
-	}
-	if err := tx.Create(&occurrence).Error; err != nil {
-		return Outcome{}, fmt.Errorf("insert alert occurrence: %w", err)
+	if err := insertOccurrence(tx, alert.ID, proposal.DetectionRunID, len(newEvidence), first, last); err != nil {
+		return Outcome{}, err
 	}
 	if err := writeCreatedAudit(tx, alert); err != nil {
 		return Outcome{}, err
@@ -277,10 +281,10 @@ func (service *Service) create(ctx context.Context, tx *gorm.DB, proposal Propos
 			return Outcome{}, fmt.Errorf("case hook: %w", err)
 		}
 		guardrailTripped = outcome.GuardrailTripped
-	}
-	if guardrailTripped {
-		if err := switchDetectionToShadow(tx, proposal.DetectionID); err != nil {
-			return Outcome{}, err
+		if guardrailTripped {
+			if err := switchDetectionToShadow(tx, proposal.DetectionID); err != nil {
+				return Outcome{}, err
+			}
 		}
 	}
 	return Outcome{
@@ -293,19 +297,12 @@ func (service *Service) create(ctx context.Context, tx *gorm.DB, proposal Propos
 
 // merge adds evidence to an open alert, records one occurrence, and widens
 // the alert's range and counts.
-func (service *Service) merge(ctx context.Context, tx *gorm.DB, proposal Proposal, open alertRow, newEvidence []Evidence, first, last time.Time) (Outcome, error) {
+func (service *Service) merge(ctx context.Context, tx *gorm.DB, proposal Proposal, open alertRow, newEvidence []hashedEvidence, first, last time.Time) (Outcome, error) {
 	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(evidenceRows(open.ID, newEvidence)).Error; err != nil {
 		return Outcome{}, fmt.Errorf("insert alert evidence: %w", err)
 	}
-	occurrence := occurrenceRow{
-		AlertID:          open.ID,
-		DetectionRunID:   proposal.DetectionRunID,
-		NewEvidenceCount: len(newEvidence),
-		FirstEventAt:     first,
-		LastEventAt:      last,
-	}
-	if err := tx.Create(&occurrence).Error; err != nil {
-		return Outcome{}, fmt.Errorf("insert alert occurrence: %w", err)
+	if err := insertOccurrence(tx, open.ID, proposal.DetectionRunID, len(newEvidence), first, last); err != nil {
+		return Outcome{}, err
 	}
 	row := tx.Raw(`
 		UPDATE alerts
@@ -330,12 +327,27 @@ func (service *Service) merge(ctx context.Context, tx *gorm.DB, proposal Proposa
 	return Outcome{Action: ActionMerged, AlertID: open.ID, NewEvidence: len(newEvidence)}, nil
 }
 
-func evidenceRows(alertID string, evidence []Evidence) []evidenceRow {
+// insertOccurrence records one run's evidence contribution to an alert.
+func insertOccurrence(tx *gorm.DB, alertID, runID string, count int, first, last time.Time) error {
+	occurrence := occurrenceRow{
+		AlertID:          alertID,
+		DetectionRunID:   runID,
+		NewEvidenceCount: count,
+		FirstEventAt:     first,
+		LastEventAt:      last,
+	}
+	if err := tx.Create(&occurrence).Error; err != nil {
+		return fmt.Errorf("insert alert occurrence: %w", err)
+	}
+	return nil
+}
+
+func evidenceRows(alertID string, evidence []hashedEvidence) []evidenceRow {
 	rows := make([]evidenceRow, len(evidence))
 	for index, item := range evidence {
 		rows[index] = evidenceRow{
 			AlertID:           alertID,
-			SourceKeyHash:     item.SourceKey.Hash(),
+			SourceKeyHash:     item.hash,
 			FetcherInstanceID: item.SourceKey.FetcherInstanceID,
 			SourceIndex:       item.SourceKey.Index,
 			DocumentID:        item.SourceKey.DocumentID,
@@ -372,10 +384,13 @@ func writeCreatedAudit(tx *gorm.DB, alert alertRow) error {
 // switchDetectionToShadow applies the case-rate guardrail. Only an ENABLED
 // detection changes, and the switch carries its audit and outbox events.
 func switchDetectionToShadow(tx *gorm.DB, detectionID string) error {
+	from := string(RuntimeStatusEnabled)
+	to := string(RuntimeStatusShadow)
+	reason := shadowReason
 	result := tx.Exec(`
 		UPDATE detection_runtime
-		SET status = 'SHADOW', reason = 'case_rate_exceeded', changed_at = now(), version = version + 1
-		WHERE detection_id = ? AND status = 'ENABLED'`, detectionID)
+		SET status = ?, reason = ?, changed_at = now(), version = version + 1
+		WHERE detection_id = ? AND status = ?`, to, reason, detectionID, from)
 	if result.Error != nil {
 		return fmt.Errorf("switch detection %q to shadow: %w", detectionID, result.Error)
 	}
@@ -391,9 +406,9 @@ func switchDetectionToShadow(tx *gorm.DB, detectionID string) error {
 		TargetID:      detectionID,
 		Action:        "update",
 		Changes: map[string]any{
-			"from":   "ENABLED",
-			"to":     "SHADOW",
-			"reason": "case_rate_exceeded",
+			"from":   from,
+			"to":     to,
+			"reason": reason,
 		},
 	})
 	if err != nil {
@@ -406,9 +421,9 @@ func switchDetectionToShadow(tx *gorm.DB, detectionID string) error {
 		SubjectID: detectionID,
 		Payload: map[string]any{
 			"detectionId": detectionID,
-			"from":        "ENABLED",
-			"to":          "SHADOW",
-			"reason":      "case_rate_exceeded",
+			"from":        from,
+			"to":          to,
+			"reason":      reason,
 		},
 	})
 	if err != nil {
@@ -430,7 +445,7 @@ func EnsureRuntime(tx *gorm.DB, detectionID, initialStatus string) error {
 }
 
 // Status reads the detection's runtime status.
-func Status(tx *gorm.DB, detectionID string) (string, error) {
+func Status(tx *gorm.DB, detectionID string) (RuntimeStatus, error) {
 	var runtime runtimeRow
 	err := tx.Where("detection_id = ?", detectionID).First(&runtime).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -439,5 +454,5 @@ func Status(tx *gorm.DB, detectionID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read detection runtime for %q: %w", detectionID, err)
 	}
-	return runtime.Status, nil
+	return RuntimeStatus(runtime.Status), nil
 }

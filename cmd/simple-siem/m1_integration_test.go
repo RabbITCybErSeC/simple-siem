@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/RabbITCybErSeC/simple-siem/internal/detection"
 	"github.com/RabbITCybErSeC/simple-siem/internal/devdata"
 	"github.com/RabbITCybErSeC/simple-siem/internal/pipeline"
@@ -72,13 +71,9 @@ func TestM1AlertCoalescingEndToEnd(t *testing.T) {
 	m1Seed(t, environment, prefix, endA, endB)
 	directory := m1Config(t, environment, prefix)
 
-	testDatabase, databaseURL := databasetest.NewUnmigrated(t)
-	cliEnvironment := map[string]string{
-		"SIMPLE_SIEM_ENV":          "development",
-		"SIMPLE_SIEM_DATABASE_URL": databaseURL,
-		"ELASTICSEARCH_USERNAME":   environment.username,
-		"ELASTICSEARCH_PASSWORD":   environment.password,
-	}
+	testDatabase, cliEnvironment := runCommandEnvironment(t)
+	cliEnvironment["ELASTICSEARCH_USERNAME"] = environment.username
+	cliEnvironment["ELASTICSEARCH_PASSWORD"] = environment.password
 
 	status, stdout, stderr := runCLI(t, []string{"run", "auth-events", "--config-dir", directory}, cliEnvironment)
 	if status != 0 {
@@ -97,8 +92,10 @@ func TestM1AlertCoalescingEndToEnd(t *testing.T) {
 		if alert.EvidenceCount != 13 {
 			t.Errorf("%s evidence_count = %d, want 13", user, alert.EvidenceCount)
 		}
-		if got := m1EvidenceCount(t, testDatabase, alert.ID); got != 13 {
-			t.Errorf("%s evidence rows = %d, want 13", user, got)
+		var evidenceRows int64
+		mustScan(t, testDatabase, &evidenceRows, "SELECT count(*) FROM alert_evidence WHERE alert_id = ?", alert.ID)
+		if evidenceRows != 13 {
+			t.Errorf("%s evidence rows = %d, want 13", user, evidenceRows)
 		}
 		if !alert.Coalescing {
 			t.Errorf("%s coalescing = false, want true", user)
@@ -107,11 +104,17 @@ func TestM1AlertCoalescingEndToEnd(t *testing.T) {
 			t.Errorf("%s status = %q, want OPEN", user, alert.Status)
 		}
 	}
-	if got := m1AuditCount(t, testDatabase); got != 2 {
-		t.Errorf("alert.created audit events = %d, want 2", got)
+	var auditCount int64
+	mustScan(t, testDatabase, &auditCount,
+		"SELECT count(*) FROM audit_events WHERE event_name = ?", "simple_siem.alert.created")
+	if auditCount != 2 {
+		t.Errorf("alert.created audit events = %d, want 2", auditCount)
 	}
-	if status := m1RuntimeStatus(t, testDatabase); status != "ENABLED" {
-		t.Errorf("detection runtime = %q, want ENABLED", status)
+	var runtimeStatus string
+	mustScan(t, testDatabase, &runtimeStatus,
+		"SELECT status FROM detection_runtime WHERE detection_id = ?", m1DetectionID)
+	if runtimeStatus != "ENABLED" {
+		t.Errorf("detection runtime = %q, want ENABLED", runtimeStatus)
 	}
 
 	phase2 := m1WindowEnds(endA.Add(-10*time.Minute), endB.Add(5*time.Minute))
@@ -123,15 +126,20 @@ func TestM1AlertCoalescingEndToEnd(t *testing.T) {
 		if alert.EvidenceCount != 26 {
 			t.Errorf("%s evidence_count = %d, want 26", user, alert.EvidenceCount)
 		}
-		if got := m1EvidenceCount(t, testDatabase, alert.ID); got != 26 {
-			t.Errorf("%s evidence rows = %d, want 26", user, got)
+		var evidenceRows int64
+		mustScan(t, testDatabase, &evidenceRows, "SELECT count(*) FROM alert_evidence WHERE alert_id = ?", alert.ID)
+		if evidenceRows != 26 {
+			t.Errorf("%s evidence rows = %d, want 26", user, evidenceRows)
 		}
 		if alert.OccurrenceCount < 2 {
 			t.Errorf("%s occurrence_count = %d, want at least 2", user, alert.OccurrenceCount)
 		}
 	}
-	if got := m1AuditCount(t, testDatabase); got != 2 {
-		t.Errorf("alert.created audit events after phase 2 = %d, want 2", got)
+	var auditCountAfter int64
+	mustScan(t, testDatabase, &auditCountAfter,
+		"SELECT count(*) FROM audit_events WHERE event_name = ?", "simple_siem.alert.created")
+	if auditCountAfter != 2 {
+		t.Errorf("alert.created audit events after phase 2 = %d, want 2", auditCountAfter)
 	}
 
 	snapshots := map[string]m1Snapshot{}
@@ -245,37 +253,6 @@ func m1IdentityValue(alert m1Alert, path string) string {
 	return *value
 }
 
-func m1EvidenceCount(t *testing.T, db *gorm.DB, alertID string) int64 {
-	t.Helper()
-	var count int64
-	if err := db.Table("alert_evidence").Where("alert_id = ?", alertID).Count(&count).Error; err != nil {
-		t.Fatalf("count alert_evidence rows: %v", err)
-	}
-	return count
-}
-
-func m1AuditCount(t *testing.T, db *gorm.DB) int64 {
-	t.Helper()
-	var count int64
-	err := db.Table("audit_events").
-		Where("event_name = ?", "simple_siem.alert.created").
-		Count(&count).Error
-	if err != nil {
-		t.Fatalf("count alert.created audit events: %v", err)
-	}
-	return count
-}
-
-func m1RuntimeStatus(t *testing.T, db *gorm.DB) string {
-	t.Helper()
-	var status string
-	err := db.Raw("SELECT status FROM detection_runtime WHERE detection_id = ?", m1DetectionID).Scan(&status).Error
-	if err != nil {
-		t.Fatalf("read detection runtime: %v", err)
-	}
-	return status
-}
-
 func m1Elasticsearch(t *testing.T) m1Environment {
 	t.Helper()
 	environment := m1Environment{
@@ -381,13 +358,12 @@ func m1Cleanup(t *testing.T, environment m1Environment, prefix string, documents
 // index prefix, no ingest delay, and the shipped allowed lateness.
 func m1Config(t *testing.T, environment m1Environment, prefix string) string {
 	t.Helper()
-	directory := t.TempDir()
-	m1CopyConfig(t, directory, "system.yaml")
-	m1CopyConfig(t, directory, filepath.Join("query_templates", "auth-events.yaml"))
-	for _, name := range []string{"ecs-ssh-login.yaml", "ecs-windows-logon.yaml"} {
-		m1CopyConfig(t, directory, filepath.Join("mappings", name))
-	}
-	m1WriteFile(t, filepath.Join(directory, "fetchers.yaml"), fmt.Sprintf(`fetchers:
+	return writeConfigDirectory(t, map[string]string{
+		"system.yaml":                      m1ReadConfig(t, "system.yaml"),
+		"query_templates/auth-events.yaml": m1ReadConfig(t, filepath.Join("query_templates", "auth-events.yaml")),
+		"mappings/ecs-ssh-login.yaml":      m1ReadConfig(t, filepath.Join("mappings", "ecs-ssh-login.yaml")),
+		"mappings/ecs-windows-logon.yaml":  m1ReadConfig(t, filepath.Join("mappings", "ecs-windows-logon.yaml")),
+		"fetchers.yaml": fmt.Sprintf(`fetchers:
   elastic-dev:
     type: elasticsearch
     addresses: [%s]
@@ -395,8 +371,8 @@ func m1Config(t *testing.T, environment m1Environment, prefix string) string {
       username: ${secret:ELASTICSEARCH_USERNAME}
       password: ${secret:ELASTICSEARCH_PASSWORD}
     allowed_indexes: [%s-*]
-`, environment.url, prefix))
-	m1WriteFile(t, filepath.Join(directory, "pipelines", "auth-events.yaml"), fmt.Sprintf(`id: auth-events
+`, environment.url, prefix),
+		"pipelines/auth-events.yaml": fmt.Sprintf(`id: auth-events
 version: 0.1.0
 schedule:
   timeout: 2m
@@ -419,25 +395,15 @@ outputs:
   auth_events:
     from: udm.auth_events
     allowed_lateness: 10m
-`, prefix))
-	return directory
+`, prefix),
+	})
 }
 
-func m1CopyConfig(t *testing.T, directory, name string) {
+func m1ReadConfig(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "config", name))
 	if err != nil {
 		t.Fatalf("read shipped config %s: %v", name, err)
 	}
-	m1WriteFile(t, filepath.Join(directory, name), string(data))
-}
-
-func m1WriteFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("create directory for %s: %v", path, err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
+	return string(data)
 }

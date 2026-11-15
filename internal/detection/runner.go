@@ -115,13 +115,7 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 	var startedAt time.Time
 	// shortcut: evaluation holds the window-lock transaction (one pooled connection per run for up to the evaluation budget); reserve the revision in a short transaction and evaluate outside it when the Phase 3 scheduler runs detections concurrently (bead simple-siem-tc3).
 	err = runner.Database.WithContext(transactionContext).Transaction(func(transaction *gorm.DB) error {
-		if err := setLockTimeout(transaction, runAllowance); err != nil {
-			return err
-		}
-		if err := lockWindow(transaction, manifest.ID, windowStart, windowEnd); err != nil {
-			return err
-		}
-		revision, err := nextRevision(transaction, manifest.ID, windowStart, windowEnd)
+		revision, err := reserveRun(transaction, manifest, windowStart, windowEnd, runAllowance)
 		if err != nil {
 			return err
 		}
@@ -181,21 +175,20 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 			return fmt.Errorf("read the detection status: %w", err)
 		}
 		mode := RunModeShadow
-		if status == "ENABLED" && !options.Shadow && runner.Alerts != nil {
+		if status == alerts.RuntimeStatusEnabled && !options.Shadow && runner.Alerts != nil {
 			mode = RunModeEnabled
 		}
 
 		storedProposals := outcome.proposals
-		var alertsCreated, alertsMerged, proposalsDeduplicated int
 		if mode == RunModeEnabled {
 			applied, err := runner.applyEnabledProposals(transactionContext, transaction, manifest, run.ID, outcome.proposals)
 			if err != nil {
 				return err
 			}
 			storedProposals = applied.stored
-			alertsCreated = applied.created
-			alertsMerged = applied.merged
-			proposalsDeduplicated = applied.deduplicated
+			result.AlertsCreated = applied.created
+			result.AlertsMerged = applied.merged
+			result.ProposalsDeduplicated = applied.deduplicated
 		}
 
 		if len(storedProposals) > 0 {
@@ -209,14 +202,11 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 		}
 
 		result.Mode = mode
-		result.AlertsCreated = alertsCreated
-		result.AlertsMerged = alertsMerged
-		result.ProposalsDeduplicated = proposalsDeduplicated
 		err = transaction.Model(&runRow{}).Where("id = ?", run.ID).Updates(map[string]any{
-			"mode":                   string(mode),
-			"alerts_created":         alertsCreated,
-			"alerts_merged":          alertsMerged,
-			"proposals_deduplicated": proposalsDeduplicated,
+			"mode":                   string(result.Mode),
+			"alerts_created":         result.AlertsCreated,
+			"alerts_merged":          result.AlertsMerged,
+			"proposals_deduplicated": result.ProposalsDeduplicated,
 		}).Error
 		if err != nil {
 			return fmt.Errorf("update the run counters: %w", err)
@@ -279,13 +269,7 @@ func (runner *Runner) recordApplyFailure(ctx context.Context, manifest config.De
 	runAllowance := time.Duration(manifest.Budgets.Timeout) + persistenceTimeout
 	var failure runRow
 	err := runner.Database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		if err := setLockTimeout(transaction, runAllowance); err != nil {
-			return err
-		}
-		if err := lockWindow(transaction, manifest.ID, windowStart, windowEnd); err != nil {
-			return err
-		}
-		revision, err := nextRevision(transaction, manifest.ID, windowStart, windowEnd)
+		revision, err := reserveRun(transaction, manifest, windowStart, windowEnd, runAllowance)
 		if err != nil {
 			return err
 		}
@@ -311,13 +295,13 @@ func (runner *Runner) recordApplyFailure(ctx context.Context, manifest config.De
 	}
 	return RunResult{
 		RunID:       failure.ID,
-		Status:      RunStatusFailed,
-		WindowStart: windowStart,
-		WindowEnd:   windowEnd,
+		Status:      RunStatus(failure.Status),
+		WindowStart: failure.WindowStart,
+		WindowEnd:   failure.WindowEnd,
 		Revision:    failure.Revision,
-		RowsRead:    rowsRead,
-		Mode:        RunModeShadow,
-		Error:       "apply alerts failed",
+		RowsRead:    failure.RowsRead,
+		Mode:        RunMode(failure.Mode),
+		Error:       *failure.Error,
 	}, nil
 }
 
@@ -356,7 +340,7 @@ func proposalRows(proposals []Proposal, runID string, manifest config.DetectionM
 func alertProposal(manifest config.DetectionManifest, runID string, identity Identity, proposal Proposal) alerts.Proposal {
 	evidence := make([]alerts.Evidence, len(proposal.Evidence))
 	for index, item := range proposal.Evidence {
-		evidence[index] = alerts.Evidence{SourceKey: item.SourceKey, EventTime: item.EventTime}
+		evidence[index] = alerts.Evidence(item)
 	}
 	return alerts.Proposal{
 		DetectionID:           manifest.ID,
@@ -398,13 +382,18 @@ func (runner *Runner) checkInputsReady(ctx context.Context, manifest config.Dete
 		ErrInputNotReady, strings.Join(behind, ", "), formatInstant(windowEnd))
 }
 
-// setLockTimeout caps a run's wait for the window lock at one run's allowance.
-func setLockTimeout(transaction *gorm.DB, allowance time.Duration) error {
+// reserveRun takes the window lock and returns the next revision. Both the
+// normal run and the apply-failure record reserve through it.
+func reserveRun(transaction *gorm.DB, manifest config.DetectionManifest,
+	windowStart, windowEnd time.Time, allowance time.Duration) (int, error) {
 	err := transaction.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", allowance.Milliseconds())).Error
 	if err != nil {
-		return fmt.Errorf("set the run lock wait: %w", err)
+		return 0, fmt.Errorf("set the run lock wait: %w", err)
 	}
-	return nil
+	if err := lockWindow(transaction, manifest.ID, windowStart, windowEnd); err != nil {
+		return 0, err
+	}
+	return nextRevision(transaction, manifest.ID, windowStart, windowEnd)
 }
 
 // lockWindow serialises concurrent runs of one detection window. The lock
