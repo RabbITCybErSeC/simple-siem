@@ -12,16 +12,6 @@ import {
   VIEWPORTS,
 } from "./support/test.ts";
 
-interface LayoutElement {
-  parentElement: LayoutElement | null;
-  getBoundingClientRect(): { width: number };
-}
-
-interface LayoutGlobals {
-  document: { querySelector(selector: string): LayoutElement | null };
-  getComputedStyle(element: LayoutElement): { gridTemplateColumns: string };
-}
-
 const CLOSE_CASE_ALERTS = 4;
 const LONG_FIELD_VALUE = "a".repeat(400);
 const THIRTY_ALERTS: AlertSummary[] = Array.from(
@@ -304,23 +294,13 @@ test("the evidence table scrolls inside its frame in the split", async ({
   ).toBeGreaterThan(overflow.clientWidth);
 
   const widths = await page.evaluate(() => {
-    const browser = globalThis as unknown as LayoutGlobals;
-    const region = browser.document.querySelector(
-      'section[aria-label^="Case #"]',
-    );
+    const region = document.querySelector('section[aria-label^="Case #"]');
     const pane = region?.parentElement;
     const grid = pane?.parentElement;
-    if (
-      region === null ||
-      pane === null ||
-      pane === undefined ||
-      grid === null ||
-      grid === undefined
-    ) {
+    if (!pane || !grid) {
       return null;
     }
-    const columns = browser
-      .getComputedStyle(grid)
+    const columns = getComputedStyle(grid)
       .gridTemplateColumns.split(" ")
       .map((value) => Number.parseFloat(value));
     return {
@@ -433,13 +413,7 @@ test("copies the current view with absolute times", async ({
   await expect(
     page.getByRole("status").filter({ hasText: "Link copied" }),
   ).toHaveText("Link copied");
-  const copied = await page.evaluate(() =>
-    (
-      globalThis as unknown as {
-        navigator: { clipboard: { readText: () => Promise<string> } };
-      }
-    ).navigator.clipboard.readText(),
-  );
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
   expect(copied).toBe(
     `${APP_ORIGIN}/cases/${number}?from=2026-11-08T12:00:00Z&to=2026-11-09T12:00:00Z`,
   );
