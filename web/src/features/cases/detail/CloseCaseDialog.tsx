@@ -412,6 +412,16 @@ interface AlertDispositionsProps {
   ) => void;
 }
 
+interface AlertDispositionRowProps {
+  alert: AlertSummary;
+  override: AlertOverride | undefined;
+  onChange: (
+    alertId: string,
+    field: keyof AlertOverride,
+    value: string,
+  ) => void;
+}
+
 const DISPOSITIONS_LABEL_ID = "close-dispositions-label";
 
 function AlertDispositions({
@@ -444,16 +454,6 @@ function AlertDispositions({
       </ul>
     </div>
   );
-}
-
-interface AlertDispositionRowProps {
-  alert: AlertSummary;
-  override: AlertOverride | undefined;
-  onChange: (
-    alertId: string,
-    field: keyof AlertOverride,
-    value: string,
-  ) => void;
 }
 
 const AlertDispositionRow = memo(function AlertDispositionRow({

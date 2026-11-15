@@ -1702,7 +1702,7 @@ describe("trend chart and the list pane width", () => {
   });
 
   it("drops the trend chart while the list pane has no width and restores it", async () => {
-    renderCases();
+    renderCases("/cases/312?scope=all");
     expect(
       await screen.findByRole("region", { name: "Cases over time by severity" }),
     ).toBeInTheDocument();
@@ -1716,6 +1716,64 @@ describe("trend chart and the list pane width", () => {
     expect(
       screen.getByRole("region", { name: "Cases over time by severity" }),
     ).toBeInTheDocument();
+  });
+
+  it("restores the trend chart immediately when Escape closes a collapsed split", async () => {
+    renderCases("/cases/312?scope=all");
+    const heading = await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    expect(
+      await screen.findByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+
+    reportListPaneWidth(0);
+    expect(
+      screen.queryByRole("region", { name: "Cases over time by severity" }),
+    ).toBeNull();
+
+    fireEvent.keyDown(heading, { key: "Escape" });
+
+    expect(
+      screen.getByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not refetch the histogram while a split pane is collapsed", async () => {
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      now: new Date("2026-11-09T12:00:00Z"),
+    });
+    try {
+      const { requests } = renderCases("/cases/312?scope=all&refresh=30s");
+      await screen.findByRole("heading", {
+        name: "#312 Brute force → success",
+        level: 2,
+      });
+      reportListPaneWidth(0);
+      const histogramRequests = () =>
+        requests.filter((request) =>
+          request.startsWith("/api/v1/cases/histogram?"),
+        ).length;
+      const histogramBefore = histogramRequests();
+      const countsBefore = requests.filter((request) =>
+        request.startsWith("/api/v1/cases/counts?"),
+      ).length;
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await waitFor(() => {
+        expect(
+          requests.filter((request) =>
+            request.startsWith("/api/v1/cases/counts?"),
+          ).length,
+        ).toBeGreaterThan(countsBefore);
+      });
+      expect(histogramRequests()).toBe(histogramBefore);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

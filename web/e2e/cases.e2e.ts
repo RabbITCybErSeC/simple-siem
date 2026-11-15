@@ -607,6 +607,23 @@ test("an open case fills the main area below the split width", async ({
   }
 });
 
+test("a case opened by URL hides the queue without a Recharts warning", async ({
+  page,
+}) => {
+  await page.setViewportSize(VIEWPORTS.tablet);
+  await signIn(page);
+  await page.goto("/cases/7");
+  await expect(page.getByRole("region", { name: "Case #7" })).toBeVisible();
+  await expect(
+    page.locator("[data-case-list]"),
+    "at the tablet width the queue makes room for the case",
+  ).toBeHidden();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-case-list]")).toBeVisible();
+  await expect(page.locator(".recharts-wrapper")).toBeVisible();
+});
+
 test("the select-all checkbox shows a minus for a partial selection", async ({
   page,
 }) => {

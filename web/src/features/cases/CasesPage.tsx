@@ -137,7 +137,6 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const detailState = parseCaseDetailState(searchParams);
   const listQuery = useCaseList(state);
   const countsQuery = useCaseCounts(state);
-  const histogramQuery = useCaseHistogram(state);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const timeZone = useTimeZone();
@@ -174,6 +173,10 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const pendingRowFocus = useRef<string | undefined>(undefined);
   const pendingAssignments = useRef<Set<string>>(new Set());
   const listCollapsed = usePaneCollapsed(listPaneRef);
+  const detailOpen = caseNumber !== undefined;
+  const listHidden = detailOpen && detailState.layout === "full";
+  const chartShown = !listHidden && !(detailOpen && listCollapsed);
+  const histogramQuery = useCaseHistogram(state, chartShown);
 
   useEffect(() => {
     stateRef.current = state;
@@ -415,8 +418,6 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   };
 
   const counts = countsQuery.data;
-  const detailOpen = caseNumber !== undefined;
-  const listHidden = detailOpen && detailState.layout === "full";
 
   return (
     <>
@@ -591,7 +592,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
                 </div>
               </div>
 
-              {listHidden || listCollapsed ? null : (
+              {chartShown ? (
                 <div>
                   <TrendChart
                     histogram={histogramQuery.data}
@@ -602,7 +603,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
                     onZoom={(range) => updateState({ range }, false)}
                   />
                 </div>
-              )}
+              ) : null}
 
               {caseNumber === undefined && rowAssignFailure !== null ? (
                 <CaseActionAlert
