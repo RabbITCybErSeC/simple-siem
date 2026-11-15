@@ -511,6 +511,14 @@ describe("account menu", () => {
     return { account, router };
   }
 
+  it("groups the theme radios under the Theme label", async () => {
+    await openAccountMenu();
+
+    const group = screen.getByRole("radiogroup", { name: "Theme" });
+
+    expect(within(group).getAllByRole("radio")).toHaveLength(3);
+  });
+
   it("shows the initials and the name, email, theme, and sign out", async () => {
     const { account } = await openAccountMenu();
 

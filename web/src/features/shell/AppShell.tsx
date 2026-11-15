@@ -255,10 +255,17 @@ export function AppShell() {
                   </div>
                   <Separator />
                   <div className="px-3 py-2">
-                    <p className="text-xs font-medium text-muted-foreground">
+                    <p
+                      id="account-theme-label"
+                      className="text-xs font-medium text-muted-foreground"
+                    >
                       Theme
                     </p>
-                    <div className="segmented mt-2 w-full">
+                    <div
+                      role="radiogroup"
+                      aria-labelledby="account-theme-label"
+                      className="segmented mt-2 w-full"
+                    >
                       {THEME_OPTIONS.map((option) => (
                         <button
                           key={option.commandId}

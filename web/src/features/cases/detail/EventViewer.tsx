@@ -228,41 +228,39 @@ function EvidenceRows({
 
 function FieldTable({ fields, onCopy }: FieldTableProps) {
   return (
-    <TableRegion label="Event fields">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Field</TableHead>
-            <TableHead>Value</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {fields.map((field) => (
-            <TableRow key={field.path}>
-              <th
-                scope="row"
-                className="p-2 text-left align-middle font-mono text-xs font-medium whitespace-nowrap"
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Field</TableHead>
+          <TableHead>Value</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {fields.map((field) => (
+          <TableRow key={field.path}>
+            <th
+              scope="row"
+              className="p-2 text-left align-middle font-mono text-xs font-medium whitespace-nowrap"
+            >
+              {field.path}
+            </th>
+            <TableCell className="whitespace-normal">
+              <span className="font-mono break-all">{field.value}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="ml-2"
+                aria-label={`Copy ${field.path}`}
+                onClick={() => onCopy(field.value)}
               >
-                {field.path}
-              </th>
-              <TableCell className="whitespace-normal">
-                <span className="font-mono break-all">{field.value}</span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  className="ml-2"
-                  aria-label={`Copy ${field.path}`}
-                  onClick={() => onCopy(field.value)}
-                >
-                  Copy
-                </Button>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </TableRegion>
+                Copy
+              </Button>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 

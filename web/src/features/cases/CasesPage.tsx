@@ -148,8 +148,12 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   });
 
   // The selection belongs to one set of filters, however the URL changed
-  // (tabs, links, Back/Forward, the palette).
-  if (selection.filterKey !== filterKey) {
+  // (tabs, links, Back/Forward, the palette). An error hides the rows, so a
+  // selection would act on cases the analyst cannot see.
+  if (
+    selection.filterKey !== filterKey ||
+    (listQuery.isError && selection.ids.size > 0)
+  ) {
     setSelection({ filterKey, ids: new Set(), bulkCloseOpen: false });
   }
   const [closeRequestedFor, setCloseRequestedFor] = useState<

@@ -1667,6 +1667,40 @@ function selectionToolbar(): HTMLElement | null {
 }
 
 describe("case selection", () => {
+  it("clears selection and disables select-all while the list errors", async () => {
+    renderCases("/cases", {
+      list: (url) =>
+        url.searchParams.get("cursor") === "second"
+          ? jsonResponse(
+              {
+                error: {
+                  code: "INTERNAL_ERROR",
+                  message: "boom",
+                  details: {},
+                },
+              },
+              503,
+            )
+          : jsonResponse(listResponse(OPEN_CASES, "second")),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    expect(selectionToolbar()).toHaveTextContent("1 selected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    expect(
+      await screen.findByRole("alert", {}, { timeout: 4000 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "Select all on this page" }),
+    ).toBeDisabled();
+    expect(selectionToolbar()).not.toBeInTheDocument();
+  });
+
   it("toggles a row with x and shows the selected count", async () => {
     renderCases();
     const table = await screen.findByRole("table", {

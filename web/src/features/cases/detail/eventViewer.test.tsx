@@ -80,6 +80,23 @@ function detailRow(row: HTMLElement): HTMLElement {
   return detail;
 }
 
+it("keeps one evidence region when two events are expanded", () => {
+  const { container } = renderViewer([
+    entryAt("tl_1", AT, UDM),
+    entryAt("tl_2", LATER_AT, UDM),
+  ]);
+  fireEvent.click(showFieldsButton(rowAt(container, AT)));
+  fireEvent.click(showFieldsButton(rowAt(container, LATER_AT)));
+
+  expect(
+    screen.queryByRole("region", { name: "Event fields" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getAllByRole("region")).toHaveLength(1);
+  expect(
+    screen.getByRole("region", { name: "Evidence events" }),
+  ).toBeInTheDocument();
+});
+
 function fieldPaths(detail: HTMLElement): string[] {
   return Array.from(detail.querySelectorAll("th[scope='row']")).map(
     (cell) => cell.textContent ?? "",

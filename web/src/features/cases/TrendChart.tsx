@@ -217,7 +217,7 @@ export function TrendChart({
       {loading ? (
         <div
           aria-busy="true"
-          className="mt-2 h-24 animate-pulse rounded-lg bg-muted sm:h-28"
+          className="skeleton mt-2 h-24 rounded-lg sm:h-28"
         />
       ) : error && histogram === undefined ? (
         <div

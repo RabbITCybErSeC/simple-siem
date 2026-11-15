@@ -65,21 +65,21 @@ export interface SeverityStyle {
   className: string;
 }
 
+const SEVERITY_BADGE_CLASSES =
+  "h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide";
+
 export const SEVERITY_STYLES: Record<CaseSeverity, SeverityStyle> = {
   HIGH: {
     label: "HIGH",
-    className:
-      "bg-severity-high text-severity-high-foreground h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide",
+    className: `bg-severity-high text-severity-high-foreground ${SEVERITY_BADGE_CLASSES}`,
   },
   MEDIUM: {
     label: "MEDIUM",
-    className:
-      "bg-severity-medium text-severity-medium-foreground h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide",
+    className: `bg-severity-medium text-severity-medium-foreground ${SEVERITY_BADGE_CLASSES}`,
   },
   LOW: {
     label: "LOW",
-    className:
-      "bg-severity-low text-severity-low-foreground h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide",
+    className: `bg-severity-low text-severity-low-foreground ${SEVERITY_BADGE_CLASSES}`,
   },
 };
 
@@ -251,6 +251,7 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
               <TableHead className="w-10">
                 <Checkbox
                   aria-label="Select all on this page"
+                  disabled={error !== null}
                   checked={
                     allSelected
                       ? true
