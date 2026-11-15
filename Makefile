@@ -207,6 +207,17 @@ lint: network toolchain web/node_modules
 	$(RUN) $(TOOLCHAIN_IMAGE) golangci-lint run
 	@if grep -rEln "from ['\"]cn['\"]" web/src; then echo "lint: the files above import the npm package cn; use @/lib/utils (see docs/frontend.md)" >&2; exit 1; fi; if grep -n '"cn":' web/package.json; then echo "lint: web/package.json declares the npm package cn; remove it" >&2; exit 1; fi
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck'
+	$(RUN) $(TOOLCHAIN_IMAGE) govulncheck ./...
+	$(RUN) $(TOOLCHAIN_IMAGE) actionlint
+# SHA pins stop a moved tag from changing what CI runs.
+	$(RUN) $(TOOLCHAIN_IMAGE) sh -c 'quote=$$(printf "\047"); \
+		unpinned=$$(grep -nHE "^[[:space:]]*(-[[:space:]]*)?uses:" .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
+			| grep -vE "uses:[[:space:]]*[\"$$quote]?(\./[^[:space:]]*|docker://[^[:space:]]+@sha256:[0-9a-f]{64}|[^@[:space:]\"$$quote]+@[0-9a-f]{40})[\"$$quote]?([[:space:]]|$$)"); \
+		if [ -n "$$unpinned" ]; then \
+			echo "$$unpinned" | sed -E "s/^([^:]+:[0-9]+):.*/\1: action not pinned to a full commit SHA/" >&2; \
+			exit 1; \
+		fi'
+	$(WEB_RUN) $(TOOLCHAIN_IMAGE) pnpm audit --prod
 
 build: network toolchain web/node_modules
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm build'
