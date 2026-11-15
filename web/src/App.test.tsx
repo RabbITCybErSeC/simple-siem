@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routes } from "./App";
 import { createQueryClient } from "./features/auth/session";
 
@@ -16,6 +16,12 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
 }
 
 function stubSignedIn(): void {
@@ -69,6 +75,10 @@ function renderRoute(path: string) {
 
   return router;
 }
+
+beforeEach(() => {
+  vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+});
 
 afterEach(() => {
   cleanup();

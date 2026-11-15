@@ -128,8 +128,21 @@ function caseDetail(summary: CaseSummary): CaseDetail {
 const ALL_CASES = [...OPEN_CASES, CLOSED_CASE];
 
 class ResizeObserverStub {
-  observe() {}
+  static instances: ResizeObserverStub[] = [];
+  readonly callback: ResizeObserverCallback;
+  readonly targets: Element[] = [];
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    ResizeObserverStub.instances.push(this);
+  }
+
+  observe(target: Element) {
+    this.targets.push(target);
+  }
+
   unobserve() {}
+
   disconnect() {}
 }
 
@@ -281,6 +294,7 @@ async function chooseOption(trigger: HTMLElement, name: string): Promise<void> {
 }
 
 beforeEach(() => {
+  ResizeObserverStub.instances = [];
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   Element.prototype.scrollIntoView = vi.fn();
   HTMLElement.prototype.hasPointerCapture = vi.fn(() => false);
@@ -1655,6 +1669,53 @@ describe("case detail route and layout", () => {
     expect(
       new URLSearchParams(router.state.location.search).get("scope"),
     ).toBe("all");
+  });
+});
+
+describe("trend chart and the list pane width", () => {
+  // Recharts and the time range picker observe their own boxes; the list pane
+  // is the one whose target is [data-case-list].
+  function reportListPaneWidth(width: number): void {
+    const pane = document.querySelector("[data-case-list]");
+    if (pane === null) {
+      throw new Error("the list pane is not rendered");
+    }
+    const observer = ResizeObserverStub.instances.find((candidate) =>
+      candidate.targets.includes(pane),
+    );
+    if (observer === undefined) {
+      throw new Error("no ResizeObserver observes the list pane");
+    }
+    const entry = {
+      target: pane,
+      contentRect: { width },
+    } as ResizeObserverEntry;
+    act(() => observer.callback([entry], observer));
+  }
+
+  it("renders the trend chart before the list pane is measured", async () => {
+    renderCases();
+
+    expect(
+      await screen.findByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+  });
+
+  it("drops the trend chart while the list pane has no width and restores it", async () => {
+    renderCases();
+    expect(
+      await screen.findByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+
+    reportListPaneWidth(0);
+    expect(
+      screen.queryByRole("region", { name: "Cases over time by severity" }),
+    ).toBeNull();
+
+    reportListPaneWidth(640);
+    expect(
+      screen.getByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
   });
 });
 
