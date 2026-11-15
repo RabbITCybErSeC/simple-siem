@@ -87,7 +87,7 @@
     --severity-low-foreground: oklch(0.985 0 0);
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
-    --ring: oklch(0.65 0 0);
+    --ring: oklch(0.556 0 0);
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
@@ -128,7 +128,7 @@
     --severity-low-foreground: oklch(0.18 0.03 260);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
+    --ring: oklch(0.708 0 0);
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
@@ -144,6 +144,11 @@
     --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* Unlayered, so every vendored control draws its ring at the full token. */
+[data-slot]:focus-visible:not([aria-invalid="true"]) {
+  --tw-ring-color: var(--ring);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -154,4 +159,46 @@
   html {
     @apply font-sans;
     }
+}
+
+/* Shared control styles; the page changes add their callers. */
+@utility segmented {
+  @apply inline-flex h-8 items-center gap-0.5 rounded-lg bg-muted p-0.5;
+}
+
+@utility segmented-item {
+  @apply inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors outline-none hover:text-foreground;
+  @apply aria-checked:bg-background aria-checked:text-foreground aria-checked:shadow-sm dark:aria-checked:bg-input/50;
+  @apply has-checked:bg-background has-checked:text-foreground has-checked:shadow-sm dark:has-checked:bg-input/50;
+  @apply has-aria-checked:bg-background has-aria-checked:text-foreground has-aria-checked:shadow-sm dark:has-aria-checked:bg-input/50;
+  @apply focus-visible:ring-3 focus-visible:ring-ring;
+  @apply has-focus-visible:ring-3 has-focus-visible:ring-ring;
+}
+
+@utility control-group {
+  @apply inline-flex h-8 items-stretch rounded-lg border border-input dark:bg-input/30;
+
+  & > * {
+    @apply h-full rounded-none;
+  }
+  & > :first-child {
+    @apply rounded-l-lg;
+  }
+  & > :last-child {
+    @apply rounded-r-lg;
+  }
+  & > :not(:first-child) {
+    @apply border-l border-input;
+  }
+}
+
+@utility native-select {
+  @apply h-8 w-full min-w-0 appearance-none rounded-lg border border-input bg-transparent pr-8 pl-2.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring aria-invalid:border-destructive dark:bg-input/30;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+  background-position: right 0.5rem center;
+  background-repeat: no-repeat;
+}
+
+@utility native-radio {
+  @apply size-4 accent-primary;
 }

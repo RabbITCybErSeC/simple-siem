@@ -64,6 +64,32 @@ function highlightedItemIndexes(items: Locator): Promise<number[]> {
   });
 }
 
+function colourAlpha(colour: string): number {
+  const slashAlpha = /\s*\/\s*([\d.]+)(%?)\s*\)$/.exec(colour);
+  if (slashAlpha !== null) {
+    const value = Number(slashAlpha[1]);
+    return slashAlpha[2] === "%" ? value / 100 : value;
+  }
+  const legacyAlpha = /^rgba\([^)]*,\s*([\d.]+)\s*\)$/.exec(colour);
+  return legacyAlpha === null ? 1 : Number(legacyAlpha[1]);
+}
+
+function ringAlphaFromShadow(shadow: string): number | undefined {
+  // Computed box-shadow is layers separated by commas outside colour functions.
+  const layers = shadow.split(/,(?![^(]*\))/);
+  for (const layer of layers) {
+    const lengths = layer.match(/-?[\d.]+px/g) ?? [];
+    if (lengths.at(-1) !== "3px") {
+      continue;
+    }
+    const colour = /(?:rgba?|oklab|oklch)\([^)]*\)/.exec(layer);
+    if (colour !== null) {
+      return colourAlpha(colour[0]);
+    }
+  }
+  return undefined;
+}
+
 test("the queue and detail tab lists sit above their panels", async ({
   page,
 }) => {
@@ -269,4 +295,35 @@ test("the Alerts table region takes keyboard focus and scrolls sideways", async 
       { message: "ArrowRight scrolls the focused Alerts region" },
     )
     .toBeGreaterThan(0);
+});
+
+test("a keyboard-focused button draws its ring at full alpha", async ({
+  page,
+}) => {
+  await openCases(page);
+
+  const focusedButton = page.locator('button[data-slot="button"]:focus');
+  for (let index = 0; index < 10; index += 1) {
+    if ((await focusedButton.count()) > 0) {
+      break;
+    }
+    await page.keyboard.press("Tab");
+  }
+  await expect(focusedButton, "a button takes keyboard focus").toHaveCount(1);
+
+  // The ring transitions in, so wait until it has its drawn 3px spread.
+  await expect
+    .poll(
+      async () =>
+        ringAlphaFromShadow(
+          await readComputedProperty(focusedButton, "box-shadow"),
+        ),
+      { message: "the focused button ring finishes its transition" },
+    )
+    .not.toBeUndefined();
+
+  const alpha = ringAlphaFromShadow(
+    await readComputedProperty(focusedButton, "box-shadow"),
+  );
+  expect(alpha, `focused button ring alpha is ${alpha}, expected 1`).toBe(1);
 });

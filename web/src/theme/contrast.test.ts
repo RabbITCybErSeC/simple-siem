@@ -40,10 +40,13 @@ const pairsAt45 = [
   ["severity-low", "background"],
 ] as const;
 
-const pairsAt3 = [
-  ["ring", "background"],
-  ["destructive", "background"],
-] as const;
+const pairsAt3 = [["destructive", "background"]] as const;
+
+// The vendored controls draw the ring at half alpha until the unlayered rule
+// in index.css raises it to the full token.
+const FULL_ALPHA_RING_RULE =
+  '[data-slot]:focus-visible:not([aria-invalid="true"])';
+const ringAlpha = stylesheet.includes(FULL_ALPHA_RING_RULE) ? 1 : 0.5;
 
 const cases = (["light", "dark"] as const).flatMap((theme) => [
   ...pairsAt45.map(([foreground, background]) => ({
@@ -75,6 +78,26 @@ describe("design token contrast", () => {
         ratio,
         `${label} is ${ratio.toFixed(2)}:1, needs at least ${minimum}:1`,
       ).toBeGreaterThanOrEqual(minimum);
+    },
+  );
+});
+
+describe("focus ring contrast as rendered", () => {
+  it.each(["light", "dark"] as const)(
+    "%s: ring on background",
+    (theme) => {
+      const background = resolveToken(theme, "background");
+      const ring = compositeOver(
+        resolveToken(theme, "ring"),
+        background,
+        ringAlpha,
+      );
+      const ratio = contrastRatio(ring, background);
+
+      expect(
+        ratio,
+        `${theme}: ring on background at ${ringAlpha * 100}% alpha is ${ratio.toFixed(2)}:1, needs at least 3:1`,
+      ).toBeGreaterThanOrEqual(3);
     },
   );
 });

@@ -8,10 +8,12 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { InboxIcon, TriangleAlertIcon } from "lucide-react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routes } from "../../App";
 import { createQueryClient } from "../auth/session";
+import { EmptyState } from "./EmptyState";
 import { shortcutFor } from "./shortcuts";
 
 type FetchFunction = (
@@ -395,5 +397,56 @@ describe("review fixes: palette focus", () => {
       ).toBe("closed");
     });
     expect(opener).toHaveFocus();
+  });
+});
+
+describe("EmptyState", () => {
+  it("renders the title and action without an alert", () => {
+    render(
+      <EmptyState
+        icon={InboxIcon}
+        title="No open unassigned cases."
+        action={<button type="button">Show unassigned cases</button>}
+      />,
+    );
+
+    expect(screen.getByText("No open unassigned cases.")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Show unassigned cases" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("announces an error and calls the retry action", () => {
+    const retry = vi.fn();
+    render(
+      <EmptyState
+        icon={TriangleAlertIcon}
+        tone="error"
+        title="Could not load cases."
+        action={
+          <button type="button" onClick={retry}>
+            Retry
+          </button>
+        }
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Could not load cases.",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("renders only the icon and title when no hint or action is given", () => {
+    const { container } = render(
+      <EmptyState icon={InboxIcon} title="No cases." />,
+    );
+
+    expect(container.querySelectorAll("p")).toHaveLength(1);
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });
