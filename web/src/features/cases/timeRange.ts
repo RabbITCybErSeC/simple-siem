@@ -62,9 +62,10 @@ export function resolveTime(value: string, now: Date): Date | undefined {
 
   const offset = parseOffset(value);
   if (offset) {
-    return new Date(
+    const date = new Date(
       now.getTime() - offset.count * UNIT_MILLISECONDS[offset.unit],
     );
+    return Number.isFinite(date.getTime()) ? date : undefined;
   }
 
   return parseIsoUtc(value);

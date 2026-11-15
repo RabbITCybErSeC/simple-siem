@@ -173,7 +173,7 @@ const EVIDENCE_B: TimelineEvidenceEntry = {
   alertId: "alert_2",
   sourceId: "evt-b",
   udm: {
-    metadata: { event_type: "PROCESS_LAUNCH" },
+    metadata: { event_type: "USER_LOGOUT" },
     principal: {
       user: { userid: "evt-user-b" },
       hostname: "WS-027",
@@ -689,7 +689,7 @@ describe("assign to me", () => {
     });
   });
 
-  it("assigns from the queue with a and refreshes counts and the chart only", async () => {
+  it("assigns from the queue with a and merges the row", async () => {
     const { api } = renderDetail("/cases?scope=all", {
       assign: () =>
         jsonResponse(
@@ -728,6 +728,11 @@ describe("assign to me", () => {
     });
 
     await waitFor(() => {
+      expect(within(row).getByText("Alice Analyst")).toBeInTheDocument();
+    });
+    expect(within(row).queryByText("Unassigned")).not.toBeInTheDocument();
+
+    await waitFor(() => {
       expect(api.requestsFor("/api/v1/cases/counts").length).toBeGreaterThan(
         before.counts,
       );
@@ -736,6 +741,25 @@ describe("assign to me", () => {
       ).toBeGreaterThan(before.histogram);
     });
     expect(api.requestsFor("/api/v1/cases")).toHaveLength(before.list);
+  });
+
+  it("refreshes the activity list after assigning", async () => {
+    const { api } = renderDetail("/cases/312?scope=all&view=activity", {
+      timeline: (search) => pageResponse(timelineEntries(search)),
+    });
+
+    await screen.findByRole("list", { name: "Activity" });
+    const before = api.requestsFor("/api/v1/cases/case_312/timeline").length;
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Assign to me" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        api.requestsFor("/api/v1/cases/case_312/timeline").length,
+      ).toBeGreaterThan(before);
+    });
   });
 
   it("offers a reload on a version conflict", async () => {

@@ -1,3 +1,4 @@
+// Fake /cases server self-test, not API coverage; removed with that route when case-core lands.
 import type { Page } from "@playwright/test";
 import type { ErrorEnvelope } from "../src/api/types.ts";
 import type {

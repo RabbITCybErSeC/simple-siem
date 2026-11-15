@@ -22,12 +22,13 @@ type FetchFunction = (
 interface RequestLog {
   method: string;
   path: string;
+  search: URLSearchParams;
   body: unknown;
 }
 
 interface Responders {
   detail?: () => Response;
-  alerts?: () => Response;
+  alerts?: (search: URLSearchParams) => Response;
   close?: (body: unknown) => Response;
 }
 
@@ -139,7 +140,12 @@ function stubApi(responders: Responders = {}) {
       const method = init?.method ?? "GET";
       const body =
         init?.body === undefined ? undefined : JSON.parse(String(init.body));
-      requests.push({ method, path: url.pathname, body });
+      requests.push({
+        method,
+        path: url.pathname,
+        search: url.searchParams,
+        body,
+      });
 
       if (url.pathname === "/api/v1/cases") {
         return jsonResponse({
@@ -160,7 +166,9 @@ function stubApi(responders: Responders = {}) {
         return (responders.detail ?? (() => jsonResponse(makeDetail())))();
       }
       if (url.pathname === "/api/v1/cases/case_312/alerts") {
-        return (responders.alerts ?? (() => pageResponse(ALERTS)))();
+        return (responders.alerts ?? (() => pageResponse(ALERTS)))(
+          url.searchParams,
+        );
       }
       if (url.pathname === "/api/v1/cases/case_312/timeline") {
         return pageResponse([]);
@@ -366,25 +374,38 @@ describe("close case dialog", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows the note and no table above 100 alerts", async () => {
+  it("lists every alert over two cursor pages", async () => {
+    const alerts = Array.from({ length: 101 }, (_, index) =>
+      makeAlert({
+        id: `alert_${index + 1}`,
+        title: `Alert ${index + 1}`,
+      }),
+    );
     const { api } = renderClose({
       detail: () => jsonResponse(makeDetail({ alertCount: 101 })),
+      alerts: (search) =>
+        search.get("cursor") === "next-alerts"
+          ? jsonResponse({
+              data: alerts.slice(100),
+              pagination: { limit: 100, nextCursor: null },
+            })
+          : jsonResponse({
+              data: alerts.slice(0, 100),
+              pagination: { limit: 100, nextCursor: "next-alerts" },
+            }),
     });
     const dialog = await openCloseDialog();
 
-    expect(
-      within(dialog).getByText(
-        "Per-alert overrides are available for up to 100 alerts.",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      within(dialog).queryByRole("table", { name: "Alert dispositions" }),
-    ).not.toBeInTheDocument();
-    expect(
-      api
-        .requestsFor("/api/v1/cases/case_312/alerts")
-        .filter((request) => request.method === "GET"),
-    ).toHaveLength(0);
+    const table = await within(dialog).findByRole("table", {
+      name: "Alert dispositions",
+    });
+    expect(within(table).getAllByRole("row")).toHaveLength(102);
+    expect(within(table).getByText("Alert 101")).toBeInTheDocument();
+    const requests = api
+      .requestsFor("/api/v1/cases/case_312/alerts")
+      .filter((request) => request.method === "GET");
+    expect(requests).toHaveLength(2);
+    expect(requests[1].search.get("cursor")).toBe("next-alerts");
   });
 
   it("sends only the overridden alert rows", async () => {

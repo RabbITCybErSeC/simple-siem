@@ -50,6 +50,12 @@ describe("absoluteLink", () => {
       "https://siem.example.test/cases/312?from=2026-11-08T12:00:00Z&to=2026-11-09T12:00:00Z",
     );
   });
+
+  it("falls back to the default range beyond representable time", () => {
+    expect(absolute("?from=now-999999999999999h&to=now")).toBe(
+      "https://siem.example.test/cases/312?from=2026-11-08T12:00:00Z&to=2026-11-09T12:00:00Z",
+    );
+  });
 });
 
 type ClipboardStub = { writeText: (text: string) => Promise<unknown> };

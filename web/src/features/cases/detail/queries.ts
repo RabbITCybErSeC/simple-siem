@@ -3,8 +3,11 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
+  type QueryClient,
 } from "@tanstack/react-query";
 import { apiRequest, get } from "../../../api/client";
+import type { CaseListResponse, CaseSummary } from "../types";
 import type {
   AlertSummary,
   AssignCaseVariables,
@@ -17,7 +20,7 @@ import type {
 } from "./types";
 
 const PAGE_LIMIT = 50;
-const ALL_ALERTS_LIMIT = 100;
+const ALL_ALERTS_PAGE_LIMIT = 100;
 
 export interface BulkCloseVariables {
   request: BulkCloseRequest;
@@ -45,10 +48,12 @@ export function useAssignCase() {
       apiRequest<CaseDetail>("PATCH", `/cases/${caseId}`, request),
     onSuccess: (detail, variables) => {
       queryClient.setQueryData(caseQueryKey(variables.caseNumber), detail);
-      // The queue's snapshot rule keeps the visible rows: only the counts and
-      // the chart refresh here, and the next refresh tick finds row changes.
+      mergeCaseIntoQueue(queryClient, detail);
       void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
       void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["case", variables.caseId, "timeline"],
+      });
     },
   });
 }
@@ -66,9 +71,8 @@ export function useCaseAlerts(caseId: string) {
 }
 
 /**
- * Every alert of a case for the close dialog's per-alert overrides. The
- * dialog needs the whole set, so pages are followed until the end, capped at
- * the contract's 100-case override limit.
+ * Every alert of a case for the close dialog's per-alert overrides: the
+ * dialog needs the whole set, so pages are followed until the cursor ends.
  */
 export function useAllCaseAlerts(caseId: string | undefined, enabled: boolean) {
   return useQuery({
@@ -86,8 +90,7 @@ export function useCloseCase() {
       apiRequest<CaseDetail>("POST", `/cases/${caseId}/close`, request),
     onSuccess: (detail, variables) => {
       queryClient.setQueryData(caseQueryKey(variables.caseNumber), detail);
-      // The queue's snapshot rule keeps the visible rows: only the counts and
-      // the chart refresh here, and the next refresh tick finds row changes.
+      mergeCaseIntoQueue(queryClient, detail);
       void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
       void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
       void queryClient.invalidateQueries({
@@ -106,7 +109,24 @@ export function useBulkCloseCases() {
   return useMutation({
     mutationFn: ({ request }: BulkCloseVariables) =>
       apiRequest<BulkCloseResponse>("POST", "/cases/bulk-close", request),
-    onSuccess: (_response, { request, caseNumbers }) => {
+    onSuccess: async (response, { request, caseNumbers }) => {
+      const closedIds = response.results
+        .filter((result) => result.status === "CLOSED")
+        .map((result) => result.caseId);
+      markQueueCasesClosed(queryClient, closedIds, request);
+
+      const conflicts = response.results
+        .filter((result) => result.status === "VERSION_CONFLICT")
+        .map((result) => result.caseId);
+      const refreshed = await Promise.allSettled(
+        conflicts.map((caseId) => get<CaseDetail>(`/cases/${caseId}`)),
+      );
+      for (const result of refreshed) {
+        if (result.status === "fulfilled") {
+          mergeCaseIntoQueue(queryClient, result.value);
+        }
+      }
+
       void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
       void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
       for (const { id } of request.cases) {
@@ -147,6 +167,86 @@ export function useCaseTimeline(caseId: string, kind?: "ACTIVITY") {
   });
 }
 
+/** The queue row's version at submit time, after any cache merge. */
+export function cachedCaseVersion(
+  queryClient: QueryClient,
+  caseId: string,
+): number | undefined {
+  const pages = queryClient.getQueriesData<InfiniteData<CaseListResponse>>({
+    queryKey: ["cases", "list"],
+  });
+  for (const [, data] of pages) {
+    for (const page of data?.pages ?? []) {
+      const row = page.data.find((item) => item.id === caseId);
+      if (row !== undefined) {
+        return row.version;
+      }
+    }
+  }
+  return undefined;
+}
+
+function mergeCaseIntoQueue(queryClient: QueryClient, detail: CaseDetail) {
+  updateQueuePages(queryClient, (item) =>
+    item.id === detail.id ? caseSummaryOf(detail) : item,
+  );
+}
+
+function markQueueCasesClosed(
+  queryClient: QueryClient,
+  caseIds: string[],
+  request: BulkCloseRequest,
+) {
+  const closed = new Set(caseIds);
+  updateQueuePages(queryClient, (item) =>
+    closed.has(item.id)
+      ? {
+          ...item,
+          status: "CLOSED",
+          outcome: request.outcome,
+          closureReason: request.closureReason,
+        }
+      : item,
+  );
+}
+
+function updateQueuePages(
+  queryClient: QueryClient,
+  update: (item: CaseSummary) => CaseSummary,
+) {
+  queryClient.setQueriesData<InfiniteData<CaseListResponse>>(
+    { queryKey: ["cases", "list"] },
+    (data) =>
+      data === undefined
+        ? data
+        : {
+            ...data,
+            pages: data.pages.map((page) => ({
+              ...page,
+              data: page.data.map(update),
+            })),
+          },
+  );
+}
+
+function caseSummaryOf(detail: CaseDetail): CaseSummary {
+  return {
+    id: detail.id,
+    caseNumber: detail.caseNumber,
+    title: detail.title,
+    status: detail.status,
+    severity: detail.severity,
+    outcome: detail.outcome,
+    closureReason: detail.closureReason,
+    assignee: detail.assignee,
+    firstEventAt: detail.firstEventAt,
+    lastEventAt: detail.lastEventAt,
+    createdAt: detail.createdAt,
+    closedAt: detail.closedAt,
+    version: detail.version,
+  };
+}
+
 function caseAlertsQueryKey(caseId: string) {
   return ["case", caseId, "alerts"] as const;
 }
@@ -159,26 +259,27 @@ async function fetchAllAlerts(caseId: string): Promise<AlertSummary[]> {
   const alerts: AlertSummary[] = [];
   let cursor: string | null = null;
 
-  while (alerts.length < ALL_ALERTS_LIMIT) {
+  do {
     const page: CaseAlertsResponse = await get<CaseAlertsResponse>(
-      pagePath(`/cases/${caseId}/alerts`, cursor),
+      pagePath(`/cases/${caseId}/alerts`, cursor, ALL_ALERTS_PAGE_LIMIT),
     );
     alerts.push(...page.data);
     cursor = page.pagination.nextCursor;
-    if (cursor === null) {
-      break;
-    }
-  }
+  } while (cursor !== null);
 
-  return alerts.slice(0, ALL_ALERTS_LIMIT);
+  return alerts;
 }
 
 function caseTimelineQueryKey(caseId: string, kind: "ACTIVITY" | undefined) {
   return ["case", caseId, "timeline", kind ?? "all"] as const;
 }
 
-function pagePath(base: string, cursor: string | null): string {
-  const parameters = new URLSearchParams({ limit: String(PAGE_LIMIT) });
+function pagePath(
+  base: string,
+  cursor: string | null,
+  limit = PAGE_LIMIT,
+): string {
+  const parameters = new URLSearchParams({ limit: String(limit) });
   if (cursor !== null) {
     parameters.set("cursor", cursor);
   }

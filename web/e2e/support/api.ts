@@ -1,4 +1,4 @@
-// shortcut: network fixtures for /cases, use the real case API when case-core and case-close are on main.
+// shortcut: network fixtures for /cases, use the real case API when case-core and case-close are on main; the fake route and its fake-case self-tests are removed together.
 import type { Page, Request, Route } from "@playwright/test";
 import type { ErrorEnvelope } from "../../src/api/types.ts";
 import type {

@@ -1,4 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { ApiError } from "../../../api/client";
@@ -14,7 +15,7 @@ import {
 import type { CaseSummary } from "../types";
 import type { ClosureValues } from "./CloseCaseDialog";
 import { ClosureFields, closeSchema } from "./CloseCaseDialog";
-import { useBulkCloseCases } from "./queries";
+import { useBulkCloseCases, cachedCaseVersion } from "./queries";
 import type { BulkCloseResponse, BulkCloseStatus } from "./types";
 
 const BULK_STATUS_LABELS: Record<BulkCloseStatus, string> = {
@@ -39,6 +40,7 @@ export function BulkCloseDialog({
   onClosed,
 }: BulkCloseDialogProps) {
   const bulkClose = useBulkCloseCases();
+  const queryClient = useQueryClient();
   const form = useForm<ClosureValues>({
     resolver: zodResolver(closeSchema),
     defaultValues: { conclusion: "" },
@@ -56,7 +58,10 @@ export function BulkCloseDialog({
     try {
       const response = await bulkClose.mutateAsync({
         request: {
-          cases: cases.map((item) => ({ id: item.id, version: item.version })),
+          cases: cases.map((item) => ({
+            id: item.id,
+            version: cachedCaseVersion(queryClient, item.id) ?? item.version,
+          })),
           outcome: values.outcome,
           closureReason: values.closureReason,
           conclusion: values.conclusion,

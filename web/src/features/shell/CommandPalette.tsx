@@ -100,18 +100,18 @@ export function CommandPalette({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogHeader className="sr-only">
-        <DialogTitle>Command palette</DialogTitle>
-        <DialogDescription>
-          Search for and run a console command.
-        </DialogDescription>
-      </DialogHeader>
       <DialogContent
         className="top-1/3 translate-y-0 overflow-hidden rounded-xl! p-0"
         showCloseButton={false}
         onOpenAutoFocus={handleOpenAutoFocus}
         onCloseAutoFocus={handleCloseAutoFocus}
       >
+        <DialogHeader className="sr-only">
+          <DialogTitle>Command palette</DialogTitle>
+          <DialogDescription>
+            Search for and run a console command.
+          </DialogDescription>
+        </DialogHeader>
         <Command>
           <CommandInput placeholder="Type a command…" />
           <CommandList>

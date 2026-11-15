@@ -97,6 +97,8 @@ function renderChart(histogram: CaseHistogram | undefined) {
       histogram={histogram}
       timeZone="utc"
       loading={false}
+      error={false}
+      onRetry={vi.fn()}
       onZoom={onZoom}
     />,
   );
@@ -201,6 +203,8 @@ describe("TrendChart", () => {
         histogram={undefined}
         timeZone="utc"
         loading={true}
+        error={false}
+        onRetry={vi.fn()}
         onZoom={vi.fn()}
       />,
     );

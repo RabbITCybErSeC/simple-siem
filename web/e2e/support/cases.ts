@@ -82,18 +82,13 @@ const DETECTIONS = [
   { id: "det_privilege_escalation", title: "Privilege escalation" },
 ];
 
-const EVENT_TYPES = [
-  "USER_LOGIN",
-  "PROCESS_LAUNCH",
-  "NETWORK_CONNECTION",
-  "FILE_MODIFICATION",
-  "DNS_QUERY",
-];
+// From internal/udm/types.go: the fixture emits only UDM values the server can.
+const EVENT_TYPES = ["USER_LOGIN", "USER_LOGOUT", "GENERIC_EVENT"];
 const USER_IDS = ["jdoe", "asmith", "bwilliams", "svc_backup"];
 const HOSTNAMES = ["WS-014", "WS-027", "SRV-DC-01", "LT-102"];
 const IP_ADDRESSES = ["10.12.4.18", "10.12.4.33", "192.0.2.54", "203.0.113.9"];
 const TARGET_HOSTNAMES = ["SRV-DC-01", "fileserver-2", "api.internal", "unknown-host"];
-const SECURITY_ACTIONS = ["ALLOW", "BLOCK", "QUARANTINE", "MONITOR"];
+const SECURITY_ACTIONS = ["ALLOW", "BLOCK", "UNKNOWN_ACTION"];
 
 const CONCLUSIONS = [
   "Validated with the asset owner; no further action.",
@@ -723,7 +718,7 @@ function buildUdm(
       ip: [pick(IP_ADDRESSES, random)],
     },
     target: { hostname: pick(TARGET_HOSTNAMES, random) },
-    security_result: [{ action: pick(SECURITY_ACTIONS, random) }],
+    security_result: { action: pick(SECURITY_ACTIONS, random) },
   };
 }
 

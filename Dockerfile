@@ -1,6 +1,6 @@
 FROM --platform=$BUILDPLATFORM node:26.13.1-bookworm@sha256:b7087bc4d973034b30854b378ba107f9fab622b47514cb7e2592e41b8bab8d49 AS node
 
-FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm AS toolchain
+FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS toolchain
 
 ARG GOLANGCI_LINT_VERSION=v2.15.0
 ARG GOOSE_VERSION=v3.30.0
@@ -45,6 +45,7 @@ ARG COMMIT=unknown
 COPY go.* ./
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
+COPY detections/ ./detections/
 COPY web/embed.go ./web/embed.go
 COPY --from=web /web/dist ./web/dist
 

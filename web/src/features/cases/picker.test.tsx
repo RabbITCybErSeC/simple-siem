@@ -196,6 +196,23 @@ describe("TimeRangePicker", () => {
     expect(apply).toHaveAttribute("aria-describedby", message.id);
   });
 
+  it("disables Apply for a relative range beyond representable time", () => {
+    renderPicker();
+    openPicker();
+
+    const startAndEnd = screen.getByRole("group", {
+      name: "Start and end",
+    });
+    const start = within(startAndEnd).getByRole("group", { name: "Start" });
+    fireEvent.change(within(start).getByLabelText("Count"), {
+      target: { value: "999999999999999" },
+    });
+
+    expect(
+      within(startAndEnd).getByRole("button", { name: "Apply" }),
+    ).toBeDisabled();
+  });
+
   it("steps the range back and forward as absolute values", () => {
     vi.useFakeTimers({ now: new Date("2026-11-09T12:00:00Z") });
     const { onRangeChange } = renderPicker();

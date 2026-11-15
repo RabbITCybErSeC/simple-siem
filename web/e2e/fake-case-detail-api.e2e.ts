@@ -1,3 +1,4 @@
+// Fake /cases server self-test, not API coverage; removed with that route when case-core lands.
 import type { Page } from "@playwright/test";
 import type { ErrorEnvelope } from "../src/api/types.ts";
 import type {
@@ -32,7 +33,7 @@ interface UdmDocument {
     ip: string[];
   };
   target: { hostname: string };
-  security_result: { action: string }[];
+  security_result: { action: string };
 }
 
 async function requestJson<T>(
@@ -252,7 +253,7 @@ test("lists a case's alerts and timeline in ascending time", async ({
     expect(Array.isArray(udm.principal.ip)).toBe(true);
     expect(udm.principal.ip.length).toBeGreaterThan(0);
     expect(udm.target.hostname).not.toBe("");
-    expect(udm.security_result[0]?.action).not.toBe("");
+    expect(udm.security_result.action).not.toBe("");
   }
   expect(cachedCount).toBeGreaterThan(0);
 

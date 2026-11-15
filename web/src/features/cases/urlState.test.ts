@@ -106,6 +106,12 @@ describe("parseCaseQueueState", () => {
       }),
     ).toEqual({ ...defaultCaseQueueState, tab: "all" });
   });
+
+  it("uses the default range beyond representable time", () => {
+    expect(
+      parseState({ tab: "closed", from: "now-999999999999999h", to: "now" }),
+    ).toEqual({ ...defaultCaseQueueState, tab: "closed" });
+  });
 });
 
 describe("caseQueueSearch", () => {

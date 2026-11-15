@@ -139,7 +139,7 @@ export function CloseCaseDialog({
   const [opener, setOpener] = useState<HTMLElement | null>(null);
   const closedSuccessfully = useRef(false);
   const closedDetail = useRef<CaseDetail | null>(null);
-  const showDispositions = detail.alertCount > 1 && detail.alertCount <= 100;
+  const showDispositions = detail.alertCount > 1;
   const alertsQuery = useAllCaseAlerts(detail.id, open && showDispositions);
   const alerts = useMemo(() => alertsQuery.data ?? [], [alertsQuery.data]);
 
@@ -239,10 +239,6 @@ export function CloseCaseDialog({
                 onChange={changeOverride}
               />
             )
-          ) : detail.alertCount > 100 ? (
-            <p className="text-sm text-muted-foreground">
-              Per-alert overrides are available for up to 100 alerts.
-            </p>
           ) : null}
 
           {failure === null ? null : (

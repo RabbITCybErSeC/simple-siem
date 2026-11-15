@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Bar, BarChart, ReferenceArea, XAxis, YAxis } from "recharts";
+import { Button } from "../../components/ui/button";
 import {
   ChartContainer,
   ChartLegend,
@@ -22,6 +23,8 @@ export interface TrendChartProps {
   histogram: CaseHistogram | undefined;
   timeZone: TimeZoneSetting;
   loading: boolean;
+  error: boolean;
+  onRetry: () => void;
   onZoom: (range: TimeRange) => void;
 }
 
@@ -114,6 +117,8 @@ export function TrendChart({
   histogram,
   timeZone,
   loading,
+  error,
+  onRetry,
   onZoom,
 }: TrendChartProps) {
   const [drag, setDrag] = useState<DragSelection | undefined>();
@@ -191,6 +196,22 @@ export function TrendChart({
           aria-busy="true"
           className="h-40 animate-pulse rounded-lg bg-muted"
         />
+      ) : error ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-foreground"
+        >
+          <p>Could not load the trend.</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={onRetry}
+          >
+            Retry
+          </Button>
+        </div>
       ) : !hasCases ? (
         <p className="text-sm text-muted-foreground">No cases in this range.</p>
       ) : (

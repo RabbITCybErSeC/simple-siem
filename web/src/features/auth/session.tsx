@@ -19,6 +19,7 @@ export type CurrentUser = Pick<
 
 const CASES_PATH = "/cases";
 const ME_QUERY_KEY = ["me"] as const;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 
 export function createQueryClient(onUnauthorized: () => void): QueryClient {
   const handleError = (error: Error) => {
@@ -224,13 +225,14 @@ function isLoginPath(value: string): boolean {
 }
 
 export function safeNextPath(next: string | null): string {
-  if (next === null || !isPath(next)) {
+  if (next === null || CONTROL_CHARACTERS.test(next)) {
     return CASES_PATH;
   }
 
   const decoded = decodePath(next);
   if (
     decoded === null ||
+    !isPath(next) ||
     !isPath(decoded) ||
     isLoginPath(next) ||
     isLoginPath(decoded)
@@ -238,7 +240,17 @@ export function safeNextPath(next: string | null): string {
     return CASES_PATH;
   }
 
-  return next;
+  let url: URL;
+  try {
+    url = new URL(next, window.location.origin);
+  } catch {
+    return CASES_PATH;
+  }
+  if (url.origin !== window.location.origin || url.pathname === "/login") {
+    return CASES_PATH;
+  }
+
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 export function loginPath(next: string, reason?: "expired"): string {

@@ -241,6 +241,18 @@ describe("CommandPalette and shortcuts", () => {
     return screen.findByPlaceholderText("Type a command…");
   }
 
+  it("keeps its title out of the page until it opens", async () => {
+    renderShell();
+    await screen.findByRole("heading", { name: "Cases" });
+    expect(screen.queryByText("Command palette")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+
+    expect(
+      await screen.findByRole("dialog", { name: "Command palette" }),
+    ).toBeInTheDocument();
+  });
+
   it("opens and closes with Ctrl+K", async () => {
     await openPalette();
 

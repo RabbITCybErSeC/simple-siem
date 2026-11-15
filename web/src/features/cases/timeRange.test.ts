@@ -74,6 +74,10 @@ describe("resolveTime", () => {
   it("returns undefined for an invalid expression", () => {
     expect(resolveTime("yesterday", now)).toBeUndefined();
   });
+
+  it("returns undefined when the offset is beyond representable time", () => {
+    expect(resolveTime("now-999999999999999h", now)).toBeUndefined();
+  });
 });
 
 describe("resolveRange", () => {
@@ -104,6 +108,13 @@ describe("resolveRange", () => {
 });
 
 describe("stepRange", () => {
+  it("leaves a range beyond representable time unchanged", () => {
+    const range = { from: "now-999999999999999h", to: "now" };
+
+    expect(stepRange(range, -1, now)).toEqual(range);
+    expect(stepRange(range, 1, now)).toEqual(range);
+  });
+
   it("steps back by the range length as absolute values", () => {
     expect(
       stepRange({ from: "now-24h", to: "now" }, -1, now),

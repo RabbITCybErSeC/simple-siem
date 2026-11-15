@@ -209,6 +209,9 @@ describe("safeNextPath", () => {
     ["an encoded protocol-relative URL", "%2F%2Fevil.example"],
     ["an encoded double slash", "/%2F%2Fevil.example"],
     ["an encoded scheme after a slash", "/%6Aavascript%3Aalert(1)"],
+    ["a tab after the first slash", "/\t/evil.example"],
+    ["a newline after the first slash", "/\n/evil.example"],
+    ["a carriage return at the end", "/cases\r"],
   ])("rejects %s", (_label, next) => {
     expect(safeNextPath(next)).toBe("/cases");
   });
@@ -217,12 +220,14 @@ describe("safeNextPath", () => {
     expect(safeNextPath(null)).toBe("/cases");
   });
 
-  it.each(["/cases", "/cases?status=open", "/nope#details"])(
-    "follows the same-origin path %s",
-    (next) => {
-      expect(safeNextPath(next)).toBe(next);
-    },
-  );
+  it.each([
+    "/cases",
+    "/cases?status=open",
+    "/nope#details",
+    "/cases?status=open#x",
+  ])("follows the same-origin path %s", (next) => {
+    expect(safeNextPath(next)).toBe(next);
+  });
 });
 
 describe("LoginPage", () => {

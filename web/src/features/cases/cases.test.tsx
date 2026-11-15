@@ -151,6 +151,7 @@ function stubApi(
     counts?: Responder;
     histogram?: Responder;
     detail?: Responder;
+    assign?: Responder;
     alerts?: Responder;
     timeline?: Responder;
     bulkClose?: Responder;
@@ -193,6 +194,9 @@ function stubApi(
       }
 
       const detail = /^\/api\/v1\/cases\/([^/]+)$/.exec(url.pathname);
+      if (detail !== null && init?.method === "PATCH") {
+        return (responders.assign ?? defaultDetail)(url);
+      }
       if (detail !== null) {
         return (responders.detail ?? defaultDetail)(url);
       }
@@ -519,6 +523,52 @@ describe("Cases page", () => {
     await waitFor(() => {
       expect(listRequests).toBe(2);
     });
+  });
+
+  it("shows an alert with Retry when the histogram fails", async () => {
+    let histogramCalls = 0;
+    const { recorded } = renderCases("/cases", {
+      histogram: () => {
+        histogramCalls += 1;
+        return histogramCalls === 1
+          ? jsonResponse(
+              {
+                error: {
+                  code: "INTERNAL_ERROR",
+                  message: "boom",
+                  details: {},
+                },
+              },
+              500,
+            )
+          : jsonResponse(HISTOGRAM);
+      },
+    });
+
+    expect(
+      await screen.findByText("Could not load the trend."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("No cases in this range."),
+    ).not.toBeInTheDocument();
+    const before = recorded.filter((request) =>
+      request.path.startsWith("/api/v1/cases/histogram"),
+    ).length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => {
+      expect(
+        recorded.filter((request) =>
+          request.path.startsWith("/api/v1/cases/histogram"),
+        ).length,
+      ).toBeGreaterThan(before);
+    });
+    expect(
+      await screen.findByRole("table", {
+        name: "Cases over time by severity",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("appends the next page with Load more", async () => {
@@ -1524,6 +1574,31 @@ describe("case selection", () => {
     );
   });
 
+  it("keeps the selection cleared after switching filters and back", async () => {
+    renderCases("/cases?scope=all");
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    expect(selectionToolbar()).toHaveTextContent("1 selected");
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^Closed/ }));
+    const closedTable = await screen.findByRole("table", {
+      name: "Cases: Closed, All",
+    });
+    await within(closedTable).findByText("Brute force → success");
+    expect(selectionToolbar()).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^Open/ }));
+    const openTable = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(openTable).findByText("Brute force → success");
+    expect(selectionToolbar()).not.toBeInTheDocument();
+    expect(rowCheckbox(openTable, 312)).toHaveAttribute("aria-checked", "false");
+  });
+
   it("keeps listed ids across Show and drops the ids that left", async () => {
     vi.useFakeTimers({
       shouldAdvanceTime: true,
@@ -1672,6 +1747,8 @@ describe("bulk close", () => {
       ).not.toBeInTheDocument();
     });
     expect(selectionToolbar()).not.toBeInTheDocument();
+    expect(within(caseRow(table, 312)).getByText("Accepted")).toBeInTheDocument();
+    expect(within(caseRow(table, 311)).getByText("Accepted")).toBeInTheDocument();
   });
 
   it("keeps the cases that did not close selected for a retry", async () => {
@@ -1715,6 +1792,106 @@ describe("bulk close", () => {
     });
     expect(rowCheckbox(table, 312)).toHaveAttribute("aria-checked", "false");
     expect(rowCheckbox(table, 311)).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("bulk closes with the version the assign returned", async () => {
+    const { recorded } = renderCases("/cases", {
+      assign: () =>
+        jsonResponse({
+          ...caseDetail(OPEN_CASES[1]),
+          status: "IN_PROGRESS",
+          assignee: { id: USER.id, displayName: USER.displayName },
+          version: 2,
+        }),
+      bulkClose: () =>
+        jsonResponse({
+          results: [{ caseId: "case_311", status: "CLOSED" }],
+        }),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Impossible travel");
+    const row = caseRow(table, 311);
+    row.focus();
+
+    fireEvent.keyDown(row, { key: "a" });
+
+    await waitFor(() => {
+      expect(
+        recorded.filter((request) => request.method === "PATCH"),
+      ).toHaveLength(1);
+    });
+    await waitFor(() => {
+      expect(within(row).getByText("Alice Analyst")).toBeInTheDocument();
+    });
+
+    fireEvent.click(rowCheckbox(table, 311));
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    await waitFor(() => {
+      expect(bulkCloseRequests(recorded)).toHaveLength(1);
+    });
+    expect(bulkCloseRequests(recorded)[0].body).toMatchObject({
+      cases: [{ id: "case_311", version: 2 }],
+    });
+  });
+
+  it("retries a conflicted case with its fresh version", async () => {
+    let attempts = 0;
+    const { recorded } = renderCases("/cases", {
+      bulkClose: () => {
+        attempts += 1;
+        return jsonResponse({
+          results: [
+            {
+              caseId: "case_311",
+              status: attempts === 1 ? "VERSION_CONFLICT" : "CLOSED",
+            },
+          ],
+        });
+      },
+      detail: () =>
+        jsonResponse({
+          ...caseDetail(OPEN_CASES[1]),
+          version: 5,
+        }),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Impossible travel");
+    fireEvent.click(rowCheckbox(table, 311));
+
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+    expect(
+      await within(dialog).findByRole("list", { name: "Bulk close results" }),
+    ).toHaveTextContent("Changed since loaded");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+
+    const retryDialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(retryDialog);
+    fireEvent.click(
+      within(retryDialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    await waitFor(() => {
+      expect(bulkCloseRequests(recorded)).toHaveLength(2);
+    });
+    expect(bulkCloseRequests(recorded)[1].body).toMatchObject({
+      cases: [{ id: "case_311", version: 5 }],
+    });
+    expect(
+      await within(retryDialog).findByRole("status"),
+    ).toHaveTextContent("1 closed, 0 not closed");
   });
 
   it("keeps the form open with a message when the request fails", async () => {

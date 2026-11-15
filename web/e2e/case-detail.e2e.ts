@@ -145,12 +145,12 @@ test("toggles the full page layout and back", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("assigns to me with a and shows the analyst after Show", async ({
+test("assigns to me with a and shows the analyst at once", async ({
   page,
   api,
 }) => {
   await signIn(page);
-  await page.goto("/cases?tab=all&scope=all&refresh=10s");
+  await page.goto("/cases?tab=all&scope=all");
   const table = tableWith(page, "All", "All");
   await expect(table.locator("tbody tr")).toHaveCount(50);
   const row = unassignedOpenRow(page, table);
@@ -171,13 +171,7 @@ test("assigns to me with a and shows the analyst after Show", async ({
     .toBe(true);
   await expect(page.getByRole("alert")).toHaveCount(0);
 
-  await page.clock.runFor(10_000);
-  const banner = page
-    .getByRole("status")
-    .filter({ hasText: "new or updated case" });
-  await expect(banner).toBeVisible();
-  await banner.getByRole("button", { name: "Show" }).click();
-
+  // The returned case replaces the row in place: no refresh banner is needed.
   await expect(
     rowForNumber(page, number).getByRole("cell", {
       name: "Alice Analyst",

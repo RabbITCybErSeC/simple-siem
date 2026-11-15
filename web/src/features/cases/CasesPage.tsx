@@ -141,14 +141,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const [pendingChanges, setPendingChanges] = useState(0);
   const [rowAssignFailure, setRowAssignFailure] =
     useState<CaseActionFailure | null>(null);
-  const filterKey = [
-    state.tab,
-    state.scope,
-    state.range.from,
-    state.range.to,
-    state.field,
-    state.sort,
-  ].join("|");
+  const filterKey = queueFilterKey(state);
   const [selection, setSelection] = useState<CaseSelection>({
     filterKey,
     ids: new Set(),
@@ -182,12 +175,23 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
         ? caseQueueSearch(next)
         : caseDetailSearch(next, detailState);
     // Radix tabs can report the same selection twice (focus and pointer);
-    // one history entry per view is what Back steps through.
+    // one history entry per view is what Back steps through. window.location
+    // is already updated by the first push, unlike the rendered router state.
     if (sameSearch(search, window.location.search)) {
       return;
     }
     setPendingChanges(0);
     setRowAssignFailure(null);
+    // The selection belongs to one set of filters: a bulk close must never
+    // act on rows the analyst chose under another filter.
+    const nextFilterKey = queueFilterKey(next);
+    if (nextFilterKey !== filterKey) {
+      setSelection({
+        filterKey: nextFilterKey,
+        ids: new Set(),
+        bulkCloseOpen: false,
+      });
+    }
     setSearchParams(new URLSearchParams(search), { replace });
   };
 
@@ -539,6 +543,8 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
                 histogram={histogramQuery.data}
                 timeZone={timeZone}
                 loading={histogramQuery.isPending}
+                error={histogramQuery.isError}
+                onRetry={() => void histogramQuery.refetch()}
                 onZoom={(range) => updateState({ range }, false)}
               />
             </div>
@@ -689,6 +695,18 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
       />
     </>
   );
+}
+
+/** The filters the selection and its bulk action belong to. */
+function queueFilterKey(state: CaseQueueState): string {
+  return [
+    state.tab,
+    state.scope,
+    state.range.from,
+    state.range.to,
+    state.field,
+    state.sort,
+  ].join("|");
 }
 
 function layoutGridClass(layout: CaseDetailLayout): string {
