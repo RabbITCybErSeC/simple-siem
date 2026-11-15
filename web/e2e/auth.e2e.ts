@@ -10,39 +10,19 @@ import {
   VIEWPORTS,
 } from "./support/test.ts";
 
-interface BrowserStorage {
-  length: number;
-  key(index: number): string | null;
-  getItem(key: string): string | null;
-}
-
-type BrowserKeyframe = Record<string, unknown>;
-
-interface BrowserAnimation {
-  effect: { getKeyframes(): BrowserKeyframe[] } | null;
-  playState: string;
-}
-
-interface BrowserGlobals {
-  localStorage: BrowserStorage;
-  sessionStorage: BrowserStorage;
-  document: {
-    cookie: string;
-    getAnimations(): BrowserAnimation[];
-  };
-}
-
 const ANALYST = TEST_USERS.analyst;
 const LIMITED_EMAIL = "limited@example.test";
 
-function runningAnimationKeyframes(page: Page): Promise<BrowserKeyframe[][]> {
-  return page.evaluate(() => {
-    const browser = globalThis as unknown as BrowserGlobals;
-    return browser.document
+function runningAnimationKeyframes(page: Page): Promise<Keyframe[][]> {
+  return page.evaluate(() =>
+    document
       .getAnimations()
       .filter((animation) => animation.playState === "running")
-      .map((animation) => animation.effect?.getKeyframes() ?? []);
-  });
+      .map((animation) => {
+        const effect = animation.effect;
+        return effect instanceof KeyframeEffect ? effect.getKeyframes() : [];
+      }),
+  );
 }
 
 test("a signed-out visitor is sent to login with the next path", async ({
@@ -75,8 +55,7 @@ test("signs in with the keyboard and keeps tokens out of storage", async ({
   await expect(page).toHaveURL(/\/cases$/);
 
   const storage = await page.evaluate(() => {
-    const browser = globalThis as unknown as BrowserGlobals;
-    const values = (store: BrowserStorage) => {
+    const values = (store: Storage) => {
       const items: string[] = [];
       for (let index = 0; index < store.length; index += 1) {
         const key = store.key(index);
@@ -87,9 +66,9 @@ test("signs in with the keyboard and keeps tokens out of storage", async ({
       return items;
     };
     return {
-      local: values(browser.localStorage),
-      session: values(browser.sessionStorage),
-      cookie: browser.document.cookie,
+      local: values(localStorage),
+      session: values(sessionStorage),
+      cookie: document.cookie,
     };
   });
   const stored = [...storage.local, ...storage.session, storage.cookie].join(

@@ -194,7 +194,7 @@ test-es: es toolchain
 	$(MAKE) --no-print-directory test-es-run
 
 test-es-run:
-	$(RUN) $(TOOLCHAIN_IMAGE) go test -count=1 -tags elasticsearch ./internal/fetcher/... ./internal/pipeline/...
+	$(RUN) $(TOOLCHAIN_IMAGE) go test -count=1 -tags elasticsearch ./internal/fetcher/... ./internal/pipeline/... ./cmd/simple-siem/...
 
 test-es8: es8 toolchain
 	@set +e; \
@@ -207,6 +207,16 @@ lint: network toolchain web/node_modules
 	$(RUN) $(TOOLCHAIN_IMAGE) golangci-lint run
 	@if grep -rEln "from ['\"]cn['\"]" web/src; then echo "lint: the files above import the npm package cn; use @/lib/utils (see docs/frontend.md)" >&2; exit 1; fi; if grep -n '"cn":' web/package.json; then echo "lint: web/package.json declares the npm package cn; remove it" >&2; exit 1; fi
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck'
+# SHA pins stop a moved tag from changing what CI runs.
+	$(RUN) $(TOOLCHAIN_IMAGE) sh -c 'govulncheck ./... && actionlint && { \
+		unpinned=$$(grep -nHE "^[[:space:]]*(-[[:space:]]*)?uses:" .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
+			| grep -vE "uses:[[:space:]]*\"?(\./[^[:space:]]*|docker://[^[:space:]]+@sha256:[0-9a-f]{64}|[^@[:space:]\"]+@[0-9a-f]{40})\"?([[:space:]]|$$)"); \
+		if [ -n "$$unpinned" ]; then \
+			echo "$$unpinned" | sed -E "s/^([^:]+:[0-9]+):.*/\1: action not pinned to a full commit SHA/" >&2; \
+			exit 1; \
+		fi; \
+	}'
+	$(WEB_RUN) $(TOOLCHAIN_IMAGE) pnpm audit --prod
 
 build: network toolchain web/node_modules
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm build'

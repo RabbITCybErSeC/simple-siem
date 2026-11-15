@@ -59,15 +59,22 @@ export async function openCases(page: Page): Promise<Locator> {
   return table;
 }
 
+/** Picks an option of a Radix Select; its listbox renders in a portal on the page. */
+export async function chooseOption(
+  page: Page,
+  combobox: Locator,
+  optionName: string,
+): Promise<void> {
+  await combobox.click();
+  await page.getByRole("option", { name: optionName, exact: true }).click();
+}
+
 export async function storeSidebar(
   page: Page,
   collapsed: boolean,
 ): Promise<void> {
   await page.addInitScript((isCollapsed) => {
-    const browser = globalThis as unknown as {
-      localStorage: { setItem: (key: string, value: string) => void };
-    };
-    browser.localStorage.setItem(
+    localStorage.setItem(
       "simple-siem.sidebar",
       isCollapsed ? "collapsed" : "expanded",
     );
@@ -78,16 +85,10 @@ export async function expectNoSideScroll(
   page: Page,
   message = "the document is no wider than the viewport",
 ): Promise<void> {
-  const { scrollWidth, innerWidth } = await page.evaluate(() => {
-    const browser = globalThis as unknown as {
-      document: { documentElement: { scrollWidth: number } };
-      innerWidth: number;
-    };
-    return {
-      scrollWidth: browser.document.documentElement.scrollWidth,
-      innerWidth: browser.innerWidth,
-    };
-  });
+  const { scrollWidth, innerWidth } = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    innerWidth: window.innerWidth,
+  }));
   expect(scrollWidth, message).toBeLessThanOrEqual(innerWidth);
 }
 

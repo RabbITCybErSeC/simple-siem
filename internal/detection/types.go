@@ -72,16 +72,33 @@ const (
 	RunStatusTimedOut RunStatus = "TIMED_OUT"
 )
 
+// RunOptions changes how one run treats its proposals.
+type RunOptions struct {
+	Shadow bool // store proposals even when the detection is ENABLED
+}
+
+// RunMode is whether a run created alerts or stored proposals.
+type RunMode string
+
+const (
+	RunModeEnabled RunMode = "ENABLED"
+	RunModeShadow  RunMode = "SHADOW"
+)
+
 // RunResult describes one run after it was evaluated and recorded.
 type RunResult struct {
-	RunID       string
-	Status      RunStatus
-	WindowStart time.Time
-	WindowEnd   time.Time
-	Revision    int
-	RowsRead    int
-	Proposals   int
-	Error       string
+	RunID                 string
+	Status                RunStatus
+	WindowStart           time.Time
+	WindowEnd             time.Time
+	Revision              int
+	RowsRead              int
+	Proposals             int
+	Mode                  RunMode
+	AlertsCreated         int
+	AlertsMerged          int
+	ProposalsDeduplicated int
+	Error                 string
 }
 
 // Identity is an alert proposal's coalescing key: the hash and the normalized
@@ -186,18 +203,22 @@ type evaluation struct {
 
 // runRow is one detection_runs row.
 type runRow struct {
-	ID               string     `gorm:"column:id;default:uuidv7()"`
-	DetectionID      string     `gorm:"column:detection_id"`
-	DetectionVersion string     `gorm:"column:detection_version"`
-	Status           string     `gorm:"column:status"`
-	WindowStart      time.Time  `gorm:"column:window_start"`
-	WindowEnd        time.Time  `gorm:"column:window_end"`
-	Revision         int        `gorm:"column:revision"`
-	RowsRead         int        `gorm:"column:rows_read"`
-	Proposals        int        `gorm:"column:proposals"`
-	Error            *string    `gorm:"column:error"`
-	StartedAt        time.Time  `gorm:"column:started_at;autoCreateTime:false"`
-	FinishedAt       *time.Time `gorm:"column:finished_at;autoUpdateTime:false;->"`
+	ID                    string     `gorm:"column:id;default:uuidv7()"`
+	DetectionID           string     `gorm:"column:detection_id"`
+	DetectionVersion      string     `gorm:"column:detection_version"`
+	Status                string     `gorm:"column:status"`
+	WindowStart           time.Time  `gorm:"column:window_start"`
+	WindowEnd             time.Time  `gorm:"column:window_end"`
+	Revision              int        `gorm:"column:revision"`
+	RowsRead              int        `gorm:"column:rows_read"`
+	Proposals             int        `gorm:"column:proposals"`
+	Mode                  string     `gorm:"column:mode"`
+	AlertsCreated         int        `gorm:"column:alerts_created"`
+	AlertsMerged          int        `gorm:"column:alerts_merged"`
+	ProposalsDeduplicated int        `gorm:"column:proposals_deduplicated"`
+	Error                 *string    `gorm:"column:error"`
+	StartedAt             time.Time  `gorm:"column:started_at;autoCreateTime:false"`
+	FinishedAt            *time.Time `gorm:"column:finished_at;autoUpdateTime:false;->"`
 }
 
 func (runRow) TableName() string {

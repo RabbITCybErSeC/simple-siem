@@ -1,37 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, openCases, signIn, test } from "./support/test.ts";
 
-// The test tsconfig has Node types only, like auth.e2e.ts: a page callback
-// reaches the browser's globals through one cast.
-interface AnimatedElement {
-  getAnimations(): unknown[];
-}
-
-interface ScrollableElement {
-  clientWidth: number;
-  scrollLeft: number;
-  scrollWidth: number;
-}
-
-interface BrowserStyle {
-  backgroundColor: string;
-  getPropertyValue(name: string): string;
-}
-
-interface BrowserProbe {
-  remove(): void;
-  style: { backgroundColor: string };
-}
-
-interface BrowserGlobals {
-  document: {
-    body: { append(node: unknown): void };
-    createElement(tagName: string): BrowserProbe;
-    documentElement: unknown;
-  };
-  getComputedStyle(element: unknown): BrowserStyle;
-}
-
 // Tests that do not measure the queue table only need the shell and heading.
 async function openShell(page: Page): Promise<void> {
   await signIn(page);
@@ -43,18 +12,17 @@ function readComputedProperty(
   locator: Locator,
   property: string,
 ): Promise<string> {
-  return locator.evaluate((element, name) => {
-    const browser = globalThis as unknown as BrowserGlobals;
-    return browser.getComputedStyle(element).getPropertyValue(name);
-  }, property);
+  return locator.evaluate(
+    (element, name) => getComputedStyle(element).getPropertyValue(name),
+    property,
+  );
 }
 
 function highlightedItemIndexes(items: Locator): Promise<number[]> {
   return items.evaluateAll((elements) => {
-    const browser = globalThis as unknown as BrowserGlobals;
     const transparent = ["transparent", "rgba(0, 0, 0, 0)"];
     return elements.flatMap((element, index) =>
-      transparent.includes(browser.getComputedStyle(element).backgroundColor)
+      transparent.includes(getComputedStyle(element).backgroundColor)
         ? []
         : [index],
     );
@@ -126,15 +94,7 @@ test("the selected Status tab shows its underline", async ({ page }) => {
   await expect(unselected).toHaveAttribute("aria-selected", "false");
 
   const underlineOpacity = (tab: Locator): Promise<string> =>
-    tab.evaluate((element) => {
-      const browser = globalThis as unknown as {
-        getComputedStyle(
-          target: unknown,
-          pseudoElement: string,
-        ): { opacity: string };
-      };
-      return browser.getComputedStyle(element, "::after").opacity;
-    });
+    tab.evaluate((element) => getComputedStyle(element, "::after").opacity);
 
   expect(
     await underlineOpacity(selected),
@@ -187,15 +147,14 @@ test("a checked row checkbox is filled with the primary colour", async ({
   await expect(checkbox).toHaveAttribute("data-state", "checked");
 
   const expected = await page.evaluate(() => {
-    const browser = globalThis as unknown as BrowserGlobals;
     // Resolve the token the way the browser resolves it for bg-primary.
-    const primary = browser
-      .getComputedStyle(browser.document.documentElement)
-      .getPropertyValue("--primary");
-    const probe = browser.document.createElement("div");
+    const primary = getComputedStyle(document.documentElement).getPropertyValue(
+      "--primary",
+    );
+    const probe = document.createElement("div");
     probe.style.backgroundColor = primary;
-    browser.document.body.append(probe);
-    const resolved = browser.getComputedStyle(probe).backgroundColor;
+    document.body.append(probe);
+    const resolved = getComputedStyle(probe).backgroundColor;
     probe.remove();
     return resolved;
   });
@@ -218,8 +177,7 @@ test("the shortcuts dialog content runs its open animation", async ({
 
   // Measured before the 100 ms open animation ends.
   const animations = await content.evaluate(
-    (element) =>
-      (element as unknown as AnimatedElement).getAnimations().length,
+    (element) => element.getAnimations().length,
   );
   expect(
     animations,
@@ -264,13 +222,10 @@ test("the Alerts table region takes keyboard focus and scrolls sideways", async 
   const region = page.getByRole("region", { name: "Alerts" });
   await expect(region, "the Alerts table is a labelled region").toBeVisible();
 
-  const overflow = await region.evaluate((element) => {
-    const scrollable = element as unknown as ScrollableElement;
-    return {
-      scrollWidth: scrollable.scrollWidth,
-      clientWidth: scrollable.clientWidth,
-    };
-  });
+  const overflow = await region.evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
   expect(
     overflow.scrollWidth,
     "the Alerts region is wider than its column, so it scrolls",
@@ -287,10 +242,7 @@ test("the Alerts table region takes keyboard focus and scrolls sideways", async 
   await page.keyboard.press("ArrowRight");
   await expect
     .poll(
-      () =>
-        region.evaluate(
-          (element) => (element as unknown as ScrollableElement).scrollLeft,
-        ),
+      () => region.evaluate((element) => element.scrollLeft),
       { message: "ArrowRight scrolls the focused Alerts region" },
     )
     .toBeGreaterThan(0);

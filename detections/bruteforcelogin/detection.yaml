@@ -7,7 +7,7 @@ description: >
 owner: secops
 severity: HIGH
 tags: [attack.t1110]
-initialStatus: SHADOW          # status on first registration
+initialStatus: ENABLED          # the M1 detection; new detections keep the SHADOW default
 
 inputs:
   - dataset: auth_events

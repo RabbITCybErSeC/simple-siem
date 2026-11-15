@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expectAccessible } from "./support/accessibility.ts";
-import { expect, signIn, test } from "./support/test.ts";
+import { chooseOption, expect, signIn, test } from "./support/test.ts";
 
 async function settleTheme(
   page: Page,
@@ -221,9 +221,11 @@ test("the close and bulk close dialogs are accessible in both themes", async ({
     .getByRole("radiogroup", { name: "Outcome" })
     .getByText("Accepted", { exact: true })
     .click();
-  await bulkDialog
-    .getByRole("combobox", { name: "Closure reason", exact: true })
-    .selectOption({ label: "Authorized activity" });
+  await chooseOption(
+    page,
+    bulkDialog.getByRole("combobox", { name: "Closure reason", exact: true }),
+    "Authorized activity",
+  );
   await bulkDialog.getByLabel("Conclusion").fill("Pentest, SEC-41.");
   await bulkDialog
     .getByRole("button", { name: "Close selected cases" })

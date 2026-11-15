@@ -128,8 +128,21 @@ function caseDetail(summary: CaseSummary): CaseDetail {
 const ALL_CASES = [...OPEN_CASES, CLOSED_CASE];
 
 class ResizeObserverStub {
-  observe() {}
+  static instances: ResizeObserverStub[] = [];
+  readonly callback: ResizeObserverCallback;
+  readonly targets: Element[] = [];
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    ResizeObserverStub.instances.push(this);
+  }
+
+  observe(target: Element) {
+    this.targets.push(target);
+  }
+
   unobserve() {}
+
   disconnect() {}
 }
 
@@ -275,7 +288,13 @@ function caseRow(table: HTMLElement, caseNumber: number): HTMLElement {
   return row;
 }
 
+async function chooseOption(trigger: HTMLElement, name: string): Promise<void> {
+  fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("option", { name }));
+}
+
 beforeEach(() => {
+  ResizeObserverStub.instances = [];
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   Element.prototype.scrollIntoView = vi.fn();
   HTMLElement.prototype.hasPointerCapture = vi.fn(() => false);
@@ -884,10 +903,7 @@ describe("Cases page", () => {
     await screen.findByRole("table", { name: "Cases: Open, Mine" });
 
     const sort = screen.getByRole("combobox", { name: "Sort" });
-    fireEvent.pointerDown(sort, { button: 0, pointerType: "mouse" });
-    fireEvent.click(
-      await screen.findByRole("option", { name: "Oldest waiting first" }),
-    );
+    await chooseOption(sort, "Oldest waiting first");
 
     await waitFor(() => {
       expect(listRequests()).toContain(
@@ -1656,6 +1672,111 @@ describe("case detail route and layout", () => {
   });
 });
 
+describe("trend chart and the list pane width", () => {
+  // Recharts and the time range picker observe their own boxes; the list pane
+  // is the one whose target is [data-case-list].
+  function reportListPaneWidth(width: number): void {
+    const pane = document.querySelector("[data-case-list]");
+    if (pane === null) {
+      throw new Error("the list pane is not rendered");
+    }
+    const observer = ResizeObserverStub.instances.find((candidate) =>
+      candidate.targets.includes(pane),
+    );
+    if (observer === undefined) {
+      throw new Error("no ResizeObserver observes the list pane");
+    }
+    const entry = {
+      target: pane,
+      contentRect: { width },
+    } as ResizeObserverEntry;
+    act(() => observer.callback([entry], observer));
+  }
+
+  it("renders the trend chart before the list pane is measured", async () => {
+    renderCases();
+
+    expect(
+      await screen.findByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+  });
+
+  it("drops the trend chart while the list pane has no width and restores it", async () => {
+    renderCases("/cases/312?scope=all");
+    expect(
+      await screen.findByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+
+    reportListPaneWidth(0);
+    expect(
+      screen.queryByRole("region", { name: "Cases over time by severity" }),
+    ).toBeNull();
+
+    reportListPaneWidth(640);
+    expect(
+      screen.getByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+  });
+
+  it("restores the trend chart immediately when Escape closes a collapsed split", async () => {
+    renderCases("/cases/312?scope=all");
+    const heading = await screen.findByRole("heading", {
+      name: "#312 Brute force → success",
+      level: 2,
+    });
+    expect(
+      await screen.findByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+
+    reportListPaneWidth(0);
+    expect(
+      screen.queryByRole("region", { name: "Cases over time by severity" }),
+    ).toBeNull();
+
+    fireEvent.keyDown(heading, { key: "Escape" });
+
+    expect(
+      screen.getByRole("region", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not refetch the histogram while a split pane is collapsed", async () => {
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      now: new Date("2026-11-09T12:00:00Z"),
+    });
+    try {
+      const { requests } = renderCases("/cases/312?scope=all&refresh=30s");
+      await screen.findByRole("heading", {
+        name: "#312 Brute force → success",
+        level: 2,
+      });
+      reportListPaneWidth(0);
+      const histogramRequests = () =>
+        requests.filter((request) =>
+          request.startsWith("/api/v1/cases/histogram?"),
+        ).length;
+      const histogramBefore = histogramRequests();
+      const countsBefore = requests.filter((request) =>
+        request.startsWith("/api/v1/cases/counts?"),
+      ).length;
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await waitFor(() => {
+        expect(
+          requests.filter((request) =>
+            request.startsWith("/api/v1/cases/counts?"),
+          ).length,
+        ).toBeGreaterThan(countsBefore);
+      });
+      expect(histogramRequests()).toBe(histogramBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 function rowCheckbox(table: HTMLElement, caseNumber: number): HTMLElement {
   return within(caseRow(table, caseNumber)).getByRole("checkbox", {
     name: `Select case #${caseNumber}`,
@@ -1898,10 +2019,10 @@ async function openBulkCloseDialog(): Promise<HTMLElement> {
 
 async function fillBulkClosureFields(dialog: HTMLElement): Promise<void> {
   fireEvent.click(within(dialog).getByRole("radio", { name: "Accepted" }));
-  fireEvent.change(
-    within(dialog).getByRole("combobox", { name: "Closure reason" }),
-    { target: { value: "AUTHORIZED_ACTIVITY" } },
-  );
+  const reason = within(dialog).getByRole("combobox", {
+    name: "Closure reason",
+  });
+  await chooseOption(reason, "Authorized activity");
   fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
     target: { value: "Pentest, SEC-41." },
   });

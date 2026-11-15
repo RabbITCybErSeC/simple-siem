@@ -12,52 +12,6 @@ import {
 
 type Rgba = [number, number, number, number];
 
-interface ScrollableElement {
-  scrollHeight: number;
-  scrollTop: number;
-}
-
-interface BrowserElement {
-  getAttribute(name: string): string | null;
-  querySelectorAll(selector: string): ArrayLike<BrowserElement>;
-  textContent: string | null;
-}
-
-interface ColourContext {
-  fillStyle: string;
-  clearRect(x: number, y: number, width: number, height: number): void;
-  fillRect(x: number, y: number, width: number, height: number): void;
-  getImageData(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-  ): { data: ArrayLike<number> };
-}
-
-interface ColourCanvas {
-  width: number;
-  height: number;
-  getContext(
-    type: string,
-    options?: { willReadFrequently?: boolean },
-  ): ColourContext | null;
-}
-
-interface ColourGlobals {
-  document: {
-    createElement(tagName: string): ColourCanvas;
-  };
-  getComputedStyle(
-    element: unknown,
-    pseudoElement?: string,
-  ): {
-    backgroundColor: string;
-    color: string;
-    width: string;
-  };
-}
-
 interface ScopeColour {
   label: string;
   checked: boolean;
@@ -108,8 +62,7 @@ async function controlHeights(page: Page): Promise<Record<string, number>> {
 
 function readScopeColours(scope: Locator): Promise<ScopeColour[]> {
   return scope.evaluate((group) => {
-    const browser = globalThis as unknown as ColourGlobals;
-    const canvas = browser.document.createElement("canvas");
+    const canvas = document.createElement("canvas");
     canvas.width = 1;
     canvas.height = 1;
     const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -125,18 +78,15 @@ function readScopeColours(scope: Locator): Promise<ScopeColour[]> {
       );
       return `rgba(${red}, ${green}, ${blue}, ${alpha / 255})`;
     };
-    const element = group as unknown as BrowserElement;
     const groupBackground = normalise(
-      browser.getComputedStyle(group).backgroundColor,
+      getComputedStyle(group).backgroundColor,
     );
-    return Array.from(element.querySelectorAll('[role="radio"]')).map(
+    return Array.from(group.querySelectorAll('[role="radio"]')).map(
       (option) => ({
         label: (option.textContent ?? "").trim(),
         checked: option.getAttribute("aria-checked") === "true",
-        text: normalise(browser.getComputedStyle(option).color),
-        background: normalise(
-          browser.getComputedStyle(option).backgroundColor,
-        ),
+        text: normalise(getComputedStyle(option).color),
+        background: normalise(getComputedStyle(option).backgroundColor),
         groupBackground,
       }),
     );
@@ -230,6 +180,18 @@ test("shows my open cases, counts, and the trend chart", async ({
   expect(parameters.get("scope")).toBe("mine");
   expect(parameters.get("sort")).toBe("lastEventAt:desc");
   expect(parameters.has("from")).toBe(false);
+});
+
+test("opens the Sort select under the real CSP", async ({ page }) => {
+  await openCases(page);
+
+  const sort = page.getByRole("combobox", { name: "Sort" });
+  await sort.click();
+  await expect(page.getByRole("listbox")).toBeVisible();
+  await page.getByRole("option", { name: "Oldest waiting first" }).click();
+
+  await expect(sort).toHaveText("Oldest waiting first");
+  await expect(page).toHaveURL(/[?&]sort=createdAt(%3A|:)asc/);
 });
 
 test("restores a shared link and falls back for an invalid value", async ({
@@ -582,28 +544,21 @@ test("the split panes scroll on their own", async ({ page }) => {
   const queuePane = page.locator("[data-case-list]");
   const detailPane = page.locator("[data-case-list] + div");
   await queuePane.evaluate((element) => {
-    (element as unknown as ScrollableElement).scrollTop = 120;
+    element.scrollTop = 120;
   });
   const queueScroll = await queuePane.evaluate(
-    (element) => (element as unknown as ScrollableElement).scrollTop,
+    (element) => element.scrollTop,
   );
   expect(queueScroll, "the queue pane scrolled").toBeGreaterThan(0);
 
   await detailPane.evaluate((element) => {
-    const pane = element as unknown as ScrollableElement;
-    pane.scrollTop = pane.scrollHeight;
+    element.scrollTop = element.scrollHeight;
   });
   await expect
-    .poll(() =>
-      detailPane.evaluate(
-        (element) => (element as unknown as ScrollableElement).scrollTop,
-      ),
-    )
+    .poll(() => detailPane.evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0);
   expect(
-    await queuePane.evaluate(
-      (element) => (element as unknown as ScrollableElement).scrollTop,
-    ),
+    await queuePane.evaluate((element) => element.scrollTop),
     "scrolling the detail leaves the queue where it was",
   ).toBe(queueScroll);
 });
@@ -652,6 +607,23 @@ test("an open case fills the main area below the split width", async ({
   }
 });
 
+test("a case opened by URL hides the queue without a Recharts warning", async ({
+  page,
+}) => {
+  await page.setViewportSize(VIEWPORTS.tablet);
+  await signIn(page);
+  await page.goto("/cases/7");
+  await expect(page.getByRole("region", { name: "Case #7" })).toBeVisible();
+  await expect(
+    page.locator("[data-case-list]"),
+    "at the tablet width the queue makes room for the case",
+  ).toBeHidden();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-case-list]")).toBeVisible();
+  await expect(page.locator(".recharts-wrapper")).toBeVisible();
+});
+
 test("the select-all checkbox shows a minus for a partial selection", async ({
   page,
 }) => {
@@ -671,10 +643,9 @@ test("the select-all checkbox shows a minus for a partial selection", async ({
   await expect(selectAll).toHaveAttribute("aria-checked", "mixed");
   await expect(selectAll.locator("svg"), "the check mark is hidden").toBeHidden();
 
-  const minusWidth = await selectAll.evaluate((element) => {
-    const browser = globalThis as unknown as ColourGlobals;
-    return browser.getComputedStyle(element, "::before").width;
-  });
+  const minusWidth = await selectAll.evaluate(
+    (element) => getComputedStyle(element, "::before").width,
+  );
   expect(
     Number.parseFloat(minusWidth),
     "the select-all minus has a width",

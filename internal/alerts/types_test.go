@@ -279,13 +279,7 @@ func newAlertRow(detectionID, identityHash string) alertRow {
 
 func insertRun(t *testing.T, db *gorm.DB, detectionID string) string {
 	t.Helper()
-	var runID string
-	err := db.Raw(`
-		INSERT INTO detection_runs
-			(detection_id, detection_version, status, window_start, window_end, revision, started_at)
-		VALUES (?, '2026.11.14', 'OK', ?, ?, 1, ?)
-		RETURNING id::text`,
-		detectionID, testEventTime, testEventTime.Add(time.Hour), testEventTime).Scan(&runID).Error
+	runID, err := insertRunRow(db, detectionID, "")
 	if err != nil {
 		t.Fatalf("insert detection run: %v", err)
 	}
@@ -293,9 +287,25 @@ func insertRun(t *testing.T, db *gorm.DB, detectionID string) string {
 }
 
 func insertRunWithMode(db *gorm.DB, detectionID, mode string) error {
-	return db.Exec(`
-		INSERT INTO detection_runs
-			(detection_id, detection_version, status, window_start, window_end, revision, started_at, mode)
-		VALUES (?, '2026.11.14', 'OK', ?, ?, 1, ?, ?)`,
-		detectionID, testEventTime, testEventTime.Add(time.Hour), testEventTime, mode).Error
+	_, err := insertRunRow(db, detectionID, mode)
+	return err
+}
+
+// insertRunRow inserts one detection_runs row. An empty mode leaves the column
+// at its database default.
+func insertRunRow(db *gorm.DB, detectionID, mode string) (string, error) {
+	columns := "detection_id, detection_version, status, window_start, window_end, revision, started_at"
+	values := "?, '2026.11.14', 'OK', ?, ?, 1, ?"
+	arguments := []any{detectionID, testEventTime, testEventTime.Add(time.Hour), testEventTime}
+	if mode != "" {
+		columns += ", mode"
+		values += ", ?"
+		arguments = append(arguments, mode)
+	}
+	var runID string
+	err := db.Raw(
+		"INSERT INTO detection_runs ("+columns+") VALUES ("+values+") RETURNING id::text",
+		arguments...,
+	).Scan(&runID).Error
+	return runID, err
 }

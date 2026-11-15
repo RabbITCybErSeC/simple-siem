@@ -1,6 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCwIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { Button } from "../../components/ui/button";
 import { Label } from "../../components/ui/label";
@@ -131,7 +137,6 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const detailState = parseCaseDetailState(searchParams);
   const listQuery = useCaseList(state);
   const countsQuery = useCaseCounts(state);
-  const histogramQuery = useCaseHistogram(state);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const timeZone = useTimeZone();
@@ -164,8 +169,14 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const firstPageRef = useRef<CaseSummary[] | undefined>(undefined);
   const restoreFocus = useRef(false);
   const tableRef = useRef<CaseTableHandle>(null);
+  const listPaneRef = useRef<HTMLDivElement>(null);
   const pendingRowFocus = useRef<string | undefined>(undefined);
   const pendingAssignments = useRef<Set<string>>(new Set());
+  const listCollapsed = usePaneCollapsed(listPaneRef);
+  const detailOpen = caseNumber !== undefined;
+  const listHidden = detailOpen && detailState.layout === "full";
+  const chartShown = !listHidden && !(detailOpen && listCollapsed);
+  const histogramQuery = useCaseHistogram(state, chartShown);
 
   useEffect(() => {
     stateRef.current = state;
@@ -407,8 +418,6 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   };
 
   const counts = countsQuery.data;
-  const detailOpen = caseNumber !== undefined;
-  const listHidden = detailOpen && detailState.layout === "full";
 
   return (
     <>
@@ -422,6 +431,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
           }
         >
           <div
+            ref={listPaneRef}
             data-case-list
             hidden={listHidden}
             className={listPaneClass(detailOpen, detailState.layout)}
@@ -582,7 +592,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
                 </div>
               </div>
 
-              {listHidden ? null : (
+              {chartShown ? (
                 <div>
                   <TrendChart
                     histogram={histogramQuery.data}
@@ -593,7 +603,7 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
                     onZoom={(range) => updateState({ range }, false)}
                   />
                 </div>
-              )}
+              ) : null}
 
               {caseNumber === undefined && rowAssignFailure !== null ? (
                 <CaseActionAlert
@@ -741,7 +751,29 @@ function listPaneClass(
   if (!detailOpen || layout === "full") {
     return "min-w-0";
   }
-  return `min-w-0 @max-[80rem]:invisible @max-[80rem]:h-0 @max-[80rem]:overflow-hidden ${SPLIT_PANE_HEIGHT}`;
+  return `min-w-0 @max-[80rem]:hidden ${SPLIT_PANE_HEIGHT}`;
+}
+
+/** A hidden pane has width 0; Recharts must not render into that empty box. */
+function usePaneCollapsed(ref: RefObject<HTMLElement | null>): boolean {
+  const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (element === null) {
+      return;
+    }
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry !== undefined) {
+        setCollapsed(entry.contentRect.width === 0);
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref]);
+
+  return collapsed;
 }
 
 function detailPaneClass(layout: CaseDetailLayout): string {

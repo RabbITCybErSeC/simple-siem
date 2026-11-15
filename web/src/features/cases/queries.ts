@@ -77,12 +77,13 @@ export function useCaseCounts(state: CaseQueueState) {
   });
 }
 
-export function useCaseHistogram(state: CaseQueueState) {
+export function useCaseHistogram(state: CaseQueueState, enabled: boolean) {
   const parameters = histogramParams(state).toString();
 
   return useQuery({
     queryKey: ["cases", "histogram", parameters],
     queryFn: () => get<CaseHistogram>(`${CASES_PATH}/histogram?${parameters}`),
+    enabled,
   });
 }
 
