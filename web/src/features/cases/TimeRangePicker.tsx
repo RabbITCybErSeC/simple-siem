@@ -1,5 +1,10 @@
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
+import {
+  CalendarIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+} from "lucide-react";
 import { useState } from "react";
+import type { KeyboardEvent } from "react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -15,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
+import { Separator } from "../../components/ui/separator";
 import type { TimeZoneSetting } from "../shell/types";
 import {
   commonlyUsedRanges,
@@ -116,19 +122,68 @@ export function TimeRangePicker({
     onRangeChange(nextRange);
   }
 
+  function changeQuick(count: string, unit: TimeUnit) {
+    setQuick({ count, unit });
+    if (!/^[1-9]\d*$/.test(count)) {
+      return;
+    }
+    const now = new Date();
+    setDraft({
+      start: draftFromExpression(`now-${Number(count)}${unit}`, timeZone, now),
+      end: draftFromExpression("now", timeZone, now),
+    });
+  }
+
+  function handleQuickKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter" || !quickRangeValid) {
+      return;
+    }
+    event.preventDefault();
+    applyRange({
+      from: `now-${Number(quick.count)}${quick.unit}`,
+      to: "now",
+    });
+  }
+
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Popover open={open} onOpenChange={handleOpenChange}>
-        <PopoverTrigger asChild>
-          <Button variant="outline" size="sm">
-            {rangeLabel(range, timeZone)}
+        <div className="control-group min-w-0 flex-1 sm:flex-none">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Step back"
+            onClick={() => onRangeChange(stepRange(range, -1, new Date()))}
+          >
+            <ChevronLeftIcon aria-hidden="true" />
           </Button>
-        </PopoverTrigger>
-        <PopoverContent align="start" className="w-[22rem]">
+          <PopoverTrigger asChild>
+            <Button
+              variant="ghost"
+              className="min-w-0 flex-1 justify-start gap-2 px-3 font-normal sm:w-44 sm:flex-none xl:w-52"
+            >
+              <CalendarIcon
+                aria-hidden="true"
+                className="text-muted-foreground"
+              />
+              <span className="truncate">{rangeLabel(range, timeZone)}</span>
+            </Button>
+          </PopoverTrigger>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Step forward"
+            onClick={() => onRangeChange(stepRange(range, 1, new Date()))}
+          >
+            <ChevronRightIcon aria-hidden="true" />
+          </Button>
+        </div>
+
+        <PopoverContent align="start" className="w-[26rem] p-0">
           <section
             role="group"
             aria-labelledby="quick-select-heading"
-            className="space-y-2"
+            className="space-y-3 p-3"
           >
             <h2
               id="quick-select-heading"
@@ -142,19 +197,20 @@ export function TimeRangePicker({
                 id="quick-count"
                 type="number"
                 min={1}
-                className="w-16"
+                className="h-8 w-16 [appearance:textfield]"
                 value={quick.count}
                 onChange={(event) =>
-                  setQuick({ ...quick, count: event.target.value })
+                  changeQuick(event.target.value, quick.unit)
                 }
+                onKeyDown={handleQuickKeyDown}
               />
               <Select
                 value={quick.unit}
                 onValueChange={(value) =>
-                  setQuick({ ...quick, unit: value as TimeUnit })
+                  changeQuick(quick.count, value as TimeUnit)
                 }
               >
-                <SelectTrigger size="sm" aria-label="Unit">
+                <SelectTrigger aria-label="Unit">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -165,25 +221,15 @@ export function TimeRangePicker({
                   ))}
                 </SelectContent>
               </Select>
-              <Button
-                size="sm"
-                disabled={!quickRangeValid}
-                onClick={() =>
-                  applyRange({
-                    from: `now-${Number(quick.count)}${quick.unit}`,
-                    to: "now",
-                  })
-                }
-              >
-                Apply
-              </Button>
             </div>
           </section>
+
+          <Separator />
 
           <section
             role="group"
             aria-labelledby="commonly-used-heading"
-            className="space-y-2"
+            className="space-y-3 p-3"
           >
             <h2
               id="commonly-used-heading"
@@ -191,12 +237,13 @@ export function TimeRangePicker({
             >
               Commonly used
             </h2>
-            <div className="flex flex-wrap gap-1">
+            <div className="grid grid-cols-3 gap-1">
               {commonlyUsedRanges.map((option) => (
                 <Button
                   key={option.label}
                   variant="ghost"
                   size="sm"
+                  className="justify-start"
                   onClick={() => applyRange(option.range)}
                 >
                   {option.label}
@@ -206,37 +253,42 @@ export function TimeRangePicker({
           </section>
 
           {recentRanges.length > 0 && (
-            <section
-              role="group"
-              aria-labelledby="recently-used-heading"
-              className="space-y-2"
-            >
-              <h2
-                id="recently-used-heading"
-                className="text-xs font-medium text-muted-foreground"
+            <>
+              <Separator />
+              <section
+                role="group"
+                aria-labelledby="recently-used-heading"
+                className="space-y-3 p-3"
               >
-                Recently used
-              </h2>
-              <div className="flex flex-col items-start gap-1">
-                {recentRanges.map((recent) => (
-                  <Button
-                    key={`${recent.from}-${recent.to}`}
-                    variant="ghost"
-                    size="sm"
-                    className="justify-start"
-                    onClick={() => applyRange(recent)}
-                  >
-                    {rangeLabel(recent, timeZone)}
-                  </Button>
-                ))}
-              </div>
-            </section>
+                <h2
+                  id="recently-used-heading"
+                  className="text-xs font-medium text-muted-foreground"
+                >
+                  Recently used
+                </h2>
+                <div className="flex flex-col items-start gap-1">
+                  {recentRanges.map((recent) => (
+                    <Button
+                      key={`${recent.from}-${recent.to}`}
+                      variant="ghost"
+                      size="sm"
+                      className="justify-start"
+                      onClick={() => applyRange(recent)}
+                    >
+                      {rangeLabel(recent, timeZone)}
+                    </Button>
+                  ))}
+                </div>
+              </section>
+            </>
           )}
+
+          <Separator />
 
           <section
             role="group"
             aria-labelledby="start-end-heading"
-            className="space-y-2"
+            className="space-y-3 p-3"
           >
             <h2
               id="start-end-heading"
@@ -263,6 +315,9 @@ export function TimeRangePicker({
                 {INVALID_RANGE_MESSAGE}
               </p>
             )}
+          </section>
+
+          <div className="flex justify-end border-t p-3">
             <Button
               size="sm"
               disabled={!editedRangeValid}
@@ -273,49 +328,25 @@ export function TimeRangePicker({
             >
               Apply
             </Button>
-          </section>
+          </div>
         </PopoverContent>
       </Popover>
 
-      <div className="flex items-center gap-1">
-        <Button
-          variant="outline"
-          size="icon-sm"
-          aria-label="Step back"
-          onClick={() =>
-            onRangeChange(stepRange(range, -1, new Date()))
-          }
-        >
-          <ChevronLeftIcon aria-hidden="true" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon-sm"
-          aria-label="Step forward"
-          onClick={() => onRangeChange(stepRange(range, 1, new Date()))}
-        >
-          <ChevronRightIcon aria-hidden="true" />
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <Label htmlFor="time-field">Time field</Label>
-        <Select
-          value={field}
-          onValueChange={(value) => onFieldChange(value as TimeField)}
-        >
-          <SelectTrigger id="time-field" size="sm" className="w-32">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {TIME_FIELD_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <Select
+        value={field}
+        onValueChange={(value) => onFieldChange(value as TimeField)}
+      >
+        <SelectTrigger aria-label="Time field" className="w-32">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {TIME_FIELD_OPTIONS.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
@@ -338,14 +369,15 @@ function EndpointEditor({
   }
 
   return (
-    <fieldset className="rounded-lg border border-border p-2">
-      <legend className="px-1 text-xs font-medium">{label}</legend>
-      <div className="flex flex-wrap items-center gap-2">
+    <fieldset>
+      <legend className="text-xs font-medium">{label}</legend>
+      <div className="segmented mt-2">
         {(Object.keys(MODE_LABELS) as EndpointMode[]).map((mode) => (
-          <label key={mode} className="flex items-center gap-1 text-xs">
+          <label key={mode} className="segmented-item">
             <input
               type="radio"
               name={`${id}-mode`}
+              className="sr-only"
               checked={draft.mode === mode}
               onChange={() => edit({ mode })}
             />

@@ -64,7 +64,14 @@ function applyCommonlyUsed(label: string): void {
 }
 
 describe("TimeRangePicker", () => {
-  it("applies a quick select range as a relative expression", () => {
+  it("has exactly one Apply button", () => {
+    renderPicker();
+    openPicker();
+
+    expect(screen.getAllByRole("button", { name: "Apply" })).toHaveLength(1);
+  });
+
+  it("applies a quick select range with the one Apply", () => {
     const { onRangeChange } = renderPicker();
     openPicker();
 
@@ -72,7 +79,7 @@ describe("TimeRangePicker", () => {
     fireEvent.change(within(quickSelect).getByLabelText("Last"), {
       target: { value: "4" },
     });
-    fireEvent.click(within(quickSelect).getByRole("button", { name: "Apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     expect(onRangeChange).toHaveBeenCalledWith({
       from: "now-4h",
@@ -81,6 +88,21 @@ describe("TimeRangePicker", () => {
     expect(
       screen.queryByRole("group", { name: "Quick select" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("applies the quick select range when Enter is pressed in the count", () => {
+    const { onRangeChange } = renderPicker();
+    openPicker();
+
+    const quickSelect = screen.getByRole("group", { name: "Quick select" });
+    const count = within(quickSelect).getByLabelText("Last");
+    fireEvent.change(count, { target: { value: "4" } });
+    fireEvent.keyDown(count, { key: "Enter" });
+
+    expect(onRangeChange).toHaveBeenCalledWith({
+      from: "now-4h",
+      to: "now",
+    });
   });
 
   it("applies a commonly used range", () => {
@@ -187,13 +209,32 @@ describe("TimeRangePicker", () => {
       target: { value: "2026-11-08T10:00:00" },
     });
 
-    const apply = within(startAndEnd).getByRole("button", { name: "Apply" });
+    const apply = screen.getByRole("button", { name: "Apply" });
     const message = within(startAndEnd).getByText(
       "The end must be after the start.",
     );
 
     expect(apply).toBeDisabled();
     expect(apply).toHaveAttribute("aria-describedby", message.id);
+  });
+
+  it("keeps Absolute, Relative, and Now radios for both endpoints", () => {
+    renderPicker();
+    openPicker();
+
+    const startAndEnd = screen.getByRole("group", {
+      name: "Start and end",
+    });
+    for (const endpointLabel of ["Start", "End"]) {
+      const endpoint = within(startAndEnd).getByRole("group", {
+        name: endpointLabel,
+      });
+      for (const mode of ["Absolute", "Relative", "Now"]) {
+        expect(
+          within(endpoint).getByRole("radio", { name: mode }),
+        ).toBeInTheDocument();
+      }
+    }
   });
 
   it("disables Apply for a relative range beyond representable time", () => {
@@ -209,7 +250,7 @@ describe("TimeRangePicker", () => {
     });
 
     expect(
-      within(startAndEnd).getByRole("button", { name: "Apply" }),
+      screen.getByRole("button", { name: "Apply" }),
     ).toBeDisabled();
   });
 
