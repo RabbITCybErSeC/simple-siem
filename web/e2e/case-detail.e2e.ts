@@ -3,7 +3,26 @@ import type { AlertSummary } from "../src/features/cases/detail/types.ts";
 import { FIXTURE_NOW } from "./support/cases.ts";
 import { APP_ORIGIN, expect, signIn, test } from "./support/test.ts";
 
+interface BrowserStorage {
+  localStorage: { setItem: (key: string, value: string) => void };
+}
+
+interface LayoutElement {
+  parentElement: LayoutElement | null;
+  getBoundingClientRect(): { width: number };
+}
+
+interface LayoutGlobals {
+  document: {
+    documentElement: { scrollWidth: number };
+    querySelector(selector: string): LayoutElement | null;
+  };
+  getComputedStyle(element: LayoutElement): { gridTemplateColumns: string };
+  innerWidth: number;
+}
+
 const CLOSE_CASE_ALERTS = 4;
+const LONG_FIELD_VALUE = "a".repeat(400);
 const THIRTY_ALERTS: AlertSummary[] = Array.from(
   { length: 30 },
   (_, index) => ({
@@ -99,107 +118,236 @@ function unassignedOpenRow(page: Page, table: Locator): Locator {
     .first();
 }
 
-test("opens by keyboard and returns to the row with Escape", async ({
-  page,
-}) => {
-  await signIn(page);
-  await page.goto("/cases");
-  const table = openTable(page);
-  await expect(table.locator("tbody tr")).toHaveCount(50);
-  const number = await firstRowNumber(table);
+test.describe("split layout", () => {
+  test.use({ viewport: { width: 1600, height: 900 } });
 
-  await table.locator("tbody tr").first().focus();
-  await page.keyboard.press("Enter");
+  test("opens by keyboard and returns to the row with Escape", async ({
+    page,
+  }) => {
+    await signIn(page);
+    await page.goto("/cases");
+    const table = openTable(page);
+    await expect(table.locator("tbody tr")).toHaveCount(50);
+    const number = await firstRowNumber(table);
 
-  await expect(page).toHaveURL(new RegExp(`/cases/${number}(\\?|$)`));
-  const heading = page.getByRole("heading", {
-    level: 2,
-    name: new RegExp(`^#${number}\\b`),
-  });
-  await expect(heading).toBeFocused();
-  await expect(page.getByRole("region", { name: `Case #${number}` })).toBeVisible();
-  // The queue stays mounted with the same rows.
-  await expect(table.locator("tbody tr")).toHaveCount(50);
+    await table.locator("tbody tr").first().focus();
+    await page.keyboard.press("Enter");
 
-  await page.keyboard.press("Escape");
-
-  await expect(page).toHaveURL(/\/cases(\?|$)/);
-  await expect(rowForNumber(page, number)).toBeFocused();
-});
-
-test("restores a deep link with its section and queue parameters", async ({
-  page,
-}) => {
-  await signIn(page);
-  await page.goto("/cases?tab=closed&scope=all");
-  const closedTable = tableWith(page, "Closed", "All");
-  await expect(closedTable.locator("tbody tr").first()).toBeVisible();
-  const number = await firstRowNumber(closedTable);
-
-  await page.goto(`/cases/${number}?view=timeline&tab=closed&scope=all`);
-
-  await expect(page.getByRole("tab", { name: /^Closed/ })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  await expect(page.getByRole("radio", { name: /^All/ })).toHaveAttribute(
-    "aria-checked",
-    "true",
-  );
-  await expect(page.getByRole("tab", { name: "Timeline" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  await expect(
-    page.getByRole("region", { name: `Case #${number}` }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("table", { name: "Evidence events" }).first(),
-  ).toBeVisible();
-
-  await page
-    .getByRole("heading", {
+    await expect(page).toHaveURL(new RegExp(`/cases/${number}(\\?|$)`));
+    const heading = page.getByRole("heading", {
       level: 2,
       name: new RegExp(`^#${number}\\b`),
-    })
-    .focus();
-  await page.keyboard.press("Escape");
+    });
+    await expect(heading).toBeFocused();
+    await expect(page.getByRole("region", { name: `Case #${number}` })).toBeVisible();
+    // The queue stays mounted with the same rows.
+    await expect(table.locator("tbody tr")).toHaveCount(50);
 
-  await expect(page).toHaveURL(/tab=closed/);
-  await expect(page).toHaveURL(/scope=all/);
-  await expect(rowForNumber(page, number)).toBeFocused();
+    await page.keyboard.press("Escape");
+
+    await expect(page).toHaveURL(/\/cases(\?|$)/);
+    await expect(rowForNumber(page, number)).toBeFocused();
+  });
+
+  test("restores a deep link with its section and queue parameters", async ({
+    page,
+  }) => {
+    await signIn(page);
+    await page.goto("/cases?tab=closed&scope=all");
+    const closedTable = tableWith(page, "Closed", "All");
+    await expect(closedTable.locator("tbody tr").first()).toBeVisible();
+    const number = await firstRowNumber(closedTable);
+
+    await page.goto(`/cases/${number}?view=timeline&tab=closed&scope=all`);
+
+    await expect(page.getByRole("tab", { name: /^Closed/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByRole("radio", { name: /^All/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(page.getByRole("tab", { name: "Timeline" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(
+      page.getByRole("region", { name: `Case #${number}` }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("table", { name: "Evidence events" }).first(),
+    ).toBeVisible();
+
+    await page
+      .getByRole("heading", {
+        level: 2,
+        name: new RegExp(`^#${number}\\b`),
+      })
+      .focus();
+    await page.keyboard.press("Escape");
+
+    await expect(page).toHaveURL(/tab=closed/);
+    await expect(page).toHaveURL(/scope=all/);
+    await expect(rowForNumber(page, number)).toBeFocused();
+  });
+
+  test("toggles the full page layout and back", async ({ page }) => {
+    await signIn(page);
+    await page.goto("/cases");
+    const table = openTable(page);
+    await expect(table.locator("tbody tr")).toHaveCount(50);
+    const number = await firstRowNumber(table);
+
+    await table.locator("tbody tr").first().focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("region", { name: `Case #${number}` }),
+    ).toBeVisible();
+
+    const toggle = page.getByRole("button", { name: "Toggle full page" });
+    await toggle.click();
+
+    await expect(page).toHaveURL(/layout=full/);
+    await expect(table).toBeHidden();
+    await expect(
+      page.getByRole("region", { name: `Case #${number}` }),
+    ).toBeVisible();
+
+    await toggle.click();
+
+    await expect(page).not.toHaveURL(/layout=full/);
+    await expect(table).toBeVisible();
+    await expect(table.locator("tbody tr")).toHaveCount(50);
+    await expect(
+      page.getByRole("region", { name: `Case #${number}` }),
+    ).toBeVisible();
+  });
 });
 
-test("toggles the full page layout and back", async ({ page }) => {
+test("the detail header actions share the control height", async ({ page }) => {
   await signIn(page);
-  await page.goto("/cases");
-  const table = openTable(page);
-  await expect(table.locator("tbody tr")).toHaveCount(50);
-  const number = await firstRowNumber(table);
+  const target = await findOpenCaseWithAlerts(page, 2);
+  await page.goto(`/cases/${target.caseNumber}`);
 
-  await table.locator("tbody tr").first().focus();
-  await page.keyboard.press("Enter");
+  const region = page.getByRole("region", {
+    name: `Case #${target.caseNumber}`,
+  });
+  const names: (string | RegExp)[] = [
+    /^(Assign to me|Unassign)$/,
+    "Close case",
+    "Copy link",
+    "Toggle full page",
+    "Close case detail",
+  ];
+  for (const name of names) {
+    const button = region.getByRole("button", { name, exact: true });
+    await expect(button).toBeVisible();
+    const box = await button.boundingBox();
+    if (box === null) {
+      throw new Error(`${name} has no box`);
+    }
+    expect(box.height, `${name} has the control height`).toBe(32);
+  }
+});
+
+test("the evidence table scrolls inside its frame in the split", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => {
+    const browser = globalThis as unknown as BrowserStorage;
+    browser.localStorage.setItem("simple-siem.sidebar", "collapsed");
+  });
+  await signIn(page);
+  const target = await findOpenCaseWithAlerts(page, 2);
+  await page.route(`**/api/v1/cases/${target.id}/timeline*`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: [
+          {
+            id: "tl_long",
+            kind: "EVIDENCE",
+            at: "2026-11-09T10:00:00Z",
+            alertId: "alert_long",
+            sourceId: "evt-long",
+            udm: {
+              metadata: { event_type: "USER_LOGIN" },
+              principal: {
+                user: { userid: LONG_FIELD_VALUE },
+                hostname: "WS-014",
+                ip: ["10.12.4.18"],
+              },
+            },
+          },
+        ],
+        pagination: { limit: 50, nextCursor: null },
+      }),
+    }),
+  );
+  await page.goto(`/cases/${target.caseNumber}?view=timeline`);
+
+  const frame = page.getByRole("region", { name: "Evidence events" });
+  await expect(frame).toBeVisible();
+  const overflow = await frame.evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
+  expect(
+    overflow.scrollWidth,
+    "the evidence frame scrolls sideways",
+  ).toBeGreaterThan(overflow.clientWidth);
+
+  const widths = await page.evaluate(() => {
+    const browser = globalThis as unknown as LayoutGlobals;
+    const region = browser.document.querySelector(
+      'section[aria-label^="Case #"]',
+    );
+    const pane = region?.parentElement;
+    const grid = pane?.parentElement;
+    if (
+      region === null ||
+      pane === null ||
+      pane === undefined ||
+      grid === null ||
+      grid === undefined
+    ) {
+      return null;
+    }
+    const columns = browser
+      .getComputedStyle(grid)
+      .gridTemplateColumns.split(" ")
+      .map((value) => Number.parseFloat(value));
+    return {
+      detail: pane.getBoundingClientRect().width,
+      column: columns[columns.length - 1] ?? 0,
+    };
+  });
+  expect(widths).not.toBeNull();
+  expect(
+    widths?.detail,
+    "the detail stays inside its grid column",
+  ).toBeLessThanOrEqual((widths?.column ?? 0) + 1);
+});
+
+test("an open case does not scroll sideways on a phone", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  await page.goto("/cases/7?view=timeline");
   await expect(
-    page.getByRole("region", { name: `Case #${number}` }),
+    page.getByRole("region", { name: "Case #7" }),
   ).toBeVisible();
 
-  const toggle = page.getByRole("button", { name: "Toggle full page" });
-  await toggle.click();
-
-  await expect(page).toHaveURL(/layout=full/);
-  await expect(table).toBeHidden();
-  await expect(
-    page.getByRole("region", { name: `Case #${number}` }),
-  ).toBeVisible();
-
-  await toggle.click();
-
-  await expect(page).not.toHaveURL(/layout=full/);
-  await expect(table).toBeVisible();
-  await expect(table.locator("tbody tr")).toHaveCount(50);
-  await expect(
-    page.getByRole("region", { name: `Case #${number}` }),
-  ).toBeVisible();
+  const widths = await page.evaluate(() => {
+    const browser = globalThis as unknown as LayoutGlobals;
+    return {
+      document: browser.document.documentElement.scrollWidth,
+      viewport: browser.innerWidth,
+    };
+  });
+  expect(widths.document).toBeLessThanOrEqual(widths.viewport);
 });
 
 test("assigns to me with a and shows the analyst at once", async ({

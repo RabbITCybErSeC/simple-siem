@@ -1,3 +1,9 @@
+import {
+  Maximize2Icon,
+  Minimize2Icon,
+  TriangleAlertIcon,
+  XIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError } from "../../../api/client";
@@ -5,12 +11,14 @@ import { useCurrentUser } from "../../auth/session";
 import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
+import { Separator } from "../../../components/ui/separator";
 import {
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
 } from "../../../components/ui/tabs";
+import { EmptyState } from "../../shell/EmptyState";
 import type {
   CaseCommands,
   TimeZoneSetting,
@@ -254,78 +262,87 @@ export function CaseDetail({
       onKeyDown={handleKeyDown}
       className="min-w-0"
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
+      <div className="space-y-3 border-b pb-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <h2
             ref={headingRef}
             tabIndex={-1}
-            className="text-xl font-semibold tracking-tight outline-none"
+            className="min-w-0 text-lg font-semibold tracking-tight outline-none"
           >
             #{caseNumber}
             {detail === undefined ? "" : ` ${detail.title}`}
           </h2>
-          {detail === undefined ? null : (
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-              <Badge className={SEVERITY_STYLES[detail.severity].className}>
-                {SEVERITY_STYLES[detail.severity].label}
-              </Badge>
-              <span>{STATUS_LABELS[detail.status]}</span>
-              <span aria-hidden="true">·</span>
-              <span>{detail.assignee?.displayName ?? "Unassigned"}</span>
-            </div>
-          )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {detail === undefined || detail.status === "CLOSED" ? null : (
-            <Button
-              type="button"
-              size="sm"
-              disabled={assignPending || me === undefined}
-              onClick={assignCase}
-            >
-              {detail.assignee?.id === me?.id ? "Unassign" : "Assign to me"}
-            </Button>
-          )}
-          {detail === undefined || detail.status === "CLOSED" ? null : (
+          <div className="flex flex-wrap items-center gap-2">
+            {detail === undefined || detail.status === "CLOSED" ? null : (
+              <Button
+                type="button"
+                size="default"
+                disabled={assignPending || me === undefined}
+                onClick={assignCase}
+              >
+                {detail.assignee?.id === me?.id ? "Unassign" : "Assign to me"}
+              </Button>
+            )}
+            {detail === undefined || detail.status === "CLOSED" ? null : (
+              <Button
+                type="button"
+                variant="outline"
+                size="default"
+                onClick={() => setCloseOpen(true)}
+              >
+                Close case
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
-              size="sm"
-              onClick={() => setCloseOpen(true)}
+              size="default"
+              onClick={() => void copyLink()}
             >
-              Close case
+              Copy link
             </Button>
-          )}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void copyLink()}
-          >
-            Copy link
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            aria-label="Toggle full page"
-            aria-pressed={layout === "full"}
-            onClick={() =>
-              onLayoutChange(layout === "full" ? "split" : "full")
-            }
-          >
-            ⤢
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-label="Close case detail"
-            onClick={onClose}
-          >
-            ×
-          </Button>
+            <Separator orientation="vertical" className="h-5" />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="Toggle full page"
+              aria-pressed={layout === "full"}
+              onClick={() =>
+                onLayoutChange(layout === "full" ? "split" : "full")
+              }
+            >
+              {layout === "full" ? (
+                <Minimize2Icon aria-hidden="true" />
+              ) : (
+                <Maximize2Icon aria-hidden="true" />
+              )}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="Close case detail"
+              onClick={onClose}
+            >
+              <XIcon aria-hidden="true" />
+            </Button>
+          </div>
         </div>
+        {detail === undefined ? null : (
+          <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            <Badge
+              className={`${SEVERITY_STYLES[detail.severity].className} h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide`}
+            >
+              {SEVERITY_STYLES[detail.severity].label}
+            </Badge>
+            <Badge variant="outline" className="rounded-md">
+              {STATUS_LABELS[detail.status]}
+            </Badge>
+            <span aria-hidden="true">·</span>
+            <span>{detail.assignee?.displayName ?? "Unassigned"}</span>
+          </div>
+        )}
       </div>
 
       <p role="status" className="sr-only">
@@ -359,30 +376,46 @@ export function CaseDetail({
       )}
 
       {loadFailure === null ? null : (
-        <div
-          role="alert"
-          className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-foreground"
-        >
-          <p>{loadFailure.message}</p>
-          {loadFailure.retry ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-3"
-              onClick={() => void detailQuery.refetch()}
-            >
-              Retry
-            </Button>
-          ) : null}
+        <div className="mt-4">
+          <EmptyState
+            tone="error"
+            icon={TriangleAlertIcon}
+            title={loadFailure.message}
+            action={
+              loadFailure.retry ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void detailQuery.refetch()}
+                >
+                  Retry
+                </Button>
+              ) : undefined
+            }
+          />
         </div>
       )}
 
       {detail === undefined ? (
         loadFailure === null ? (
-          <p aria-busy="true" className="mt-4 text-sm text-muted-foreground">
-            Loading case…
-          </p>
+          <div aria-busy="true" className="mt-4 space-y-4">
+            <span className="sr-only">Loading case…</span>
+            <div className="h-6 w-1/2 animate-pulse rounded bg-muted" />
+            <div className="rounded-xl border bg-card px-4 py-3">
+              <div className="space-y-2">
+                {Array.from({ length: 4 }, (_, index) => (
+                  <div
+                    key={index}
+                    className="grid grid-cols-[8rem_minmax(0,1fr)] gap-4"
+                  >
+                    <div className="h-4 w-20 animate-pulse rounded bg-muted" />
+                    <div className="h-4 w-2/5 animate-pulse rounded bg-muted" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         ) : null
       ) : (
         <Tabs

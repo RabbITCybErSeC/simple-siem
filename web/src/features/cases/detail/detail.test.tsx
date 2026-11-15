@@ -37,7 +37,7 @@ interface RequestLog {
 
 interface Responders {
   detail?: () => Response | Promise<Response>;
-  alerts?: (search: URLSearchParams) => Response;
+  alerts?: (search: URLSearchParams) => Response | Promise<Response>;
   timeline?: (search: URLSearchParams) => Response;
   assign?: (body: unknown) => Response | Promise<Response>;
 }
@@ -463,7 +463,43 @@ describe("case overview", () => {
   });
 });
 
+describe("header actions", () => {
+  it("shows the page controls as icons", async () => {
+    renderDetail();
+
+    const toggle = await screen.findByRole("button", {
+      name: "Toggle full page",
+    });
+    const close = screen.getByRole("button", { name: "Close case detail" });
+
+    for (const button of [toggle, close]) {
+      expect(button.querySelector("svg")).not.toBeNull();
+      expect(button).not.toHaveTextContent("⤢");
+      expect(button).not.toHaveTextContent("×");
+    }
+  });
+});
+
 describe("case alerts", () => {
+  it("shows a busy skeleton while the alerts load", async () => {
+    renderDetail("/cases/312?scope=all&view=alerts", {
+      alerts: () => new Promise<Response>(() => {}),
+    });
+    const region = await screen.findByRole("region", { name: "Case #312" });
+
+    const loading = await within(region).findByText("Loading alerts…");
+    expect(loading).toHaveClass("sr-only");
+    expect(loading.closest('[aria-busy="true"]')).not.toBeNull();
+  });
+
+  it("shows an empty message without an alert role", async () => {
+    renderDetail("/cases/312?scope=all&view=alerts");
+    const region = await screen.findByRole("region", { name: "Case #312" });
+
+    expect(await within(region).findByText("No alerts.")).toBeInTheDocument();
+    expect(within(region).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("shows the alerts table and loads the next page", async () => {
     renderDetail("/cases/312?scope=all&view=alerts", {
       alerts: (search) =>
@@ -515,6 +551,23 @@ describe("case alerts", () => {
 });
 
 describe("case timeline", () => {
+  it("shows a retry alert when the timeline fails", async () => {
+    let calls = 0;
+    renderDetail("/cases/312?scope=all&view=timeline", {
+      timeline: () => {
+        calls += 1;
+        return errorResponse(500, "INTERNAL_ERROR", "boom");
+      },
+    });
+    const region = await screen.findByRole("region", { name: "Case #312" });
+
+    const alert = await within(region).findByRole("alert");
+    expect(alert).toHaveTextContent("Could not load the case timeline.");
+    const before = calls;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(calls).toBeGreaterThan(before));
+  });
+
   it("shows evidence and activity in ascending order with the event viewer", async () => {
     renderDetail("/cases/312?scope=all&view=timeline", {
       timeline: (search) => pageResponse(timelineEntries(search)),

@@ -12,6 +12,7 @@ import {
 import type { TimeZoneSetting } from "../../shell/types";
 import { TimeCell } from "../CaseTable";
 import { formatExact } from "../timeRange";
+import { TableRegion } from "./TableRegion";
 import type { TimelineEvidenceEntry } from "./types";
 
 export interface EventViewerProps {
@@ -99,32 +100,34 @@ export function EventViewer({
 
   return (
     <div>
-      <Table>
-        <TableCaption>Evidence events</TableCaption>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Time</TableHead>
-            {SUMMARY_COLUMNS.map((column) => (
-              <TableHead key={column.path}>{column.header}</TableHead>
+      <TableRegion label="Evidence events">
+        <Table>
+          <TableCaption>Evidence events</TableCaption>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Time</TableHead>
+              {SUMMARY_COLUMNS.map((column) => (
+                <TableHead key={column.path}>{column.header}</TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {entries.map((entry) => (
+              <EvidenceRows
+                key={entry.id}
+                entry={entry}
+                timeZone={timeZone}
+                now={now}
+                expanded={expandedIds.has(entry.id)}
+                rawOpen={rawIds.has(entry.id)}
+                onToggle={toggleExpanded}
+                onToggleRaw={toggleRaw}
+                onCopy={copy}
+              />
             ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {entries.map((entry) => (
-            <EvidenceRows
-              key={entry.id}
-              entry={entry}
-              timeZone={timeZone}
-              now={now}
-              expanded={expandedIds.has(entry.id)}
-              rawOpen={rawIds.has(entry.id)}
-              onToggle={toggleExpanded}
-              onToggleRaw={toggleRaw}
-              onCopy={copy}
-            />
-          ))}
-        </TableBody>
-      </Table>
+          </TableBody>
+        </Table>
+      </TableRegion>
       <p role="status" className="sr-only">
         {copyStatus}
       </p>
@@ -225,39 +228,41 @@ function EvidenceRows({
 
 function FieldTable({ fields, onCopy }: FieldTableProps) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Field</TableHead>
-          <TableHead>Value</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {fields.map((field) => (
-          <TableRow key={field.path}>
-            <th
-              scope="row"
-              className="p-2 text-left align-middle font-mono text-xs font-medium whitespace-nowrap"
-            >
-              {field.path}
-            </th>
-            <TableCell className="whitespace-normal">
-              <span className="font-mono break-all">{field.value}</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="ml-2"
-                aria-label={`Copy ${field.path}`}
-                onClick={() => onCopy(field.value)}
-              >
-                Copy
-              </Button>
-            </TableCell>
+    <TableRegion label="Event fields">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Field</TableHead>
+            <TableHead>Value</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {fields.map((field) => (
+            <TableRow key={field.path}>
+              <th
+                scope="row"
+                className="p-2 text-left align-middle font-mono text-xs font-medium whitespace-nowrap"
+              >
+                {field.path}
+              </th>
+              <TableCell className="whitespace-normal">
+                <span className="font-mono break-all">{field.value}</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="ml-2"
+                  aria-label={`Copy ${field.path}`}
+                  onClick={() => onCopy(field.value)}
+                >
+                  Copy
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableRegion>
   );
 }
 

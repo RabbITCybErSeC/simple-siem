@@ -1,3 +1,9 @@
+import {
+  ActivityIcon,
+  InboxIcon,
+  ListIcon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { Badge } from "../../../components/ui/badge";
@@ -11,6 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "../../../components/ui/table";
+import { EmptyState } from "../../shell/EmptyState";
 import type { TimeZoneSetting } from "../../shell/types";
 import {
   OUTCOME_LABELS,
@@ -28,6 +35,7 @@ import { closureReasonLabel } from "./CloseCaseDialog";
 import { copyText } from "./clipboard";
 import { EventViewer } from "./EventViewer";
 import { useCaseAlerts, useCaseTimeline } from "./queries";
+import { TableRegion } from "./TableRegion";
 import type {
   AlertSummary,
   CaseDetail as CaseDetailData,
@@ -61,75 +69,77 @@ export function Overview({ detail, queueState, timeZone }: OverviewProps) {
   const now = useMinuteNow();
 
   return (
-    <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-6 gap-y-2 text-sm">
-      <Description term="Status">{STATUS_LABELS[detail.status]}</Description>
-      <Description term="Severity">
-        {SEVERITY_STYLES[detail.severity].label}
-      </Description>
-      <Description term="Assignee">
-        {detail.assignee?.displayName ?? "Unassigned"}
-      </Description>
-      <Description term="Created">
-        <TimeCell value={detail.createdAt} timeZone={timeZone} now={now} />
-      </Description>
-      <Description term="First event">
-        <TimeCell value={detail.firstEventAt} timeZone={timeZone} now={now} />
-      </Description>
-      <Description term="Last event">
-        <TimeCell value={detail.lastEventAt} timeZone={timeZone} now={now} />
-      </Description>
-      {detail.closedAt === null ? null : (
-        <Description term="Closed">
-          <TimeCell value={detail.closedAt} timeZone={timeZone} now={now} />
+    <div className="rounded-xl border bg-card px-4 py-3">
+      <dl className="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+        <Description term="Status">{STATUS_LABELS[detail.status]}</Description>
+        <Description term="Severity">
+          {SEVERITY_STYLES[detail.severity].label}
         </Description>
-      )}
-      {detail.closedBy === null ? null : (
-        <Description term="Closed by">
-          {detail.closedBy.displayName}
+        <Description term="Assignee">
+          {detail.assignee?.displayName ?? "Unassigned"}
         </Description>
-      )}
-      {detail.outcome === null ? null : (
-        <Description term="Outcome">
-          {OUTCOME_LABELS[detail.outcome]}
+        <Description term="Created">
+          <TimeCell value={detail.createdAt} timeZone={timeZone} now={now} />
         </Description>
-      )}
-      {detail.closureReason === null ? null : (
-        <Description term="Closure reason">
-          {closureReasonLabel(detail.closureReason)}
+        <Description term="First event">
+          <TimeCell value={detail.firstEventAt} timeZone={timeZone} now={now} />
         </Description>
-      )}
-      {detail.conclusion === null ? null : (
-        <Description term="Conclusion">
-          <p className="whitespace-pre-wrap">{detail.conclusion}</p>
+        <Description term="Last event">
+          <TimeCell value={detail.lastEventAt} timeZone={timeZone} now={now} />
         </Description>
-      )}
-      {detail.linkedCases.length === 0 ? null : (
-        <Description term="Linked cases">
-          <div className="flex flex-col gap-1">
-            {detail.linkedCases.map((linked) => (
-              <Link
-                key={linked.id}
-                to={caseDetailPath(
-                  linked.caseNumber,
-                  queueState,
-                  defaultCaseDetailState,
-                )}
-                className="text-primary underline-offset-4 hover:underline"
-              >
-                {`#${linked.caseNumber} ${linked.title}`}
-              </Link>
-            ))}
-          </div>
-        </Description>
-      )}
-    </dl>
+        {detail.closedAt === null ? null : (
+          <Description term="Closed">
+            <TimeCell value={detail.closedAt} timeZone={timeZone} now={now} />
+          </Description>
+        )}
+        {detail.closedBy === null ? null : (
+          <Description term="Closed by">
+            {detail.closedBy.displayName}
+          </Description>
+        )}
+        {detail.outcome === null ? null : (
+          <Description term="Outcome">
+            {OUTCOME_LABELS[detail.outcome]}
+          </Description>
+        )}
+        {detail.closureReason === null ? null : (
+          <Description term="Closure reason">
+            {closureReasonLabel(detail.closureReason)}
+          </Description>
+        )}
+        {detail.conclusion === null ? null : (
+          <Description term="Conclusion">
+            <p className="whitespace-pre-wrap">{detail.conclusion}</p>
+          </Description>
+        )}
+        {detail.linkedCases.length === 0 ? null : (
+          <Description term="Linked cases">
+            <div className="flex flex-col gap-1">
+              {detail.linkedCases.map((linked) => (
+                <Link
+                  key={linked.id}
+                  to={caseDetailPath(
+                    linked.caseNumber,
+                    queueState,
+                    defaultCaseDetailState,
+                  )}
+                  className="text-primary underline-offset-4 hover:underline"
+                >
+                  {`#${linked.caseNumber} ${linked.title}`}
+                </Link>
+              ))}
+            </div>
+          </Description>
+        )}
+      </dl>
+    </div>
   );
 }
 
 function Description({ term, children }: DescriptionProps) {
   return (
     <>
-      <dt className="text-muted-foreground">{term}</dt>
+      <dt className="text-xs font-medium text-muted-foreground">{term}</dt>
       <dd>{children}</dd>
     </>
   );
@@ -147,31 +157,43 @@ export function AlertsSection({ caseId, timeZone }: AlertsSectionProps) {
 
   if (alertQuery.isPending) {
     return (
-      <p aria-busy="true" className="text-sm text-muted-foreground">
-        Loading alerts…
-      </p>
+      <div aria-busy="true" className="flex flex-col gap-3">
+        <span className="sr-only">Loading alerts…</span>
+        {Array.from({ length: 3 }, (_, index) => (
+          <div key={index} className="flex items-center justify-between gap-4">
+            <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
+            <div className="h-4 w-16 animate-pulse rounded bg-muted" />
+          </div>
+        ))}
+      </div>
     );
   }
   if (alertQuery.isError) {
     return (
-      <SectionError
-        message="Could not load the case alerts."
-        onRetry={() => void alertQuery.refetch()}
+      <EmptyState
+        tone="error"
+        icon={TriangleAlertIcon}
+        title="Could not load the case alerts."
+        action={
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void alertQuery.refetch()}
+          >
+            Retry
+          </Button>
+        }
       />
     );
   }
   if (alerts.length === 0) {
-    return <p className="text-sm text-muted-foreground">No alerts.</p>;
+    return <EmptyState icon={InboxIcon} title="No alerts." />;
   }
 
   return (
     <div>
-      <div
-        role="region"
-        aria-label="Alerts"
-        tabIndex={0}
-        className="overflow-x-auto rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring [&>[data-slot=table-container]]:overflow-visible"
-      >
+      <TableRegion label="Alerts">
         <Table aria-busy={alertQuery.isFetchingNextPage}>
           <TableCaption>Alerts</TableCaption>
           <TableHeader>
@@ -197,7 +219,7 @@ export function AlertsSection({ caseId, timeZone }: AlertsSectionProps) {
             ))}
           </TableBody>
         </Table>
-      </div>
+      </TableRegion>
       {alertQuery.hasNextPage ? (
         <Button
           type="button"
@@ -267,28 +289,49 @@ export function TimelineSection({
 
   if (timelineQuery.isPending) {
     return (
-      <p aria-busy="true" className="text-sm text-muted-foreground">
-        {activityOnly ? "Loading activity…" : "Loading timeline…"}
-      </p>
+      <div aria-busy="true" className="flex flex-col gap-3">
+        <span className="sr-only">
+          {activityOnly ? "Loading activity…" : "Loading timeline…"}
+        </span>
+        {Array.from({ length: 3 }, (_, index) => (
+          <div key={index} className="flex items-center gap-3">
+            <div className="size-2 animate-pulse rounded-full bg-muted" />
+            <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
+            <div className="ml-auto h-4 w-16 animate-pulse rounded bg-muted" />
+          </div>
+        ))}
+      </div>
     );
   }
   if (timelineQuery.isError) {
     return (
-      <SectionError
-        message={
+      <EmptyState
+        tone="error"
+        icon={TriangleAlertIcon}
+        title={
           activityOnly
             ? "Could not load the case activity."
             : "Could not load the case timeline."
         }
-        onRetry={() => void timelineQuery.refetch()}
+        action={
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void timelineQuery.refetch()}
+          >
+            Retry
+          </Button>
+        }
       />
     );
   }
   if (entries.length === 0) {
     return (
-      <p className="text-sm text-muted-foreground">
-        {activityOnly ? "No activity." : "No timeline entries."}
-      </p>
+      <EmptyState
+        icon={activityOnly ? ActivityIcon : ListIcon}
+        title={activityOnly ? "No activity." : "No timeline entries."}
+      />
     );
   }
 
@@ -346,31 +389,6 @@ function ActivityItem({ entry, timeZone, now }: ActivityItemProps) {
       <TimeCell value={entry.at} timeZone={timeZone} now={now} />
       <span>{activitySentence(entry)}</span>
     </li>
-  );
-}
-
-interface SectionErrorProps {
-  message: string;
-  onRetry: () => void;
-}
-
-export function SectionError({ message, onRetry }: SectionErrorProps) {
-  return (
-    <div
-      role="alert"
-      className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-foreground"
-    >
-      <p>{message}</p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mt-3"
-        onClick={onRetry}
-      >
-        Retry
-      </Button>
-    </div>
   );
 }
 
