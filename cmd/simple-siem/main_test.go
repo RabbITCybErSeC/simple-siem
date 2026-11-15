@@ -626,6 +626,7 @@ func TestDetectCommandUsage(t *testing.T) {
 		},
 		{name: "unknown flag", args: []string{"detect", "--no-such-flag", "brute-force-then-success", "--fixture", "fixture.json"}},
 		{name: "invalid window end", args: []string{"detect", "brute-force-then-success", "--window-end", "yesterday"}},
+		{name: "shadow with fixture", args: []string{"detect", "brute-force-then-success", "--fixture", "fixture.json", "--shadow"}},
 	}
 
 	for _, test := range tests {
@@ -782,26 +783,158 @@ func TestDetectWindowRecordsRun(t *testing.T) {
 	if result.RunID == "" || result.Revision != 1 || result.RowsRead != 12 || result.Proposals != 1 {
 		t.Errorf("detect result = %+v, want a run id, revision 1, 12 rows, 1 proposal", result)
 	}
+	if result.Mode != detection.RunModeEnabled {
+		t.Errorf("mode = %q, want ENABLED", result.Mode)
+	}
+	if result.AlertsCreated != 1 || result.AlertsMerged != 0 || result.ProposalsDeduplicated != 0 {
+		t.Errorf("counters = %d/%d/%d, want 1/0/0", result.AlertsCreated, result.AlertsMerged, result.ProposalsDeduplicated)
+	}
 	if !result.WindowStart.Equal(end.Add(-15*time.Minute)) || !result.WindowEnd.Equal(end) {
 		t.Errorf("detect window = [%s, %s), want [%s, %s)", result.WindowStart, result.WindowEnd, end.Add(-15*time.Minute), end)
 	}
 
-	var runs, proposals int
+	var runs, proposals, alerts int
 	if err := testDatabase.Raw("SELECT count(*) FROM detection_runs").Scan(&runs).Error; err != nil {
 		t.Fatalf("count detection runs: %v", err)
 	}
 	if err := testDatabase.Raw("SELECT count(*) FROM detection_proposals").Scan(&proposals).Error; err != nil {
 		t.Fatalf("count detection proposals: %v", err)
 	}
-	if runs != 1 || proposals != 1 {
-		t.Errorf("detection runs/proposals = %d/%d, want 1/1", runs, proposals)
+	if err := testDatabase.Raw("SELECT count(*) FROM alerts").Scan(&alerts).Error; err != nil {
+		t.Fatalf("count alerts: %v", err)
+	}
+	if runs != 1 || proposals != 0 || alerts != 1 {
+		t.Errorf("detection runs/proposals/alerts = %d/%d/%d, want 1/0/1", runs, proposals, alerts)
 	}
 	var severity string
-	if err := testDatabase.Raw("SELECT severity FROM detection_proposals").Scan(&severity).Error; err != nil {
-		t.Fatalf("read proposal severity: %v", err)
+	if err := testDatabase.Raw("SELECT severity FROM alerts").Scan(&severity).Error; err != nil {
+		t.Fatalf("read alert severity: %v", err)
 	}
 	if severity != string(detection.SeverityHigh) {
-		t.Errorf("proposal severity = %q, want HIGH", severity)
+		t.Errorf("alert severity = %q, want HIGH", severity)
+	}
+}
+
+func TestDetectWindowEnabledReportsAlertFields(t *testing.T) {
+	testDatabase, environment := runCommandEnvironment(t)
+	directory := runCommandConfig(t, "http://127.0.0.1:1")
+	end := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	seedDetectionWindow(t, testDatabase, end.Add(-15*time.Minute), end)
+	enableDetectionRuntime(t, testDatabase, "brute-force-then-success")
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--window-end", end.Format(time.RFC3339), "--config-dir", directory},
+		environment)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	result := decodeJSONLine[detection.RunResult](t, stdout)
+	if result.Status != detection.RunStatusOK {
+		t.Fatalf("detect result = %+v, want OK", result)
+	}
+	if result.Mode != detection.RunModeEnabled {
+		t.Errorf("mode = %q, want ENABLED", result.Mode)
+	}
+	if result.AlertsCreated != 1 || result.AlertsMerged != 0 || result.ProposalsDeduplicated != 0 {
+		t.Errorf("counters = %d/%d/%d, want 1/0/0", result.AlertsCreated, result.AlertsMerged, result.ProposalsDeduplicated)
+	}
+	if result.Proposals != 1 {
+		t.Errorf("proposals = %d, want 1", result.Proposals)
+	}
+
+	var alerts, proposals int
+	if err := testDatabase.Raw("SELECT count(*) FROM alerts").Scan(&alerts).Error; err != nil {
+		t.Fatalf("count alerts: %v", err)
+	}
+	if err := testDatabase.Raw("SELECT count(*) FROM detection_proposals").Scan(&proposals).Error; err != nil {
+		t.Fatalf("count detection proposals: %v", err)
+	}
+	if alerts != 1 || proposals != 0 {
+		t.Errorf("alerts/proposals = %d/%d, want 1/0", alerts, proposals)
+	}
+}
+
+func TestDetectWindowShadowOptionStoresProposals(t *testing.T) {
+	testDatabase, environment := runCommandEnvironment(t)
+	directory := runCommandConfig(t, "http://127.0.0.1:1")
+	end := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	seedDetectionWindow(t, testDatabase, end.Add(-15*time.Minute), end)
+	enableDetectionRuntime(t, testDatabase, "brute-force-then-success")
+
+	status, stdout, stderr := runCLI(t,
+		[]string{"detect", "brute-force-then-success", "--window-end", end.Format(time.RFC3339), "--shadow", "--config-dir", directory},
+		environment)
+
+	if status != 0 {
+		t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+	}
+	result := decodeJSONLine[detection.RunResult](t, stdout)
+	if result.Mode != detection.RunModeShadow {
+		t.Errorf("mode = %q, want SHADOW", result.Mode)
+	}
+	if result.AlertsCreated != 0 || result.AlertsMerged != 0 || result.ProposalsDeduplicated != 0 {
+		t.Errorf("counters = %d/%d/%d, want zero", result.AlertsCreated, result.AlertsMerged, result.ProposalsDeduplicated)
+	}
+
+	var alerts, proposals int
+	if err := testDatabase.Raw("SELECT count(*) FROM alerts").Scan(&alerts).Error; err != nil {
+		t.Fatalf("count alerts: %v", err)
+	}
+	if err := testDatabase.Raw("SELECT count(*) FROM detection_proposals").Scan(&proposals).Error; err != nil {
+		t.Fatalf("count detection proposals: %v", err)
+	}
+	if alerts != 0 || proposals != 1 {
+		t.Errorf("alerts/proposals = %d/%d, want 0/1", alerts, proposals)
+	}
+}
+
+func TestDetectShadowFlagBeforeAndAfterWindowEnd(t *testing.T) {
+	tests := []struct {
+		name string
+		args func(end time.Time, directory string) []string
+	}{
+		{
+			name: "before window end",
+			args: func(end time.Time, directory string) []string {
+				return []string{"detect", "brute-force-then-success", "--shadow", "--window-end", end.Format(time.RFC3339), "--config-dir", directory}
+			},
+		},
+		{
+			name: "after window end",
+			args: func(end time.Time, directory string) []string {
+				return []string{"detect", "brute-force-then-success", "--window-end", end.Format(time.RFC3339), "--shadow", "--config-dir", directory}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testDatabase, environment := runCommandEnvironment(t)
+			directory := runCommandConfig(t, "http://127.0.0.1:1")
+			end := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+			seedDetectionWindow(t, testDatabase, end.Add(-15*time.Minute), end)
+			enableDetectionRuntime(t, testDatabase, "brute-force-then-success")
+
+			status, stdout, stderr := runCLI(t, test.args(end, directory), environment)
+			if status != 0 {
+				t.Fatalf("run() status = %d, want 0; stderr: %s", status, stderr)
+			}
+			result := decodeJSONLine[detection.RunResult](t, stdout)
+			if result.Mode != detection.RunModeShadow {
+				t.Errorf("mode = %q, want SHADOW", result.Mode)
+			}
+		})
+	}
+}
+
+func enableDetectionRuntime(t *testing.T, testDatabase *gorm.DB, detectionID string) {
+	t.Helper()
+	err := testDatabase.Exec(`
+		INSERT INTO detection_runtime (detection_id, status)
+		VALUES (?, 'ENABLED')
+		ON CONFLICT (detection_id) DO UPDATE SET status = 'ENABLED'`, detectionID).Error
+	if err != nil {
+		t.Fatalf("enable detection runtime %q: %v", detectionID, err)
 	}
 }
 

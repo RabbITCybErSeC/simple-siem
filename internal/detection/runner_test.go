@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/alerts"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/RabbITCybErSeC/simple-siem/internal/dataset"
@@ -26,6 +27,45 @@ type runnerFixture struct {
 	registration Registration
 	manifest     config.DetectionManifest
 	end          time.Time
+}
+
+// alertTableRow counts alerts; the detection package has no alert model.
+type alertTableRow struct {
+	ID string `gorm:"column:id"`
+}
+
+func (alertTableRow) TableName() string {
+	return "alerts"
+}
+
+// guardrailHook trips the guardrail on the first created alert.
+type guardrailHook struct {
+	tripped bool
+}
+
+func (hook *guardrailHook) AlertCreated(context.Context, *gorm.DB, alerts.NewAlert) (alerts.CaseOutcome, error) {
+	if hook.tripped {
+		return alerts.CaseOutcome{}, nil
+	}
+	hook.tripped = true
+	return alerts.CaseOutcome{GuardrailTripped: true}, nil
+}
+
+func (hook *guardrailHook) EvidenceAdded(context.Context, *gorm.DB, string, time.Time, int) error {
+	return nil
+}
+
+// failingHook makes AlertCreated fail.
+type failingHook struct {
+	err error
+}
+
+func (hook failingHook) AlertCreated(context.Context, *gorm.DB, alerts.NewAlert) (alerts.CaseOutcome, error) {
+	return alerts.CaseOutcome{}, hook.err
+}
+
+func (hook failingHook) EvidenceAdded(context.Context, *gorm.DB, string, time.Time, int) error {
+	return nil
 }
 
 func newRunnerFixture(t *testing.T, logic Detection, files config.Files, edits ...[2]string) *runnerFixture {
@@ -47,6 +87,7 @@ func newRunnerFixture(t *testing.T, logic Detection, files config.Files, edits .
 			Store:    store,
 			Registry: registry,
 			Logger:   slog.New(slog.DiscardHandler),
+			Alerts:   &alerts.Service{},
 		},
 		database:     database,
 		store:        store,
@@ -100,7 +141,7 @@ func (fixture *runnerFixture) markReady(t *testing.T, names ...string) {
 
 func (fixture *runnerFixture) run(t *testing.T) (RunResult, error) {
 	t.Helper()
-	return fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end)
+	return fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end, RunOptions{})
 }
 
 func countRows(t *testing.T, database *gorm.DB, model any) int64 {
@@ -151,6 +192,35 @@ func runnerProposal(start time.Time) Proposal {
 		Details:  map[string]string{"failed_attempts": "10"},
 		Evidence: runnerEvidence(start),
 	}
+}
+
+// enableDetection makes the test manifest start ENABLED.
+var enableDetection = [2]string{"severity: HIGH", "severity: HIGH\ninitialStatus: ENABLED"}
+
+func proposalAt(userID, hostname, documentID string, eventTime time.Time) Proposal {
+	return Proposal{
+		Subject:  identitySubject(userID, hostname, ""),
+		Summary:  "brute force",
+		Details:  map[string]string{"failed_attempts": "10"},
+		Severity: SeverityHigh,
+		Evidence: []Evidence{{
+			SourceKey: dataset.SourceKey{FetcherInstanceID: "fixture", Index: "auth", DocumentID: documentID},
+			EventTime: eventTime,
+		}},
+	}
+}
+
+func detectionRuntimeRow(t *testing.T, db *gorm.DB, detectionID string) (status string, version int) {
+	t.Helper()
+	var row struct {
+		Status  string `gorm:"column:status"`
+		Version int    `gorm:"column:version"`
+	}
+	err := db.Raw("SELECT status, version FROM detection_runtime WHERE detection_id = ?", detectionID).Scan(&row).Error
+	if err != nil {
+		t.Fatalf("read detection runtime %q: %v", detectionID, err)
+	}
+	return row.Status, row.Version
 }
 
 func TestRunWindowRecordsOKRunAndProposals(t *testing.T) {
@@ -293,7 +363,7 @@ func TestRunWindowSerializesConcurrentRuns(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end)
+			result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end, RunOptions{})
 			outcomes <- outcome{result: result, err: err}
 		}()
 	}
@@ -339,7 +409,7 @@ func TestRunWindowWaitsForTheWindowLockOutsideItsBudget(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end)
+			result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end, RunOptions{})
 			outcomes <- outcome{result: result, err: err}
 		}()
 	}
@@ -426,7 +496,7 @@ func TestRunWindowRejectsInvalidWindowEnd(t *testing.T) {
 			fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
 			fixture.markReady(t, "auth_events")
 
-			_, err := fixture.runner.RunWindow(context.Background(), fixture.registration, test.windowEnd(fixture))
+			_, err := fixture.runner.RunWindow(context.Background(), fixture.registration, test.windowEnd(fixture), RunOptions{})
 
 			if !errors.Is(err, ErrInvalidWindow) {
 				t.Fatalf("RunWindow() error = %v, want ErrInvalidWindow", err)
@@ -546,7 +616,7 @@ func TestRunWindowRecordsCanceledRun(t *testing.T) {
 	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
 	fixture.markReady(t, "auth_events")
 
-	result, err := fixture.runner.RunWindow(ctx, fixture.registration, fixture.end)
+	result, err := fixture.runner.RunWindow(ctx, fixture.registration, fixture.end, RunOptions{})
 	if err != nil {
 		t.Fatalf("RunWindow() error = %v, want the FAILED run recorded", err)
 	}
@@ -852,5 +922,290 @@ func TestRunWindowWritesRunAndProposalsInOneTransaction(t *testing.T) {
 	}
 	if count := countRows(t, fixture.database, &runRow{}); count != 0 {
 		t.Fatalf("detection_runs rows = %d, want the transaction rolled back", count)
+	}
+}
+
+func TestRunWindowCreatesAlertsWhenEnabled(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{
+			proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute)),
+			proposalAt("bob", "dc01", "bob-1", window.Start.Add(2*time.Minute)),
+		}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.markReady(t, "auth_events")
+
+	result, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want nil", err)
+	}
+	if result.Status != RunStatusOK {
+		t.Fatalf("RunWindow() status = %s, want OK (error %q)", result.Status, result.Error)
+	}
+	if result.Mode != RunModeEnabled {
+		t.Errorf("mode = %q, want ENABLED", result.Mode)
+	}
+	if result.AlertsCreated != 2 || result.AlertsMerged != 0 || result.ProposalsDeduplicated != 0 {
+		t.Errorf("result counters = %d/%d/%d, want 2/0/0", result.AlertsCreated, result.AlertsMerged, result.ProposalsDeduplicated)
+	}
+	if result.Proposals != 2 {
+		t.Errorf("proposals = %d, want 2", result.Proposals)
+	}
+
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 1 {
+		t.Fatalf("detection_runs rows = %d, want 1", len(runs))
+	}
+	if runs[0].Mode != string(RunModeEnabled) || runs[0].AlertsCreated != 2 ||
+		runs[0].AlertsMerged != 0 || runs[0].ProposalsDeduplicated != 0 {
+		t.Errorf("run row = %+v, want ENABLED with 2 created", runs[0])
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 2 {
+		t.Errorf("alerts = %d, want 2", got)
+	}
+	if got := countRows(t, fixture.database, &proposalRow{}); got != 0 {
+		t.Errorf("detection_proposals = %d, want 0", got)
+	}
+	if status, _ := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "ENABLED" {
+		t.Errorf("runtime status = %q, want ENABLED", status)
+	}
+}
+
+func TestRunWindowStoresProposalsWhenShadow(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{
+			proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute)),
+			proposalAt("bob", "dc01", "bob-1", window.Start.Add(2*time.Minute)),
+		}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
+	fixture.markReady(t, "auth_events")
+
+	result, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want nil", err)
+	}
+	if result.Mode != RunModeShadow {
+		t.Errorf("mode = %q, want SHADOW", result.Mode)
+	}
+	if result.AlertsCreated != 0 || result.AlertsMerged != 0 || result.ProposalsDeduplicated != 0 {
+		t.Errorf("result counters = %d/%d/%d, want zero", result.AlertsCreated, result.AlertsMerged, result.ProposalsDeduplicated)
+	}
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 1 || runs[0].Mode != string(RunModeShadow) {
+		t.Fatalf("detection_runs = %+v, want one SHADOW row", runs)
+	}
+	if got := countRows(t, fixture.database, &proposalRow{}); got != 2 {
+		t.Errorf("detection_proposals = %d, want 2", got)
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 0 {
+		t.Errorf("alerts = %d, want 0", got)
+	}
+	if status, _ := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "SHADOW" {
+		t.Errorf("runtime status = %q, want SHADOW", status)
+	}
+}
+
+func TestRunWindowShadowOptionStoresProposals(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{
+			proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute)),
+			proposalAt("bob", "dc01", "bob-1", window.Start.Add(2*time.Minute)),
+		}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.markReady(t, "auth_events")
+
+	result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end, RunOptions{Shadow: true})
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want nil", err)
+	}
+	if result.Mode != RunModeShadow {
+		t.Errorf("mode = %q, want SHADOW", result.Mode)
+	}
+	if result.AlertsCreated != 0 {
+		t.Errorf("alerts created = %d, want 0", result.AlertsCreated)
+	}
+	if got := countRows(t, fixture.database, &proposalRow{}); got != 2 {
+		t.Errorf("detection_proposals = %d, want 2", got)
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 0 {
+		t.Errorf("alerts = %d, want 0", got)
+	}
+	if status, _ := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "ENABLED" {
+		t.Errorf("runtime status = %q, want ENABLED", status)
+	}
+}
+
+func TestRunWindowDedupesSecondRun(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{
+			proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute)),
+			proposalAt("bob", "dc01", "bob-1", window.Start.Add(2*time.Minute)),
+		}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.markReady(t, "auth_events")
+
+	first, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("first RunWindow() error = %v, want nil", err)
+	}
+	if first.AlertsCreated != 2 {
+		t.Fatalf("first alerts created = %d, want 2", first.AlertsCreated)
+	}
+	second, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("second RunWindow() error = %v, want nil", err)
+	}
+	if second.Mode != RunModeEnabled {
+		t.Errorf("second mode = %q, want ENABLED", second.Mode)
+	}
+	if second.AlertsCreated != 0 || second.AlertsMerged != 0 {
+		t.Errorf("second created/merged = %d/%d, want 0/0", second.AlertsCreated, second.AlertsMerged)
+	}
+	if second.ProposalsDeduplicated != 2 {
+		t.Errorf("second deduplicated = %d, want 2", second.ProposalsDeduplicated)
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 2 {
+		t.Errorf("alerts = %d, want 2", got)
+	}
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 2 || runs[1].Revision != 2 || runs[1].ProposalsDeduplicated != 2 || runs[1].AlertsCreated != 0 {
+		t.Fatalf("detection_runs = %+v, want a second run with 2 deduplicated", runs)
+	}
+}
+
+func TestRunWindowStoresRemainingProposalsAfterGuardrail(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{
+			proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute)),
+			proposalAt("bob", "dc01", "bob-1", window.Start.Add(2*time.Minute)),
+			proposalAt("carol", "app01", "carol-1", window.Start.Add(3*time.Minute)),
+		}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.runner.Alerts.Hooks = &guardrailHook{}
+	fixture.markReady(t, "auth_events")
+
+	result, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want nil", err)
+	}
+	if result.Mode != RunModeEnabled {
+		t.Errorf("mode = %q, want ENABLED", result.Mode)
+	}
+	if result.AlertsCreated != 1 {
+		t.Errorf("alerts created = %d, want 1", result.AlertsCreated)
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 1 {
+		t.Errorf("alerts = %d, want 1", got)
+	}
+	proposals := loadProposals(t, fixture.database)
+	if len(proposals) != 2 {
+		t.Fatalf("detection_proposals = %d, want the 2 after the trip", len(proposals))
+	}
+	for _, proposal := range proposals {
+		if proposal.DetectionRunID != result.RunID {
+			t.Errorf("proposal run id = %q, want %q", proposal.DetectionRunID, result.RunID)
+		}
+	}
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 1 || runs[0].Mode != string(RunModeEnabled) || runs[0].AlertsCreated != 1 {
+		t.Fatalf("detection_runs = %+v, want one ENABLED run with 1 created", runs)
+	}
+	if status, _ := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "SHADOW" {
+		t.Errorf("runtime status = %q, want SHADOW", status)
+	}
+}
+
+func TestRunWindowRecordsApplyFailure(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{
+			proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute)),
+			proposalAt("bob", "dc01", "bob-1", window.Start.Add(2*time.Minute)),
+		}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.runner.Alerts.Hooks = failingHook{err: errors.New("case store failed")}
+	fixture.markReady(t, "auth_events")
+
+	result, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want the failure recorded", err)
+	}
+	if result.Status != RunStatusFailed || result.Error != "apply alerts failed" {
+		t.Fatalf("RunWindow() result = %+v, want FAILED with apply alerts failed", result)
+	}
+	if result.Mode != RunModeShadow {
+		t.Errorf("mode = %q, want SHADOW", result.Mode)
+	}
+	if result.RunID == "" || result.Revision != 1 {
+		t.Errorf("result run id/revision = %q/%d, want a recorded run", result.RunID, result.Revision)
+	}
+
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 1 {
+		t.Fatalf("detection_runs rows = %d, want exactly 1", len(runs))
+	}
+	run := runs[0]
+	if run.Status != string(RunStatusFailed) || run.Mode != string(RunModeShadow) {
+		t.Errorf("run row = %+v, want FAILED and SHADOW", run)
+	}
+	if run.Proposals != 0 || run.AlertsCreated != 0 {
+		t.Errorf("run row proposals/created = %d/%d, want 0/0", run.Proposals, run.AlertsCreated)
+	}
+	if run.Error == nil || *run.Error != "apply alerts failed" {
+		t.Errorf("run row error = %v, want apply alerts failed", run.Error)
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 0 {
+		t.Errorf("alerts = %d, want 0", got)
+	}
+	if got := countRows(t, fixture.database, &proposalRow{}); got != 0 {
+		t.Errorf("detection_proposals = %d, want 0", got)
+	}
+}
+
+func TestRunWindowUsesRegisteredRuntimeStatus(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute))}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.markReady(t, "auth_events")
+
+	first, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("first RunWindow() error = %v, want nil", err)
+	}
+	if first.Mode != RunModeEnabled || first.AlertsCreated != 1 {
+		t.Fatalf("first run = %+v, want ENABLED with one alert", first)
+	}
+	if status, _ := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "ENABLED" {
+		t.Fatalf("runtime status = %q, want ENABLED", status)
+	}
+
+	if err := fixture.database.Exec(
+		"UPDATE detection_runtime SET status = 'SHADOW' WHERE detection_id = ?", fixture.manifest.ID,
+	).Error; err != nil {
+		t.Fatalf("switch the runtime row to SHADOW: %v", err)
+	}
+	second, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("second RunWindow() error = %v, want nil", err)
+	}
+	if second.Mode != RunModeShadow {
+		t.Errorf("second mode = %q, want SHADOW", second.Mode)
+	}
+	if second.AlertsCreated != 0 {
+		t.Errorf("second alerts created = %d, want 0", second.AlertsCreated)
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 1 {
+		t.Errorf("alerts = %d, want the first run's alert only", got)
+	}
+	if got := countRows(t, fixture.database, &proposalRow{}); got != 1 {
+		t.Errorf("detection_proposals = %d, want the second run's proposal", got)
+	}
+	if status, version := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "SHADOW" || version != 1 {
+		t.Errorf("runtime status/version = %q/%d, want SHADOW/1", status, version)
 	}
 }
