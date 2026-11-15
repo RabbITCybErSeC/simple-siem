@@ -47,19 +47,20 @@ curl http://127.0.0.1:5173/healthz
 It prints `{"status":"ok"}`.
 
 In a second terminal, create the first admin. The password is read from the
-first line of a file, so write it to a git-ignored path, create the admin, then
-delete the file:
+first line of a file, so type it once to a git-ignored path, create the admin,
+then delete the file:
 
 ```bash
 cd simple-siem
 mkdir -p .make
-printf '%s\n' '<your-password>' > .make/admin-password
+read -rs password && printf '%s\n' "$password" > .make/admin-password && unset password
 make run ARGS="admin create --email '<your-email>' --password-file .make/admin-password"
 rm -f .make/admin-password
 ```
 
-Replace `<your-email>` and `<your-password>` with your own values. The password
-must be 12 to 128 characters. The command prints `created admin <id>`.
+Replace `<your-email>` with your own email address. When prompted, type a
+password of 12 to 128 characters and press Enter. The command prints `created
+admin <id>`.
 
 Open <http://127.0.0.1:5173> and sign in with that email address and password.
 
@@ -69,7 +70,7 @@ Open <http://127.0.0.1:5173> and sign in with that email address and password.
 | --- | --- |
 | `make dev` | Start PostgreSQL, the API on port 8080, and Vite on port 5173, with live reload. |
 | `make test` | Run the Go and frontend tests against PostgreSQL. |
-| `make lint` | Run the Go and frontend linters, the TypeScript type check, and dependency vulnerability and workflow checks. |
+| `make lint` | Run the Go and frontend linters, the TypeScript type check, dependency vulnerability checks, and checks of the workflow files, including their shell scripts. |
 | `make build` | Build the web UI, then embed it in `bin/simple-siem`. |
 | `make e2e` | Run the Playwright and axe browser tests against the built binary. |
 | `make image` | Build the distroless runtime image `simple-siem:dev`. |

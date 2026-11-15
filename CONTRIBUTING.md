@@ -44,7 +44,7 @@ make e2e
 
 `make lint` runs the Go and frontend linters, the TypeScript type check, a
 check of dependencies for known vulnerabilities, and a check of the workflow
-files.
+files, including their shell scripts.
 
 Add one line to [CHANGELOG.md](CHANGELOG.md) under `## [Unreleased]`
 describing the change.

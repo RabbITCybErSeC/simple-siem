@@ -7,6 +7,7 @@ ARG GOOSE_VERSION=v3.30.0
 ARG AIR_VERSION=v1.67.4
 ARG GOVULNCHECK_VERSION=v1.9.0
 ARG ACTIONLINT_VERSION=v1.7.12
+ARG SHELLCHECK_VERSION=0.9.0-1
 ARG PNPM_VERSION=12.18.0
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -20,6 +21,10 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && go install github.com/air-verse/air@${AIR_VERSION} \
  && go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} \
  && go install github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends shellcheck=${SHELLCHECK_VERSION} \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
