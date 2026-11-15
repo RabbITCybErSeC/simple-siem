@@ -17,6 +17,9 @@ import { countsParams, histogramParams, listParams } from "./urlState";
 
 const CASES_PATH = "/cases";
 
+/** The prefix of every cached queue page; detail mutations merge into them. */
+export const casesListPrefix = ["cases", "list"] as const;
+
 export function useCaseList(state: CaseQueueState) {
   const queryClient = useQueryClient();
   const parameters = listParams(state).toString();
@@ -108,7 +111,7 @@ export function countNewOrUpdated(
 }
 
 function listQueryKey(parameters: string) {
-  return ["cases", "list", parameters] as const;
+  return [...casesListPrefix, parameters] as const;
 }
 
 function casePagePath(parameters: string, cursor: string | null): string {

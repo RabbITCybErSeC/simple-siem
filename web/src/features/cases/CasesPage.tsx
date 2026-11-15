@@ -105,8 +105,6 @@ interface CaseSelection {
   bulkCloseOpen: boolean;
 }
 
-const EMPTY_SELECTION: ReadonlySet<string> = new Set();
-
 /**
  * The route wrapper: an invalid case number is a page that does not exist,
  * before the queue starts loading anything.
@@ -147,6 +145,12 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
     ids: new Set(),
     bulkCloseOpen: false,
   });
+
+  // The selection belongs to one set of filters, however the URL changed
+  // (tabs, links, Back/Forward, the palette).
+  if (selection.filterKey !== filterKey) {
+    setSelection({ filterKey, ids: new Set(), bulkCloseOpen: false });
+  }
   const [closeRequestedFor, setCloseRequestedFor] = useState<
     number | undefined
   >();
@@ -182,16 +186,6 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
     }
     setPendingChanges(0);
     setRowAssignFailure(null);
-    // The selection belongs to one set of filters: a bulk close must never
-    // act on rows the analyst chose under another filter.
-    const nextFilterKey = queueFilterKey(next);
-    if (nextFilterKey !== filterKey) {
-      setSelection({
-        filterKey: nextFilterKey,
-        ids: new Set(),
-        bulkCloseOpen: false,
-      });
-    }
     setSearchParams(new URLSearchParams(search), { replace });
   };
 
@@ -285,27 +279,18 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
   const cases = listQuery.data?.pages.flatMap((page) => page.data) ?? [];
   const listError = listQuery.isError ? listQuery.error : null;
   const listedIds = new Set(cases.map((item) => item.id));
-  const currentSelection = selection.filterKey === filterKey ? selection : null;
-  const selectedIds = currentSelection
-    ? new Set([...currentSelection.ids].filter((id) => listedIds.has(id)))
-    : EMPTY_SELECTION;
+  const selectedIds = new Set(
+    [...selection.ids].filter((id) => listedIds.has(id)),
+  );
   const selectedCases = cases.filter((item) => selectedIds.has(item.id));
-  const bulkCloseOpen =
-    currentSelection !== null && currentSelection.bulkCloseOpen;
+  const bulkCloseOpen = selection.bulkCloseOpen;
 
   const changeSelection = (change: (ids: Set<string>) => Set<string>) => {
-    setSelection((current) => {
-      const ids =
-        current.filterKey === filterKey
-          ? new Set([...current.ids].filter((id) => listedIds.has(id)))
-          : new Set<string>();
-      return {
-        filterKey,
-        ids: change(ids),
-        bulkCloseOpen:
-          current.filterKey === filterKey ? current.bulkCloseOpen : false,
-      };
-    });
+    setSelection((current) => ({
+      filterKey,
+      ids: change(new Set([...current.ids].filter((id) => listedIds.has(id)))),
+      bulkCloseOpen: current.bulkCloseOpen,
+    }));
   };
 
   const selectCase = (item: CaseSummary, selected: boolean) => {
@@ -342,17 +327,13 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
     setBulkCloseKey((key) => key + 1);
     setSelection((current) => ({
       filterKey,
-      ids: current.filterKey === filterKey ? current.ids : new Set(),
+      ids: current.ids,
       bulkCloseOpen: true,
     }));
   };
 
   const setBulkCloseOpen = (open: boolean) => {
-    setSelection((current) =>
-      current.filterKey === filterKey
-        ? { ...current, bulkCloseOpen: open }
-        : current,
-    );
+    setSelection((current) => ({ ...current, bulkCloseOpen: open }));
   };
 
   const requestClose = (item: CaseSummary) => {

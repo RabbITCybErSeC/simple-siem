@@ -1574,6 +1574,36 @@ describe("case selection", () => {
     );
   });
 
+  it("clears the selection when the filters change outside the tab control", async () => {
+    const { router } = renderCases("/cases?scope=all");
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    expect(selectionToolbar()).toHaveTextContent("1 selected");
+
+    // A link or a palette command changes the filters, not the tab control.
+    await act(async () => {
+      await router.navigate("/cases?scope=all&tab=closed");
+    });
+    const closedTable = await screen.findByRole("table", {
+      name: "Cases: Closed, All",
+    });
+    await within(closedTable).findByText("Brute force → success");
+    expect(selectionToolbar()).not.toBeInTheDocument();
+
+    await act(async () => {
+      await router.navigate(-1);
+    });
+    const openTable = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(openTable).findByText("Brute force → success");
+    expect(selectionToolbar()).not.toBeInTheDocument();
+    expect(rowCheckbox(openTable, 312)).toHaveAttribute("aria-checked", "false");
+  });
+
   it("keeps the selection cleared after switching filters and back", async () => {
     renderCases("/cases?scope=all");
     const table = await screen.findByRole("table", {

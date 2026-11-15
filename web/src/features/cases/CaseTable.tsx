@@ -9,7 +9,6 @@ import {
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError } from "../../api/client";
 import { Badge } from "../../components/ui/badge";
-import { Button } from "../../components/ui/button";
 import { Checkbox } from "../../components/ui/checkbox";
 import {
   Table,
@@ -21,6 +20,7 @@ import {
   TableRow,
 } from "../../components/ui/table";
 import type { TimeZoneSetting } from "../shell/types";
+import { SectionError } from "./detail/CaseSections";
 import { formatExact, relativeTime } from "./timeRange";
 import type {
   CaseOutcome,
@@ -220,21 +220,7 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
 
     if (error !== null) {
       return (
-        <div
-          role="alert"
-          className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-foreground"
-        >
-          <p>{caseErrorMessage(error)}</p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="mt-3"
-            onClick={onRetry}
-          >
-            Retry
-          </Button>
-        </div>
+        <SectionError message={caseErrorMessage(error)} onRetry={onRetry} />
       );
     }
 

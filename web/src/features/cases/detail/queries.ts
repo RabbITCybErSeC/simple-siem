@@ -7,6 +7,7 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 import { apiRequest, get } from "../../../api/client";
+import { casesListPrefix } from "../queries";
 import type { CaseListResponse, CaseSummary } from "../types";
 import type {
   AlertSummary,
@@ -118,12 +119,23 @@ export function useBulkCloseCases() {
       const conflicts = response.results
         .filter((result) => result.status === "VERSION_CONFLICT")
         .map((result) => result.caseId);
-      const refreshed = await Promise.allSettled(
-        conflicts.map((caseId) => get<CaseDetail>(`/cases/${caseId}`)),
+      const refreshes = await Promise.allSettled(
+        conflicts.map(async (caseId) => ({
+          caseId,
+          detail: await get<CaseDetail>(`/cases/${caseId}`),
+        })),
       );
-      for (const result of refreshed) {
-        if (result.status === "fulfilled") {
-          mergeCaseIntoQueue(queryClient, result.value);
+      const refreshed = new Set<string>();
+      for (const result of refreshes) {
+        if (result.status !== "fulfilled") {
+          continue;
+        }
+        const { caseId, detail } = result.value;
+        refreshed.add(caseId);
+        mergeCaseIntoQueue(queryClient, detail);
+        const caseNumber = caseNumbers[caseId];
+        if (caseNumber !== undefined) {
+          queryClient.setQueryData(caseQueryKey(caseNumber), detail);
         }
       }
 
@@ -137,7 +149,7 @@ export function useBulkCloseCases() {
           queryKey: ["case", id, "timeline"],
         });
         const caseNumber = caseNumbers[id];
-        if (caseNumber !== undefined) {
+        if (caseNumber !== undefined && !refreshed.has(id)) {
           void queryClient.invalidateQueries({
             queryKey: ["case", caseNumber],
           });
@@ -167,23 +179,22 @@ export function useCaseTimeline(caseId: string, kind?: "ACTIVITY") {
   });
 }
 
-/** The queue row's version at submit time, after any cache merge. */
-export function cachedCaseVersion(
+/** Every cached queue row's version, for a submit-time read. */
+export function cachedCaseVersions(
   queryClient: QueryClient,
-  caseId: string,
-): number | undefined {
+): Map<string, number> {
+  const versions = new Map<string, number>();
   const pages = queryClient.getQueriesData<InfiniteData<CaseListResponse>>({
-    queryKey: ["cases", "list"],
+    queryKey: casesListPrefix,
   });
   for (const [, data] of pages) {
     for (const page of data?.pages ?? []) {
-      const row = page.data.find((item) => item.id === caseId);
-      if (row !== undefined) {
-        return row.version;
+      for (const row of page.data) {
+        versions.set(row.id, row.version);
       }
     }
   }
-  return undefined;
+  return versions;
 }
 
 function mergeCaseIntoQueue(queryClient: QueryClient, detail: CaseDetail) {
@@ -215,7 +226,7 @@ function updateQueuePages(
   update: (item: CaseSummary) => CaseSummary,
 ) {
   queryClient.setQueriesData<InfiniteData<CaseListResponse>>(
-    { queryKey: ["cases", "list"] },
+    { queryKey: casesListPrefix },
     (data) =>
       data === undefined
         ? data

@@ -15,7 +15,7 @@ import {
 import type { CaseSummary } from "../types";
 import type { ClosureValues } from "./CloseCaseDialog";
 import { ClosureFields, closeSchema } from "./CloseCaseDialog";
-import { useBulkCloseCases, cachedCaseVersion } from "./queries";
+import { useBulkCloseCases, cachedCaseVersions } from "./queries";
 import type { BulkCloseResponse, BulkCloseStatus } from "./types";
 
 const BULK_STATUS_LABELS: Record<BulkCloseStatus, string> = {
@@ -55,12 +55,13 @@ export function BulkCloseDialog({
   const onSubmit = form.handleSubmit(async (values) => {
     setFailure(null);
     setSubmittedCases(cases);
+    const versions = cachedCaseVersions(queryClient);
     try {
       const response = await bulkClose.mutateAsync({
         request: {
           cases: cases.map((item) => ({
             id: item.id,
-            version: cachedCaseVersion(queryClient, item.id) ?? item.version,
+            version: versions.get(item.id) ?? item.version,
           })),
           outcome: values.outcome,
           closureReason: values.closureReason,

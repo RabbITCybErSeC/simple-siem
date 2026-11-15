@@ -347,7 +347,7 @@ interface SectionErrorProps {
   onRetry: () => void;
 }
 
-function SectionError({ message, onRetry }: SectionErrorProps) {
+export function SectionError({ message, onRetry }: SectionErrorProps) {
   return (
     <div
       role="alert"

@@ -234,7 +234,6 @@ export function safeNextPath(next: string | null): string {
     decoded === null ||
     !isPath(next) ||
     !isPath(decoded) ||
-    isLoginPath(next) ||
     isLoginPath(decoded)
   ) {
     return CASES_PATH;

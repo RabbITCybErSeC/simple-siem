@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Bar, BarChart, ReferenceArea, XAxis, YAxis } from "recharts";
-import { Button } from "../../components/ui/button";
 import {
   ChartContainer,
   ChartLegend,
@@ -10,6 +9,7 @@ import {
   type ChartConfig,
 } from "../../components/ui/chart";
 import type { TimeZoneSetting } from "../shell/types";
+import { SectionError } from "./detail/CaseSections";
 import {
   formatExact,
   toSecondIso,
@@ -197,21 +197,7 @@ export function TrendChart({
           className="h-40 animate-pulse rounded-lg bg-muted"
         />
       ) : error ? (
-        <div
-          role="alert"
-          className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-foreground"
-        >
-          <p>Could not load the trend.</p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="mt-3"
-            onClick={onRetry}
-          >
-            Retry
-          </Button>
-        </div>
+        <SectionError message="Could not load the trend." onRetry={onRetry} />
       ) : !hasCases ? (
         <p className="text-sm text-muted-foreground">No cases in this range.</p>
       ) : (
