@@ -116,7 +116,7 @@ test("the queue and detail tab lists sit above their panels", async ({
   ).toHaveCSS("flex-direction", "column");
 });
 
-test("the selected Status tab has a background of its own", async ({ page }) => {
+test("the selected Status tab shows its underline", async ({ page }) => {
   await openCases(page);
 
   const statusTabs = page.getByRole("tablist", { name: "Status" });
@@ -125,22 +125,25 @@ test("the selected Status tab has a background of its own", async ({ page }) => 
   await expect(selected).toHaveAttribute("aria-selected", "true");
   await expect(unselected).toHaveAttribute("aria-selected", "false");
 
-  const selectedBackground = await readComputedProperty(
-    selected,
-    "background-color",
-  );
-  const unselectedBackground = await readComputedProperty(
-    unselected,
-    "background-color",
-  );
+  const underlineOpacity = (tab: Locator): Promise<string> =>
+    tab.evaluate((element) => {
+      const browser = globalThis as unknown as {
+        getComputedStyle(
+          target: unknown,
+          pseudoElement: string,
+        ): { opacity: string };
+      };
+      return browser.getComputedStyle(element, "::after").opacity;
+    });
+
   expect(
-    selectedBackground,
-    "the selected Status tab has a visible background",
-  ).not.toBe("rgba(0, 0, 0, 0)");
+    await underlineOpacity(selected),
+    "the selected Status tab shows its underline",
+  ).toBe("1");
   expect(
-    selectedBackground,
-    "the selected Status tab background differs from an unselected tab",
-  ).not.toBe(unselectedBackground);
+    await underlineOpacity(unselected),
+    "an unselected Status tab has no underline",
+  ).toBe("0");
 });
 
 test("exactly one palette option is highlighted and ArrowDown moves it", async ({

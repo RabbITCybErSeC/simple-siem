@@ -452,6 +452,12 @@ describe("Cases page", () => {
       await screen.findByRole("tab", { name: "Open" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("radio", { name: "Mine" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("radio", { name: "Mine 5" }),
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByRole("tab", { name: "Open 42" }),
     ).not.toBeInTheDocument();
 
@@ -460,6 +466,18 @@ describe("Cases page", () => {
     expect(
       await screen.findByRole("tab", { name: "Open 42" }),
     ).toBeInTheDocument();
+  });
+
+  it("names the auto-refresh control after what it controls", async () => {
+    renderCases();
+    await screen.findByRole("table", { name: "Cases: Open, Mine" });
+
+    expect(
+      screen.getByText("Open work ignores the time range."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Refresh interval" }),
+    ).toHaveTextContent("Auto-refresh off");
   });
 
   it("says the queue is empty for the tab and scope", async () => {

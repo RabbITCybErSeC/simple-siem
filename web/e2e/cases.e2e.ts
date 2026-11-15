@@ -1,6 +1,67 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { FIXTURE_NOW } from "./support/cases.ts";
 import { expect, signIn, test } from "./support/test.ts";
+
+type Rgba = [number, number, number, number];
+
+interface BrowserStorage {
+  localStorage: { setItem: (key: string, value: string) => void };
+}
+
+interface ScrollGlobals {
+  document: { documentElement: { scrollWidth: number } };
+  innerWidth: number;
+}
+
+interface ScrollableElement {
+  scrollHeight: number;
+  scrollTop: number;
+}
+
+interface BrowserElement {
+  getAttribute(name: string): string | null;
+  querySelectorAll(selector: string): ArrayLike<BrowserElement>;
+  textContent: string | null;
+}
+
+interface ColourContext {
+  fillStyle: string;
+  clearRect(x: number, y: number, width: number, height: number): void;
+  fillRect(x: number, y: number, width: number, height: number): void;
+  getImageData(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): { data: ArrayLike<number> };
+}
+
+interface ColourCanvas {
+  width: number;
+  height: number;
+  getContext(
+    type: string,
+    options?: { willReadFrequently?: boolean },
+  ): ColourContext | null;
+}
+
+interface ColourGlobals {
+  document: {
+    createElement(tagName: string): ColourCanvas;
+  };
+  getComputedStyle(element: unknown): {
+    backgroundColor: string;
+    color: string;
+  };
+}
+
+interface ScopeColour {
+  label: string;
+  checked: boolean;
+  text: string;
+  background: string;
+  groupBackground: string;
+}
 
 test.beforeEach(async ({ page }) => {
   await page.clock.install({ time: FIXTURE_NOW });
@@ -15,6 +76,149 @@ function listRequests(api: { caseRequests: () => string[] }) {
 function openCasesTable(page: Page) {
   return page.getByRole("table", { name: "Cases: Open, Mine" });
 }
+
+async function storeSidebar(page: Page, value: "expanded" | "collapsed") {
+  await page.addInitScript((sidebar) => {
+    const browser = globalThis as unknown as BrowserStorage;
+    browser.localStorage.setItem("simple-siem.sidebar", sidebar);
+  }, value);
+}
+
+async function pageWidths(page: Page) {
+  return page.evaluate(() => {
+    const browser = globalThis as unknown as ScrollGlobals;
+    return {
+      scrollWidth: browser.document.documentElement.scrollWidth,
+      innerWidth: browser.innerWidth,
+    };
+  });
+}
+
+async function controlHeights(page: Page): Promise<Record<string, number>> {
+  const controls: Record<string, Locator> = {
+    "Step back": page.getByRole("button", { name: "Step back" }),
+    Range: page.getByRole("button", { name: "Last 24 hours" }),
+    "Step forward": page.getByRole("button", { name: "Step forward" }),
+    "Time field": page.getByRole("combobox", { name: "Time field" }),
+    "Refresh now": page.getByRole("button", { name: "Refresh now" }),
+    "Refresh interval": page.getByRole("combobox", {
+      name: "Refresh interval",
+    }),
+    "Assignee scope": page.getByRole("radiogroup", {
+      name: "Assignee scope",
+    }),
+    Sort: page.getByRole("combobox", { name: "Sort" }),
+  };
+  const heights: Record<string, number> = {};
+  for (const [name, locator] of Object.entries(controls)) {
+    const box = await locator.boundingBox();
+    if (box === null) {
+      throw new Error(`the ${name} control has no box`);
+    }
+    heights[name] = box.height;
+  }
+  return heights;
+}
+
+function readScopeColours(scope: Locator): Promise<ScopeColour[]> {
+  return scope.evaluate((group) => {
+    const browser = globalThis as unknown as ColourGlobals;
+    const canvas = browser.document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (context === null) {
+      throw new Error("a 2d canvas context is required");
+    }
+    const normalise = (colour: string): string => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = colour;
+      context.fillRect(0, 0, 1, 1);
+      const [red, green, blue, alpha] = Array.from(
+        context.getImageData(0, 0, 1, 1).data,
+      );
+      return `rgba(${red}, ${green}, ${blue}, ${alpha / 255})`;
+    };
+    const element = group as unknown as BrowserElement;
+    const groupBackground = normalise(
+      browser.getComputedStyle(group).backgroundColor,
+    );
+    return Array.from(element.querySelectorAll('[role="radio"]')).map(
+      (option) => ({
+        label: (option.textContent ?? "").trim(),
+        checked: option.getAttribute("aria-checked") === "true",
+        text: normalise(browser.getComputedStyle(option).color),
+        background: normalise(
+          browser.getComputedStyle(option).backgroundColor,
+        ),
+        groupBackground,
+      }),
+    );
+  });
+}
+
+function parseColour(colour: string): Rgba {
+  const match = /^rgba?\(([^)]+)\)$/.exec(colour);
+  if (match === null) {
+    throw new Error(`unrecognised colour ${colour}`);
+  }
+  const parts = match[1].split(/[,/]/).map((part) => part.trim());
+  return [
+    Number(parts[0]),
+    Number(parts[1]),
+    Number(parts[2]),
+    parts[3] === undefined ? 1 : Number(parts[3]),
+  ];
+}
+
+function composite(foreground: Rgba, background: Rgba): Rgba {
+  const alpha = foreground[3] + background[3] * (1 - foreground[3]);
+  if (alpha === 0) {
+    return [0, 0, 0, 0];
+  }
+  return [
+    (foreground[0] * foreground[3] +
+      background[0] * background[3] * (1 - foreground[3])) /
+      alpha,
+    (foreground[1] * foreground[3] +
+      background[1] * background[3] * (1 - foreground[3])) /
+      alpha,
+    (foreground[2] * foreground[3] +
+      background[2] * background[3] * (1 - foreground[3])) /
+      alpha,
+    alpha,
+  ];
+}
+
+function relativeLuminance([red, green, blue]: Rgba): number {
+  const channel = (value: number) => {
+    const normalised = value / 255;
+    return normalised <= 0.04045
+      ? normalised / 12.92
+      : ((normalised + 0.055) / 1.055) ** 2.4;
+  };
+  return (
+    0.2126 * channel(red) +
+    0.7152 * channel(green) +
+    0.0722 * channel(blue)
+  );
+}
+
+function contrastRatio(foreground: Rgba, background: Rgba): number {
+  const blended = composite(foreground, background);
+  const first = relativeLuminance(blended);
+  const second = relativeLuminance(background);
+  return (
+    (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
+  );
+}
+
+function effectiveBackground(option: ScopeColour): Rgba {
+  const group = parseColour(option.groupBackground);
+  const own = parseColour(option.background);
+  return own[3] === 0 ? group : composite(own, group);
+}
+
 
 test("shows my open cases, counts, and the trend chart", async ({
   page,
@@ -265,4 +469,221 @@ test("pauses refresh while the command palette is open", async ({
   await page.clock.runFor(30_000);
 
   expect(api.caseRequests()).toHaveLength(before);
+});
+
+test("the header and filter controls share one rendered height", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  for (const width of [1440, 1024]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/cases");
+    await expect(openCasesTable(page).locator("tbody tr")).toHaveCount(50);
+
+    const heights = Object.entries(await controlHeights(page));
+    const [referenceName, referenceHeight] = heights[0];
+    for (const [name, height] of heights.slice(1)) {
+      expect(
+        Math.abs(height - referenceHeight),
+        `at ${width}px, ${name} is as tall as ${referenceName}`,
+      ).toBeLessThanOrEqual(1);
+    }
+  }
+});
+
+test("the time range sits with the heading and lines up with the table", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  await page.goto("/cases");
+  const table = openCasesTable(page);
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+
+  const heading = await page
+    .getByRole("heading", { name: "Cases" })
+    .boundingBox();
+  const range = await page
+    .getByRole("button", { name: "Last 24 hours" })
+    .boundingBox();
+  const refresh = await page
+    .getByRole("combobox", { name: "Refresh interval" })
+    .boundingBox();
+  const frame = await table.boundingBox();
+  if (heading === null || range === null || refresh === null || frame === null) {
+    throw new Error("a header or table element has no box");
+  }
+
+  expect(
+    Math.abs(
+      heading.y + heading.height / 2 - (range.y + range.height / 2),
+    ),
+    "the time range is on the heading's row",
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(refresh.x + refresh.width - (frame.x + frame.width)),
+    "the header actions end with the table frame",
+  ).toBeLessThanOrEqual(1);
+});
+
+test("the selected scope is distinct and its text passes contrast", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.goto("/cases");
+    await expect(openCasesTable(page).locator("tbody tr")).toHaveCount(50);
+    const html = page.locator("html");
+    if (theme === "dark") {
+      await expect(html).toHaveClass(/dark/);
+    } else {
+      await expect(html).not.toHaveClass(/dark/);
+    }
+
+    const options = await readScopeColours(
+      page.getByRole("radiogroup", { name: "Assignee scope" }),
+    );
+    const selected = options.find((option) => option.checked);
+    if (selected === undefined) {
+      throw new Error(`no scope option is selected in ${theme}`);
+    }
+    const selectedBackground = effectiveBackground(selected).map(Math.round);
+
+    for (const option of options) {
+      expect(
+        contrastRatio(parseColour(option.text), effectiveBackground(option)),
+        `${theme}: ${option.label} text meets 4.5:1`,
+      ).toBeGreaterThanOrEqual(4.5);
+      if (!option.checked) {
+        expect(
+          effectiveBackground(option).map(Math.round),
+          `${theme}: the selected ${selected.label} differs from ${option.label}`,
+        ).not.toEqual(selectedBackground);
+      }
+    }
+  }
+});
+
+test("the queue does not scroll sideways at 390", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await signIn(page);
+  await page.goto("/cases");
+  await expect(openCasesTable(page).locator("tbody tr")).toHaveCount(50);
+
+  const widths = await pageWidths(page);
+  expect(
+    widths.scrollWidth,
+    "the document is no wider than the viewport",
+  ).toBeLessThanOrEqual(widths.innerWidth);
+});
+
+test("the split keeps the timeline inside the detail pane", async ({ page }) => {
+  await storeSidebar(page, "collapsed");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  await page.goto("/cases/7?scope=all&view=timeline");
+
+  await expect(page.getByRole("region", { name: "Case #7" })).toBeVisible();
+  await expect(page.getByRole("list", { name: "Timeline" })).toBeVisible();
+
+  const queue = await page.locator("[data-case-list]").boundingBox();
+  const detail = await page.locator("[data-case-list] + div").boundingBox();
+  if (queue === null || detail === null) {
+    throw new Error("a split pane has no box");
+  }
+  expect(
+    queue.x + queue.width,
+    "the detail pane starts where the queue ends",
+  ).toBeLessThanOrEqual(detail.x + 1);
+
+  const widths = await pageWidths(page);
+  expect(
+    widths.scrollWidth,
+    "the split does not widen the document",
+  ).toBeLessThanOrEqual(widths.innerWidth);
+});
+
+test("the split panes scroll on their own", async ({ page }) => {
+  await storeSidebar(page, "collapsed");
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await signIn(page);
+  await page.goto("/cases/7?scope=all&view=timeline");
+  await expect(page.getByRole("list", { name: "Timeline" })).toBeVisible();
+
+  const queuePane = page.locator("[data-case-list]");
+  const detailPane = page.locator("[data-case-list] + div");
+  await queuePane.evaluate((element) => {
+    (element as unknown as ScrollableElement).scrollTop = 120;
+  });
+  const queueScroll = await queuePane.evaluate(
+    (element) => (element as unknown as ScrollableElement).scrollTop,
+  );
+  expect(queueScroll, "the queue pane scrolled").toBeGreaterThan(0);
+
+  await detailPane.evaluate((element) => {
+    const pane = element as unknown as ScrollableElement;
+    pane.scrollTop = pane.scrollHeight;
+  });
+  await expect
+    .poll(() =>
+      detailPane.evaluate(
+        (element) => (element as unknown as ScrollableElement).scrollTop,
+      ),
+    )
+    .toBeGreaterThan(0);
+  expect(
+    await queuePane.evaluate(
+      (element) => (element as unknown as ScrollableElement).scrollTop,
+    ),
+    "scrolling the detail leaves the queue where it was",
+  ).toBe(queueScroll);
+});
+
+test("an open case fills the main area below the split width", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  for (const width of [1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/cases");
+    const table = openCasesTable(page);
+    await expect(table.locator("tbody tr")).toHaveCount(50);
+
+    const row = table.locator("tbody tr").first();
+    await row.focus();
+    const number = (await row.locator("td").nth(1).textContent())?.trim();
+    if (number === undefined) {
+      throw new Error("the first row has no case number");
+    }
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("region", { name: `Case ${number}` }),
+    ).toBeVisible();
+    await expect(
+      page.locator("[data-case-list]"),
+      `at ${width}px the queue makes room for the case`,
+    ).toBeHidden();
+
+    const main = await page.locator("main").boundingBox();
+    const pane = await page.locator("[data-case-list] + div").boundingBox();
+    if (main === null || pane === null) {
+      throw new Error("the main area or detail pane has no box");
+    }
+    expect(
+      Math.abs(pane.width - (main.width - 48)),
+      `at ${width}px the detail pane fills the main content width`,
+    ).toBeLessThanOrEqual(2);
+
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-case-list]")).toBeVisible();
+    const focused = page.locator("tbody tr:focus");
+    await expect(focused).toHaveCount(1);
+    expect((await focused.locator("td").nth(1).textContent())?.trim()).toBe(
+      number,
+    );
+  }
 });

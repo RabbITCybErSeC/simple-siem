@@ -1,4 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { Button } from "../../components/ui/button";
@@ -92,7 +93,7 @@ const SORT_OPTIONS: { value: CaseSort; label: string }[] = [
 ];
 
 const REFRESH_OPTIONS: { value: RefreshInterval; label: string }[] = [
-  { value: "off", label: "Off" },
+  { value: "off", label: "Auto-refresh off" },
   { value: "10s", label: "10 seconds" },
   { value: "30s", label: "30 seconds" },
   { value: "1m", label: "1 minute" },
@@ -410,257 +411,292 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
       <title>
         {detailOpen ? `Case #${caseNumber} · Simple SIEM` : "Cases · Simple SIEM"}
       </title>
-      <div
-        className={detailOpen ? layoutGridClass(detailState.layout) : undefined}
-      >
-        <div data-case-list hidden={listHidden} className="min-w-0">
-          <h1
-            tabIndex={-1}
-            className="text-2xl font-semibold tracking-tight outline-none"
+      <div className="@container">
+        <div
+          className={
+            detailOpen ? layoutGridClass(detailState.layout) : undefined
+          }
+        >
+          <div
+            data-case-list
+            hidden={listHidden}
+            className={listPaneClass(detailOpen, detailState.layout)}
           >
-            Cases
-          </h1>
-
-          <div className="mt-4 flex flex-wrap items-end gap-3">
-            <div
-              role="radiogroup"
-              aria-label="Assignee scope"
-              className="flex gap-1 rounded-lg bg-muted p-1"
-            >
-              {SCOPE_OPTIONS.map((option) => {
-                const selected = state.scope === option.value;
-                const count = countLabel(
-                  counts?.scope[option.value],
-                  counts?.cap,
-                );
-                return (
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
+              <h1
+                tabIndex={-1}
+                className="text-xl leading-8 font-semibold tracking-tight outline-none"
+              >
+                Cases
+              </h1>
+              <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:justify-end">
+                {usesTimeRange(state.tab) ? null : (
+                  <span className="text-xs text-muted-foreground max-lg:sr-only">
+                    Open work ignores the time range.
+                  </span>
+                )}
+                <TimeRangePicker
+                  range={state.range}
+                  field={state.field}
+                  timeZone={timeZone}
+                  onRangeChange={(range) => updateState({ range }, false)}
+                  onFieldChange={(field) => updateState({ field }, false)}
+                />
+                <div className="control-group">
                   <Button
-                    key={option.value}
                     type="button"
-                    role="radio"
-                    aria-checked={selected}
-                    variant={selected ? "secondary" : "ghost"}
-                    size="sm"
-                    onClick={() => updateState({ scope: option.value }, false)}
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Refresh now"
+                    onClick={() => void refreshTick(true)}
                   >
-                    {withCount(option.label, count)}
+                    <RefreshCwIcon aria-hidden="true" />
                   </Button>
-                );
-              })}
+                  <Select
+                    value={state.refresh}
+                    onValueChange={(value) =>
+                      updateState({ refresh: value as RefreshInterval }, true)
+                    }
+                  >
+                    <SelectTrigger
+                      aria-label="Refresh interval"
+                      className="w-40 border-0 bg-transparent dark:bg-transparent"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent align="end">
+                      {REFRESH_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </div>
 
-            <TimeRangePicker
-              range={state.range}
-              field={state.field}
-              timeZone={timeZone}
-              onRangeChange={(range) => updateState({ range }, false)}
-              onFieldChange={(field) => updateState({ field }, false)}
-            />
-
-            <div className="flex items-center gap-2">
-              <Label htmlFor="case-refresh" className="sr-only">
-                Refresh interval
-              </Label>
-              <Select
-                value={state.refresh}
-                onValueChange={(value) =>
-                  updateState({ refresh: value as RefreshInterval }, true)
-                }
-              >
-                <SelectTrigger id="case-refresh" size="sm" className="w-32">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {REFRESH_OPTIONS.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => void refreshTick(true)}
-              >
-                Refresh now
-              </Button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Label htmlFor="case-sort" className="sr-only">
-                Sort
-              </Label>
-              <Select
-                value={state.sort}
-                onValueChange={(value) =>
-                  updateState({ sort: value as CaseSort }, true)
-                }
-              >
-                <SelectTrigger id="case-sort" size="sm" className="w-56">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {SORT_OPTIONS.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {usesTimeRange(state.tab) ? null : (
-            <p className="mt-2 text-xs text-muted-foreground">
-              Open work ignores the time range.
-            </p>
-          )}
-
-          {listHidden ? null : (
-            <div className="mt-4">
-              <TrendChart
-                histogram={histogramQuery.data}
-                timeZone={timeZone}
-                loading={histogramQuery.isPending}
-                error={histogramQuery.isError}
-                onRetry={() => void histogramQuery.refetch()}
-                onZoom={(range) => updateState({ range }, false)}
-              />
-            </div>
-          )}
-
-          {caseNumber === undefined && rowAssignFailure !== null ? (
-            <div className="mt-4">
-              <CaseActionAlert
-                failure={rowAssignFailure}
-                onReload={reloadRow}
-              />
-            </div>
-          ) : null}
-
-          <Tabs
-            value={state.tab}
-            onValueChange={(value) =>
-              updateState({ tab: value as CaseTab }, false)
-            }
-            className="mt-4"
-          >
-            <TabsList aria-label="Status">
-              {TAB_OPTIONS.map((option) => (
-                <TabsTrigger key={option.value} value={option.value}>
-                  {withCount(
-                    option.label,
-                    countLabel(
+            <Tabs
+              value={state.tab}
+              onValueChange={(value) =>
+                updateState({ tab: value as CaseTab }, false)
+              }
+              className="mt-4 gap-4"
+            >
+              <div className="-mx-4 overflow-x-auto border-b border-border px-4 sm:mx-0 sm:px-0">
+                <TabsList
+                  variant="line"
+                  aria-label="Status"
+                  className="h-10 gap-4 p-0"
+                >
+                  {TAB_OPTIONS.map((option) => {
+                    const count = countLabel(
                       counts?.status[STATUS_KEYS[option.value]],
                       counts?.cap,
-                    ),
-                  )}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-            <TabsContent value={state.tab}>
-              {selectedIds.size > 0 ? (
-                <div
-                  role="toolbar"
-                  aria-label="Selected cases"
-                  className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-                >
-                  <span>{`${selectedIds.size} selected`}</span>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={selectedIds.size > 100}
-                    onClick={openBulkClose}
-                  >
-                    {selectedIds.size > 100
-                      ? "Close selected (max 100)"
-                      : "Close selected"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={clearSelection}
-                  >
-                    Clear selection
-                  </Button>
-                </div>
-              ) : null}
-              {pendingChanges > 0 && (
-                <div
-                  role="status"
-                  className="mb-3 flex items-center gap-3 rounded-lg border border-border bg-muted px-3 py-2 text-sm"
-                >
-                  <span>{pendingLabel(pendingChanges)}</span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void showPendingChanges()}
-                  >
-                    Show
-                  </Button>
-                </div>
-              )}
-              <CaseTable
-                ref={tableRef}
-                cases={cases}
-                tab={state.tab}
-                scope={state.scope}
-                timeZone={timeZone}
-                loading={listQuery.isPending}
-                error={listError}
-                selectedIds={selectedIds}
-                onRetry={() => void listQuery.refetch()}
-                onSelectCase={selectCase}
-                onSelectAll={selectPage}
-                onOpen={openCase}
-                onAssign={assignRow}
-                onClose={requestClose}
-              />
-              {listQuery.hasNextPage && listError === null && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="mt-3"
-                  disabled={listQuery.isFetchingNextPage}
-                  onClick={() => void listQuery.fetchNextPage()}
-                >
-                  Load more
-                </Button>
-              )}
-            </TabsContent>
-          </Tabs>
-        </div>
+                    );
+                    return (
+                      <TabsTrigger
+                        key={option.value}
+                        value={option.value}
+                        className="group/status h-10 flex-none gap-2 px-0.5 after:bottom-[-1px]"
+                      >
+                        {option.label}
+                        {count === "" ? null : (
+                          <>
+                            {" "}
+                            <span className="inline-flex h-5 min-w-6 items-center justify-center rounded-md bg-muted px-1.5 text-xs font-medium tabular-nums text-muted-foreground group-data-active/status:bg-foreground group-data-active/status:text-background">
+                              {count}
+                            </span>
+                          </>
+                        )}
+                      </TabsTrigger>
+                    );
+                  })}
+                </TabsList>
+              </div>
 
-        {caseNumber === undefined ? null : (
-          <div className="min-w-0">
-            {rowAssignFailure === null ? null : (
-              <div className="mb-3">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <div
+                  role="radiogroup"
+                  aria-label="Assignee scope"
+                  className="segmented"
+                >
+                  {SCOPE_OPTIONS.map((option) => {
+                    const count = countLabel(
+                      counts?.scope[option.value],
+                      counts?.cap,
+                    );
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={state.scope === option.value}
+                        className="segmented-item"
+                        onClick={() =>
+                          updateState({ scope: option.value }, false)
+                        }
+                      >
+                        {option.label}
+                        {count === "" ? null : (
+                          <>
+                            {" "}
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              {count}
+                            </span>
+                          </>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center gap-2 sm:ml-auto">
+                  <Label
+                    htmlFor="case-sort"
+                    className="text-sm font-normal text-muted-foreground"
+                  >
+                    Sort
+                  </Label>
+                  <Select
+                    value={state.sort}
+                    onValueChange={(value) =>
+                      updateState({ sort: value as CaseSort }, true)
+                    }
+                  >
+                    <SelectTrigger id="case-sort" className="w-48">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent align="end">
+                      {SORT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {listHidden ? null : (
+                <div>
+                  <TrendChart
+                    histogram={histogramQuery.data}
+                    timeZone={timeZone}
+                    loading={histogramQuery.isPending}
+                    error={histogramQuery.isError}
+                    onRetry={() => void histogramQuery.refetch()}
+                    onZoom={(range) => updateState({ range }, false)}
+                  />
+                </div>
+              )}
+
+              {caseNumber === undefined && rowAssignFailure !== null ? (
                 <CaseActionAlert
                   failure={rowAssignFailure}
                   onReload={reloadRow}
                 />
-              </div>
-            )}
-            <CaseDetail
-              key={caseNumber}
-              caseNumber={caseNumber}
-              view={detailState.view}
-              layout={detailState.layout}
-              queueState={state}
-              timeZone={timeZone}
-              closeRequested={closeRequestedFor === caseNumber}
-              onCloseRequestHandled={() => setCloseRequestedFor(undefined)}
-              onViewChange={changeView}
-              onLayoutChange={changeLayout}
-              onClose={closeDetail}
-            />
+              ) : null}
+
+              <TabsContent value={state.tab}>
+                {selectedIds.size > 0 ? (
+                  <div
+                    role="toolbar"
+                    aria-label="Selected cases"
+                    className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-muted px-3 py-2 text-sm"
+                  >
+                    <span>{`${selectedIds.size} selected`}</span>
+                    <Button
+                      type="button"
+                      disabled={selectedIds.size > 100}
+                      onClick={openBulkClose}
+                    >
+                      {selectedIds.size > 100
+                        ? "Close selected (max 100)"
+                        : "Close selected"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={clearSelection}
+                    >
+                      Clear selection
+                    </Button>
+                  </div>
+                ) : null}
+                {pendingChanges > 0 && (
+                  <div
+                    role="status"
+                    className="mb-3 flex items-center gap-3 rounded-lg border border-border bg-muted px-3 py-2 text-sm"
+                  >
+                    <span>{pendingLabel(pendingChanges)}</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => void showPendingChanges()}
+                    >
+                      Show
+                    </Button>
+                  </div>
+                )}
+                <CaseTable
+                  ref={tableRef}
+                  cases={cases}
+                  tab={state.tab}
+                  scope={state.scope}
+                  timeZone={timeZone}
+                  loading={listQuery.isPending}
+                  error={listError}
+                  selectedIds={selectedIds}
+                  onRetry={() => void listQuery.refetch()}
+                  onSelectCase={selectCase}
+                  onSelectAll={selectPage}
+                  onOpen={openCase}
+                  onAssign={assignRow}
+                  onClose={requestClose}
+                />
+                {listQuery.hasNextPage && listError === null && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                    disabled={listQuery.isFetchingNextPage}
+                    onClick={() => void listQuery.fetchNextPage()}
+                  >
+                    Load more
+                  </Button>
+                )}
+              </TabsContent>
+            </Tabs>
           </div>
-        )}
+
+          {caseNumber === undefined ? null : (
+            <div className={detailPaneClass(detailState.layout)}>
+              {rowAssignFailure === null ? null : (
+                <div className="mb-3">
+                  <CaseActionAlert
+                    failure={rowAssignFailure}
+                    onReload={reloadRow}
+                  />
+                </div>
+              )}
+              <CaseDetail
+                key={caseNumber}
+                caseNumber={caseNumber}
+                view={detailState.view}
+                layout={detailState.layout}
+                queueState={state}
+                timeZone={timeZone}
+                closeRequested={closeRequestedFor === caseNumber}
+                onCloseRequestHandled={() => setCloseRequestedFor(undefined)}
+                onViewChange={changeView}
+                onLayoutChange={changeLayout}
+                onClose={closeDetail}
+              />
+            </div>
+          )}
+        </div>
       </div>
 
       <BulkCloseDialog
@@ -690,10 +726,29 @@ function queueFilterKey(state: CaseQueueState): string {
   ].join("|");
 }
 
+const SPLIT_PANE_HEIGHT =
+  "@[80rem]:h-[calc(100svh-3.5rem-3rem)] @[80rem]:overflow-y-auto";
+
 function layoutGridClass(layout: CaseDetailLayout): string {
   return layout === "full"
     ? "grid gap-6"
-    : "grid gap-6 xl:grid-cols-[minmax(0,45fr)_minmax(0,55fr)]";
+    : "grid gap-6 @max-[80rem]:gap-0 @[80rem]:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]";
+}
+
+function listPaneClass(
+  detailOpen: boolean,
+  layout: CaseDetailLayout,
+): string {
+  if (!detailOpen || layout === "full") {
+    return "min-w-0";
+  }
+  return `min-w-0 @max-[80rem]:invisible @max-[80rem]:h-0 @max-[80rem]:overflow-hidden ${SPLIT_PANE_HEIGHT}`;
+}
+
+function detailPaneClass(layout: CaseDetailLayout): string {
+  return layout === "split"
+    ? `min-w-0 overflow-x-hidden ${SPLIT_PANE_HEIGHT}`
+    : "min-w-0 overflow-x-hidden";
 }
 
 function countLabel(
@@ -707,10 +762,6 @@ function countLabel(
     return `${cap.toLocaleString("en-US")}+`;
   }
   return value.toLocaleString("en-US");
-}
-
-function withCount(label: string, count: string): string {
-  return count === "" ? label : `${label} ${count}`;
 }
 
 function pendingLabel(count: number): string {
