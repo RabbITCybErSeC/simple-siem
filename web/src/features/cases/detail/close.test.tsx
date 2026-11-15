@@ -30,6 +30,7 @@ interface Responders {
   detail?: () => Response;
   alerts?: (search: URLSearchParams) => Response;
   close?: (body: unknown) => Response;
+  bulkClose?: (body: unknown) => Response;
 }
 
 const USER = {
@@ -162,6 +163,11 @@ function stubApi(responders: Responders = {}) {
       if (method === "POST" && url.pathname === "/api/v1/cases/case_312/close") {
         return (responders.close ?? (() => jsonResponse(makeDetail())))(body);
       }
+      if (method === "POST" && url.pathname === "/api/v1/cases/bulk-close") {
+        return (responders.bulkClose ?? (() => jsonResponse({ results: [] })))(
+          body,
+        );
+      }
       if (url.pathname === "/api/v1/cases/312") {
         return (responders.detail ?? (() => jsonResponse(makeDetail())))();
       }
@@ -205,7 +211,9 @@ function renderClose(
 }
 
 async function openCloseDialog(): Promise<HTMLElement> {
-  fireEvent.click(await screen.findByRole("button", { name: "Close case" }));
+  const opener = await screen.findByRole("button", { name: "Close case" });
+  opener.focus();
+  fireEvent.click(opener);
   return screen.findByRole("dialog", { name: "Close case #312" });
 }
 
@@ -282,6 +290,34 @@ describe("close case dialog", () => {
     ).toBeInTheDocument();
     expect(within(dialog).getByText("Write a conclusion.")).toBeInTheDocument();
     expect(closeRequests(api)).toHaveLength(0);
+  });
+
+  it("closes on Cancel without a request and focuses Close case", async () => {
+    const { api } = renderClose();
+    const dialog = await openCloseDialog();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Close case #312" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(closeRequests(api)).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Close case" })).toHaveFocus();
+  });
+
+  it("checks the radio when its label is clicked", async () => {
+    renderClose();
+    const dialog = await openCloseDialog();
+    const malicious = within(dialog).getByRole("radio", {
+      name: "Malicious",
+    });
+    expect(malicious).toHaveAttribute("aria-checked", "false");
+
+    fireEvent.click(within(dialog).getByText("Malicious"));
+
+    expect(malicious).toHaveAttribute("aria-checked", "true");
   });
 
   it("moves and selects the outcome with the arrow keys", async () => {
@@ -365,12 +401,12 @@ describe("close case dialog", () => {
     expect(closeRequests(api)).toHaveLength(0);
   });
 
-  it("shows no per-alert table for a single alert", async () => {
+  it("shows no dispositions list for a single alert", async () => {
     renderClose({ detail: () => jsonResponse(makeDetail({ alertCount: 1 })) });
     const dialog = await openCloseDialog();
 
     expect(
-      within(dialog).queryByRole("table", { name: "Alert dispositions" }),
+      within(dialog).queryByRole("list", { name: "Alert dispositions" }),
     ).not.toBeInTheDocument();
   });
 
@@ -396,11 +432,11 @@ describe("close case dialog", () => {
     });
     const dialog = await openCloseDialog();
 
-    const table = await within(dialog).findByRole("table", {
+    const list = await within(dialog).findByRole("list", {
       name: "Alert dispositions",
     });
-    expect(within(table).getAllByRole("row")).toHaveLength(102);
-    expect(within(table).getByText("Alert 101")).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(101);
+    expect(within(list).getByText("Alert 101")).toBeInTheDocument();
     const requests = api
       .requestsFor("/api/v1/cases/case_312/alerts")
       .filter((request) => request.method === "GET");
@@ -435,15 +471,15 @@ describe("close case dialog", () => {
       close: () => jsonResponse(makeDetail()),
     });
     const dialog = await openCloseDialog();
-    const table = await within(dialog).findByRole("table", {
+    const list = await within(dialog).findByRole("list", {
       name: "Alert dispositions",
     });
-    expect(within(table).getAllByRole("row")).toHaveLength(4);
+    expect(within(list).getAllByRole("listitem")).toHaveLength(3);
 
-    const bruteForce = within(table).getByText("Brute force").closest("tr");
-    const impossibleTravel = within(table)
+    const bruteForce = within(list).getByText("Brute force").closest("li");
+    const impossibleTravel = within(list)
       .getByText("Impossible travel")
-      .closest("tr");
+      .closest("li");
     if (bruteForce === null || impossibleTravel === null) {
       throw new Error("the alert rows are missing");
     }
@@ -655,6 +691,37 @@ describe("close case dialog", () => {
     expect(
       await screen.findByRole("dialog", { name: "Close case #312" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("bulk close dialog", () => {
+  it("keeps the selection when Cancel closes it without a request", async () => {
+    const { api } = renderClose({}, "/cases?scope=all");
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, All",
+    });
+    await within(table).findByText("Brute force → success");
+    const checkbox = within(table).getByRole("checkbox", {
+      name: "Select case #312",
+    });
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Close selected" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Close selected cases",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Close selected cases" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(api.requestsFor("/api/v1/cases/bulk-close")).toHaveLength(0);
+    expect(
+      screen.getByRole("toolbar", { name: "Selected cases" }),
+    ).toHaveTextContent("1 selected");
+    expect(checkbox).toHaveAttribute("aria-checked", "true");
   });
 });
 

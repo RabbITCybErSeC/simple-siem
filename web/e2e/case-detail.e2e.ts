@@ -1,6 +1,26 @@
 import type { Locator, Page } from "@playwright/test";
+import type { AlertSummary } from "../src/features/cases/detail/types.ts";
 import { FIXTURE_NOW } from "./support/cases.ts";
 import { APP_ORIGIN, expect, signIn, test } from "./support/test.ts";
+
+const CLOSE_CASE_ALERTS = 4;
+const THIRTY_ALERTS: AlertSummary[] = Array.from(
+  { length: 30 },
+  (_, index) => ({
+    id: `alert_${index + 1}`,
+    title: `Alert ${index + 1}`,
+    severity: "HIGH",
+    status: "OPEN",
+    detectionId: "det_brute_force",
+    detectionVersion: "0.1.0",
+    evidenceCount: 3,
+    occurrenceCount: 3,
+    firstEventAt: "2026-11-09T08:00:00Z",
+    lastEventAt: "2026-11-09T09:00:00Z",
+    outcome: null,
+    closureReason: null,
+  }),
+);
 
 test.beforeEach(async ({ page }) => {
   await page.clock.install({ time: FIXTURE_NOW });
@@ -32,6 +52,43 @@ function rowForNumber(page: Page, number: number): Locator {
   return page
     .getByRole("cell", { name: `#${number}`, exact: true })
     .locator("..");
+}
+
+async function waitForAnimations(locator: Locator): Promise<void> {
+  await locator.evaluate((element) => {
+    const animations = element.getAnimations() as {
+      finished: Promise<unknown>;
+    }[];
+    return Promise.all(animations.map((animation) => animation.finished));
+  });
+}
+
+async function findOpenCaseWithAlerts(
+  page: Page,
+  alerts: number,
+): Promise<{ id: string; caseNumber: number }> {
+  await page.goto("/cases");
+  return page.evaluate(async (wanted) => {
+    const headers = { "X-Requested-With": "simple-siem" };
+    const listResponse = await fetch("/api/v1/cases?status=OPEN&limit=200", {
+      headers,
+    });
+    const list = (await listResponse.json()) as { data: { id: string }[] };
+    for (const item of list.data) {
+      const detailResponse = await fetch(`/api/v1/cases/${item.id}`, {
+        headers,
+      });
+      const detail = (await detailResponse.json()) as {
+        id: string;
+        caseNumber: number;
+        alertCount: number;
+      };
+      if (detail.alertCount === wanted) {
+        return { id: detail.id, caseNumber: detail.caseNumber };
+      }
+    }
+    throw new Error(`no open case with ${wanted} alerts in the fixture`);
+  }, alerts);
 }
 
 function unassignedOpenRow(page: Page, table: Locator): Locator {
@@ -389,7 +446,10 @@ test("keeps the typed conclusion when the case changed", async ({
   await page.getByRole("button", { name: "Close case", exact: true }).click();
   await expect(dialog).toBeVisible();
 
-  await dialog.getByRole("radio", { name: "Accepted" }).click();
+  await dialog
+    .getByRole("radiogroup", { name: "Outcome" })
+    .getByText("Accepted", { exact: true })
+    .click();
   await dialog
     .getByRole("combobox", { name: "Closure reason", exact: true })
     .selectOption({ label: "Authorized activity" });
@@ -452,6 +512,141 @@ test("traps focus in the close dialog and returns it on Escape", async ({
   await expect(opener).toBeFocused();
 });
 
+test("the close dialog fits a phone", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await signIn(page);
+  const target = await findOpenCaseWithAlerts(page, CLOSE_CASE_ALERTS);
+  await page.goto(`/cases/${target.caseNumber}`);
+  await page.getByRole("button", { name: "Close case", exact: true }).click();
+
+  const dialog = page.getByRole("dialog", {
+    name: `Close case #${target.caseNumber}`,
+    exact: true,
+  });
+  const dispositions = dialog.getByRole("list", {
+    name: "Alert dispositions",
+  });
+  await expect(dispositions.getByRole("listitem")).toHaveCount(
+    CLOSE_CASE_ALERTS,
+  );
+  await waitForAnimations(dialog);
+
+  for (const name of ["Cancel", "Close case"]) {
+    const button = dialog.getByRole("button", { name, exact: true });
+    await expect(button, `${name} is shown`).toBeVisible();
+    const box = await button.boundingBox();
+    if (box === null) {
+      throw new Error(`${name} has no box`);
+    }
+    expect(box.x, `${name} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+    expect(box.y, `${name} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+    expect(
+      box.x + box.width,
+      `${name} ends inside the viewport`,
+    ).toBeLessThanOrEqual(390);
+    expect(
+      box.y + box.height,
+      `${name} ends inside the viewport`,
+    ).toBeLessThanOrEqual(900);
+  }
+
+  const selects = dispositions.getByRole("combobox");
+  await expect(selects).toHaveCount(CLOSE_CASE_ALERTS * 2);
+  for (let index = 0; index < CLOSE_CASE_ALERTS * 2; index += 1) {
+    const clipped = await selects
+      .nth(index)
+      .evaluate((element) => element.scrollWidth > element.clientWidth);
+    expect(
+      clipped,
+      `per-alert select ${index + 1} shows its full label`,
+    ).toBe(false);
+  }
+});
+
+test("the close dialog keeps its footer visible on a short screen", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1024, height: 600 });
+  await signIn(page);
+  const target = await findOpenCaseWithAlerts(page, 2);
+  await page.route(`**/api/v1/cases/${target.id}/alerts*`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: THIRTY_ALERTS,
+        pagination: { limit: 100, nextCursor: null },
+      }),
+    }),
+  );
+  await page.goto(`/cases/${target.caseNumber}`);
+  await page.getByRole("button", { name: "Close case", exact: true }).click();
+
+  const dialog = page.getByRole("dialog", {
+    name: `Close case #${target.caseNumber}`,
+    exact: true,
+  });
+  const items = dialog
+    .getByRole("list", { name: "Alert dispositions" })
+    .getByRole("listitem");
+  await expect(items).toHaveCount(THIRTY_ALERTS.length);
+  await waitForAnimations(dialog);
+  await items.last().scrollIntoViewIfNeeded();
+  await expect(items.last()).toBeVisible();
+
+  for (const name of ["Cancel", "Close case"]) {
+    const button = dialog.getByRole("button", { name, exact: true });
+    await expect(button, `${name} stays visible`).toBeVisible();
+    const box = await button.boundingBox();
+    if (box === null) {
+      throw new Error(`${name} has no box`);
+    }
+    expect(box.y, `${name} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+    expect(
+      box.y + box.height,
+      `${name} ends inside the viewport`,
+    ).toBeLessThanOrEqual(600);
+  }
+});
+
+test("the close dialog controls share one height at 1440", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  const target = await findOpenCaseWithAlerts(page, CLOSE_CASE_ALERTS);
+  await page.goto(`/cases/${target.caseNumber}`);
+  await page.getByRole("button", { name: "Close case", exact: true }).click();
+
+  const dialog = page.getByRole("dialog", {
+    name: `Close case #${target.caseNumber}`,
+    exact: true,
+  });
+  const dispositions = dialog.getByRole("list", {
+    name: "Alert dispositions",
+  });
+  await expect(dispositions.getByRole("listitem")).toHaveCount(
+    CLOSE_CASE_ALERTS,
+  );
+  await waitForAnimations(dialog);
+
+  const controls = [
+    dialog.getByRole("combobox", { name: "Closure reason", exact: true }),
+    dispositions.getByRole("combobox").first(),
+    dialog.getByRole("button", { name: "Cancel", exact: true }),
+  ];
+  const heights: number[] = [];
+  for (const control of controls) {
+    const box = await control.boundingBox();
+    if (box === null) {
+      throw new Error("a control has no box");
+    }
+    heights.push(box.height);
+  }
+
+  expect(heights[0]).toBe(32);
+  expect(heights[1]).toBe(heights[0]);
+  expect(heights[2]).toBe(heights[0]);
+});
+
 test("bulk closes selected rows and reports the changed one", async ({
   page,
   api,
@@ -485,7 +680,10 @@ test("bulk closes selected rows and reports the changed one", async ({
   const dialog = page.getByRole("dialog", { name: "Close selected cases" });
   await expect(dialog).toBeVisible();
 
-  await dialog.getByRole("radio", { name: "Accepted" }).click();
+  await dialog
+    .getByRole("radiogroup", { name: "Outcome" })
+    .getByText("Accepted", { exact: true })
+    .click();
   await dialog
     .getByRole("combobox", { name: "Closure reason", exact: true })
     .selectOption({ label: "Authorized activity" });

@@ -7,6 +7,7 @@ import { z } from "zod";
 import { Button } from "../../../components/ui/button";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -21,15 +22,6 @@ import {
 } from "../../../components/ui/field";
 import { Label } from "../../../components/ui/label";
 import { RadioGroup, RadioGroupItem } from "../../../components/ui/radio-group";
-import {
-  Table,
-  TableBody,
-  TableCaption,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "../../../components/ui/table";
 import { Textarea } from "../../../components/ui/textarea";
 import { OUTCOME_LABELS } from "../CaseTable";
 import type { CaseOutcome } from "../types";
@@ -105,8 +97,11 @@ export type ClosureValues = z.infer<typeof closeSchema>;
 
 const SAME = "SAME";
 
-const SELECT_CLASS_NAME =
-  "h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:bg-input/30 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40";
+export const CLOSE_DIALOG_LAYOUT = {
+  content: "flex max-h-[calc(100svh-2rem)] flex-col gap-0 p-0 sm:max-w-xl",
+  body: "min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4",
+  footer: "mx-0 mb-0 flex-row justify-end gap-2 border-t px-6 py-4",
+} as const;
 
 type AlertOverride = {
   outcome: CaseOutcome | typeof SAME;
@@ -193,7 +188,7 @@ export function CloseCaseDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+        className={CLOSE_DIALOG_LAYOUT.content}
         onOpenAutoFocus={() => {
           const active = document.activeElement;
           setOpener(active instanceof HTMLElement ? active : null);
@@ -212,7 +207,7 @@ export function CloseCaseDialog({
           }
         }}
       >
-        <DialogHeader>
+        <DialogHeader className="px-6 pt-6">
           <DialogTitle>{`Close case #${detail.caseNumber}`}</DialogTitle>
           <DialogDescription>
             {detail.alertCount === 1 ? "1 alert." : `${detail.alertCount} alerts.`}{" "}
@@ -220,48 +215,59 @@ export function CloseCaseDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form className="flex flex-col gap-4" onSubmit={submitHandler} noValidate>
-          <ClosureFields form={form} idPrefix="close" />
+        <form
+          className="flex min-h-0 flex-1 flex-col"
+          onSubmit={submitHandler}
+          noValidate
+        >
+          <div className={CLOSE_DIALOG_LAYOUT.body}>
+            <ClosureFields form={form} idPrefix="close" />
 
-          {showDispositions ? (
-            alertsQuery.isPending ? (
-              <p aria-busy="true" className="text-sm text-muted-foreground">
-                Loading alerts…
-              </p>
-            ) : alertsQuery.isError ? (
-              <p className="text-sm text-muted-foreground">
-                Could not load the case alerts.
-              </p>
-            ) : (
-              <AlertDispositions
-                alerts={alerts}
-                overrides={overrides}
-                onChange={changeOverride}
-              />
-            )
-          ) : null}
+            {showDispositions ? (
+              alertsQuery.isPending ? (
+                <p aria-busy="true" className="text-sm text-muted-foreground">
+                  Loading alerts…
+                </p>
+              ) : alertsQuery.isError ? (
+                <p className="text-sm text-muted-foreground">
+                  Could not load the case alerts.
+                </p>
+              ) : (
+                <AlertDispositions
+                  alerts={alerts}
+                  overrides={overrides}
+                  onChange={changeOverride}
+                />
+              )
+            ) : null}
 
-          {failure === null ? null : (
-            <div
-              role="alert"
-              className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-foreground"
-            >
-              <p>{failure.message}</p>
-              {failure.reload ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="mt-2"
-                  onClick={onReload}
-                >
-                  Reload case
-                </Button>
-              ) : null}
-            </div>
-          )}
+            {failure === null ? null : (
+              <div
+                role="alert"
+                className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-foreground"
+              >
+                <p>{failure.message}</p>
+                {failure.reload ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={onReload}
+                  >
+                    Reload case
+                  </Button>
+                ) : null}
+              </div>
+            )}
+          </div>
 
-          <DialogFooter>
+          <DialogFooter className={CLOSE_DIALOG_LAYOUT.footer}>
+            <DialogClose asChild>
+              <Button type="button" variant="outline">
+                Cancel
+              </Button>
+            </DialogClose>
             <Button type="submit" disabled={closeCase.isPending}>
               Close case
             </Button>
@@ -291,6 +297,7 @@ export function ClosureFields({ form, idPrefix }: ClosureFieldsProps) {
           name="outcome"
           render={({ field, fieldState }) => (
             <RadioGroup
+              className="segmented inline-flex gap-0.5"
               value={field.value ?? ""}
               onValueChange={field.onChange}
               aria-labelledby={`${idPrefix}-outcome-label`}
@@ -299,20 +306,18 @@ export function ClosureFields({ form, idPrefix }: ClosureFieldsProps) {
               }
               aria-invalid={fieldState.error ? true : undefined}
             >
-              <div className="flex flex-wrap gap-4">
-                {OUTCOME_OPTIONS.map((outcome, index) => (
-                  <div key={outcome} className="flex items-center gap-2">
-                    <RadioGroupItem
-                      ref={index === 0 ? field.ref : undefined}
-                      id={`${idPrefix}-outcome-${outcome}`}
-                      value={outcome}
-                    />
-                    <Label htmlFor={`${idPrefix}-outcome-${outcome}`}>
-                      {OUTCOME_LABELS[outcome]}
-                    </Label>
-                  </div>
-                ))}
-              </div>
+              {/* cn cannot merge the custom utility, so drop RadioGroup's grid and gap-2. */}
+              {OUTCOME_OPTIONS.map((outcome, index) => (
+                <label key={outcome} className="segmented-item">
+                  <RadioGroupItem
+                    ref={index === 0 ? field.ref : undefined}
+                    id={`${idPrefix}-outcome-${outcome}`}
+                    className="sr-only"
+                    value={outcome}
+                  />
+                  {OUTCOME_LABELS[outcome]}
+                </label>
+              ))}
             </RadioGroup>
           )}
         />
@@ -335,7 +340,7 @@ export function ClosureFields({ form, idPrefix }: ClosureFieldsProps) {
               value={field.value ?? ""}
               onBlur={field.onBlur}
               onChange={(event) => field.onChange(event.target.value)}
-              className={SELECT_CLASS_NAME}
+              className="native-select"
               aria-invalid={fieldState.error ? true : undefined}
               aria-describedby={
                 fieldState.error ? `${idPrefix}-reason-error` : undefined
@@ -397,35 +402,45 @@ interface AlertDispositionsProps {
   ) => void;
 }
 
+const DISPOSITIONS_LABEL_ID = "close-dispositions-label";
+
 function AlertDispositions({
   alerts,
   overrides,
   onChange,
 }: AlertDispositionsProps) {
   return (
-    <Table>
-      <TableCaption>Alert dispositions</TableCaption>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Alert</TableHead>
-          <TableHead>Outcome</TableHead>
-          <TableHead>Closure reason</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
+    <div className="space-y-2">
+      <p id={DISPOSITIONS_LABEL_ID} className="text-sm font-medium">
+        Alert dispositions
+      </p>
+      <div
+        aria-hidden="true"
+        className="hidden py-2 text-xs font-medium text-muted-foreground sm:grid sm:grid-cols-[minmax(0,1fr)_10rem_10rem] sm:items-center"
+      >
+        <span>Alert</span>
+        <span>Outcome</span>
+        <span>Closure reason</span>
+      </div>
+      <ul aria-labelledby={DISPOSITIONS_LABEL_ID}>
         {alerts.map((alert) => {
           const override = overrides[alert.id];
           return (
-            <TableRow key={alert.id}>
-              <TableCell className="font-medium">{alert.title}</TableCell>
-              <TableCell>
+            <li
+              key={alert.id}
+              className="grid gap-2 border-t py-3 sm:grid-cols-[minmax(0,1fr)_10rem_10rem] sm:items-center"
+            >
+              <span className="text-sm font-medium sm:truncate">
+                {alert.title}
+              </span>
+              <div className="grid grid-cols-2 gap-2 sm:contents">
                 <select
                   aria-label={`Outcome for ${alert.title}`}
                   value={override?.outcome ?? SAME}
                   onChange={(event) =>
                     onChange(alert.id, "outcome", event.target.value)
                   }
-                  className={SELECT_CLASS_NAME}
+                  className="native-select"
                 >
                   <option value={SAME}>Same as case</option>
                   {OUTCOME_OPTIONS.map((outcome) => (
@@ -434,15 +449,13 @@ function AlertDispositions({
                     </option>
                   ))}
                 </select>
-              </TableCell>
-              <TableCell>
                 <select
                   aria-label={`Closure reason for ${alert.title}`}
                   value={override?.closureReason ?? SAME}
                   onChange={(event) =>
                     onChange(alert.id, "closureReason", event.target.value)
                   }
-                  className={SELECT_CLASS_NAME}
+                  className="native-select"
                 >
                   <option value={SAME}>Same as case</option>
                   {CLOSURE_REASON_OPTIONS.map((option) => (
@@ -451,12 +464,12 @@ function AlertDispositions({
                     </option>
                   ))}
                 </select>
-              </TableCell>
-            </TableRow>
+              </div>
+            </li>
           );
         })}
-      </TableBody>
-    </Table>
+      </ul>
+    </div>
   );
 }
 
