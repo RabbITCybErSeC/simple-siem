@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a version tag on main
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release tag must be vX.Y.Z, got '$TAG'" >&2; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "release tags must point at a commit on main" >&2; exit 1; }
+
+      - name: Compute image environment
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # GHCR image names must be lowercase; the owner name is mixed case.
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
+          echo "COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          release_version="${TAG#v}"
+          echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
+          echo "RELEASE_MINOR=${release_version%.*}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push the candidate image
+        shell: bash
+        run: |
+          docker buildx create --use
+          # shortcut: no SBOM, provenance, or signature yet; add them before the first public release.
+          docker buildx build --target runtime --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION --build-arg COMMIT --provenance=false --sbom=false \
+            --tag "$IMAGE:sha-$COMMIT" --metadata-file metadata.json --push .
+
+      - name: Check the pushed image version
+        shell: bash
+        run: |
+          DIGEST=$(jq -r '."containerimage.digest"' metadata.json)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "build metadata has no container image digest" >&2
+            exit 1
+          fi
+          # Only amd64 is run: the runner is amd64, and both architectures come
+          # from the same build stage with the same -ldflags.
+          ACTUAL=$(docker run --rm --platform linux/amd64 "$IMAGE@$DIGEST" version)
+          EXPECTED="simple-siem $VERSION ($COMMIT)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "version check failed: got '$ACTUAL', want '$EXPECTED'" >&2
+            exit 1
+          fi
+          echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+
+      - name: Promote the checked digest
+        shell: bash
+        run: |
+          # Promote by digest so the checked image is tagged, never a rebuild.
+          docker buildx imagetools create --tag "$IMAGE:$RELEASE_VERSION" --tag "$IMAGE:$RELEASE_MINOR" "$IMAGE@$DIGEST"
