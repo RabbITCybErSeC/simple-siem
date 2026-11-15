@@ -293,29 +293,29 @@ func (service *Service) ResetPassword(ctx context.Context, email, password strin
 }
 
 // PurgeExpired deletes auth rows that can no longer count toward a rate limit,
-// authenticate a request, or reset a password. The three deletes share one
-// transaction, so a partial purge leaves no table behind.
-func (service *Service) PurgeExpired(ctx context.Context, now time.Time) (PurgeResult, error) {
+// authenticate a request, or reset a password. Every cutoff uses the database
+// clock, the clock sessions and rate limits are judged by. The three deletes
+// share one transaction, so a partial purge leaves no table behind.
+func (service *Service) PurgeExpired(ctx context.Context) (PurgeResult, error) {
 	var result PurgeResult
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		loginAttempts := tx.Exec(
-			"DELETE FROM login_attempts WHERE created_at < ?", now.Add(-failureWindowDuration),
+			"DELETE FROM login_attempts WHERE created_at < now() - make_interval(secs => ?)",
+			failureWindowDuration.Seconds(),
 		)
 		if loginAttempts.Error != nil {
 			return fmt.Errorf("delete login attempts: %w", loginAttempts.Error)
 		}
 		result.LoginAttempts = loginAttempts.RowsAffected
 
-		sessions := tx.Exec(
-			"DELETE FROM sessions WHERE idle_expires_at <= ?", now,
-		)
+		sessions := tx.Exec("DELETE FROM sessions WHERE idle_expires_at <= now()")
 		if sessions.Error != nil {
 			return fmt.Errorf("delete sessions: %w", sessions.Error)
 		}
 		result.Sessions = sessions.RowsAffected
 
 		resetTokens := tx.Exec(
-			"DELETE FROM password_reset_tokens WHERE used_at IS NOT NULL OR expires_at <= ?", now,
+			"DELETE FROM password_reset_tokens WHERE used_at IS NOT NULL OR expires_at <= now()",
 		)
 		if resetTokens.Error != nil {
 			return fmt.Errorf("delete reset tokens: %w", resetTokens.Error)

@@ -54,9 +54,10 @@ var migrationFiles embed.FS
 func Open(ctx context.Context, settings config.Config) (*gorm.DB, error) {
 	db, err := gorm.Open(postgres.Open(settings.DatabaseURL), &gorm.Config{
 		Logger: gormlogger.NewSlogLogger(slog.Default(), gormlogger.Config{
-			SlowThreshold:        slowQueryThreshold,
-			LogLevel:             gormlogger.Warn,
-			ParameterizedQueries: true,
+			SlowThreshold:             slowQueryThreshold,
+			LogLevel:                  gormlogger.Warn,
+			ParameterizedQueries:      true,
+			IgnoreRecordNotFoundError: true,
 		}),
 		TranslateError:       true,
 		DisableAutomaticPing: true,

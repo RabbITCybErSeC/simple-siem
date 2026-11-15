@@ -317,6 +317,52 @@ func TestRunWindowSerializesConcurrentRuns(t *testing.T) {
 	}
 }
 
+func TestRunWindowWaitsForTheWindowLockOutsideItsBudget(t *testing.T) {
+	// Two runs of one window, each using most of the 6s budget. The waiter
+	// must not pay for the lock wait out of its own evaluation budget, or its
+	// insert lands after the transaction deadline and no row is left behind.
+	const evaluationTime = 5800 * time.Millisecond
+	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) {
+		time.Sleep(evaluationTime)
+		return nil, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"),
+		[2]string{"timeout: 30s", "timeout: 6s"})
+	fixture.markReady(t, "auth_events")
+
+	type outcome struct {
+		result RunResult
+		err    error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	for range 2 {
+		go func() {
+			<-start
+			result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end)
+			outcomes <- outcome{result: result, err: err}
+		}()
+	}
+	close(start)
+
+	revisions := make([]int, 0, 2)
+	for range 2 {
+		outcome := <-outcomes
+		if outcome.err != nil {
+			t.Fatalf("RunWindow() error = %v, want both runs recorded", outcome.err)
+		}
+		revisions = append(revisions, outcome.result.Revision)
+	}
+	slices.Sort(revisions)
+	if !slices.Equal(revisions, []int{1, 2}) {
+		t.Fatalf("result revisions = %v, want [1 2]", revisions)
+	}
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 2 || runs[0].Revision != 1 || runs[1].Revision != 2 {
+		t.Fatalf("detection_runs = %+v, want revisions 1 and 2", runs)
+	}
+}
+
 func TestRunWindowRejectsInactiveDetection(t *testing.T) {
 	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) { return nil, nil })
 	fixture := newRunnerFixture(t, logic, config.Files{})

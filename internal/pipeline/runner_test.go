@@ -83,6 +83,22 @@ func TestValidateFiles(t *testing.T) {
 	}{
 		{name: "valid pipeline"},
 		{
+			name: "time field matches the primary fallback source",
+			mutate: func(t *testing.T, files *config.Files) {
+				writeTestFile(t, filepath.Join(files.Directory, "mappings", "auth.yaml"), `id: auth
+version: 1
+match:
+  - field: event.category
+    equals: authentication
+constants:
+  metadata.event_type: GENERIC_EVENT
+fields:
+  - to: metadata.event_timestamp
+    from: ["@timestamp", "event.created"]
+`)
+			},
+		},
+		{
 			name: "two fetcher steps",
 			mutate: func(t *testing.T, files *config.Files) {
 				files.Pipelines[0].Fetchers = append(files.Pipelines[0].Fetchers,

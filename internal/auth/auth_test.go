@@ -1356,52 +1356,65 @@ func TestResetPasswordSurvivesConcurrentIdentityVersionBump(t *testing.T) {
 	test.login(t, testEmail, "another correct horse")
 }
 
-// TestPurgeExpiredDeletesOnlyStaleRows puts rows on each side of every cutoff
-// and uses a fixed now, so the boundaries do not depend on the test clock.
+// TestPurgeExpiredDeletesOnlyStaleRows puts rows on each side of every cutoff.
+// The fixtures are relative to the database clock, the clock that auth and the
+// purge judge row validity by.
 func TestPurgeExpiredDeletesOnlyStaleRows(t *testing.T) {
 	test := newTestService(t)
 	user := test.createAdmin(t, testEmail)
-	now := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
 
-	insertFailedAttempt(t, test.database, "old@example.com", "192.0.2.1", now.Add(-16*time.Minute))
-	insertFailedAttempt(t, test.database, "recent@example.com", "192.0.2.2", now.Add(-14*time.Minute))
+	insertAttempt := func(email, address, age string) {
+		t.Helper()
+		err := test.database.Exec(`
+			INSERT INTO login_attempts (email_hash, client_ip, succeeded, created_at)
+			VALUES (decode(?, 'hex'), ?::inet, false, now() - ?::interval)`,
+			hex.EncodeToString(emailHash(email)), address, age,
+		).Error
+		if err != nil {
+			t.Fatalf("insert failed login attempt %q: %v", email, err)
+		}
+	}
+	insertAttempt("old@example.com", "192.0.2.1", "16 minutes")
+	insertAttempt("recent@example.com", "192.0.2.2", "14 minutes")
 
-	insertSession := func(label string, idleExpiresAt, absoluteExpiresAt time.Time) {
+	insertSession := func(label, idleOffset, absoluteOffset string) {
 		t.Helper()
 		tokenHash := sha256.Sum256([]byte(label))
 		err := test.database.Exec(`
 			INSERT INTO sessions (user_id, token_hash, auth_provider, idle_expires_at, absolute_expires_at, user_agent)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			user.ID, tokenHash[:], ProviderLocal, idleExpiresAt, absoluteExpiresAt, label,
+			VALUES (?, ?, ?, now() + ?::interval, now() + ?::interval, ?)`,
+			user.ID, tokenHash[:], ProviderLocal, idleOffset, absoluteOffset, label,
 		).Error
 		if err != nil {
 			t.Fatalf("insert session %q: %v", label, err)
 		}
 	}
-	insertSession("idle-expired", now.Add(-time.Minute), now.Add(time.Hour))
+	insertSession("idle-expired", "-1 minute", "1 hour")
 	// idle_expires_at is capped at absolute_expires_at (auth.go:719), so a
 	// session past both cutoffs is the realistic second expired row.
-	insertSession("both-expired", now.Add(-2*time.Minute), now.Add(-time.Minute))
-	insertSession("live", now.Add(time.Hour), now.Add(time.Hour))
+	insertSession("both-expired", "-2 minutes", "-1 minute")
+	insertSession("idle-in-a-minute", "1 minute", "1 hour")
+	insertSession("live", "1 hour", "1 hour")
 
-	insertResetToken := func(label string, expiresAt time.Time, usedAt *time.Time) {
+	insertResetToken := func(label, expiresOffset string, used bool) {
 		t.Helper()
 		tokenHash := sha256.Sum256([]byte(label))
 		err := test.database.Exec(`
 			INSERT INTO password_reset_tokens (user_id, token_hash, created_by, expires_at, used_at)
-			VALUES (?, ?, ?, ?, ?)`,
-			user.ID, tokenHash[:], user.ID, expiresAt, usedAt,
+			VALUES (?, ?, ?, now() + ?::interval, CASE WHEN ? THEN now() - interval '1 minute' ELSE NULL END)`,
+			user.ID, tokenHash[:], user.ID, expiresOffset, used,
 		).Error
 		if err != nil {
 			t.Fatalf("insert reset token %q: %v", label, err)
 		}
 	}
-	usedAt := now.Add(-time.Minute)
-	insertResetToken("used", now.Add(time.Hour), &usedAt)
-	insertResetToken("expired", now.Add(-time.Minute), nil)
-	insertResetToken("valid", now.Add(time.Hour), nil)
+	insertResetToken("used", "1 hour", true)
+	insertResetToken("expired", "-1 minute", false)
+	insertResetToken("valid", "1 hour", false)
 
-	result, err := test.service.PurgeExpired(context.Background(), now)
+	// The fixtures sit one minute inside or outside every cutoff, and the
+	// purge reads now() itself, so app-clock skew cannot decide the result.
+	result, err := test.service.PurgeExpired(context.Background())
 	if err != nil {
 		t.Fatalf("PurgeExpired: %v", err)
 	}
@@ -1409,22 +1422,23 @@ func TestPurgeExpiredDeletesOnlyStaleRows(t *testing.T) {
 		t.Errorf("purged %+v, want 1 login attempt, 2 sessions, and 2 reset tokens", result)
 	}
 
-	var attempts int64
+	var recentAttempts int64
 	if err := test.database.Raw(
-		"SELECT count(*) FROM login_attempts WHERE created_at = ?", now.Add(-14*time.Minute),
-	).Scan(&attempts).Error; err != nil {
+		"SELECT count(*) FROM login_attempts WHERE email_hash = decode(?, 'hex')",
+		hex.EncodeToString(emailHash("recent@example.com")),
+	).Scan(&recentAttempts).Error; err != nil {
 		t.Fatalf("count remaining login attempts: %v", err)
 	}
-	if attempts != 1 || countRows(t, test.database, "login_attempts") != 1 {
-		t.Errorf("kept login attempts = %d, want only the 14-minute-old row", attempts)
+	if recentAttempts != 1 || countRows(t, test.database, "login_attempts") != 1 {
+		t.Errorf("kept login attempts = %d, want only the 14-minute-old row", recentAttempts)
 	}
 
 	var sessionLabels []string
 	if err := test.database.Raw("SELECT user_agent FROM sessions ORDER BY user_agent").Scan(&sessionLabels).Error; err != nil {
 		t.Fatalf("read remaining sessions: %v", err)
 	}
-	if !slices.Equal(sessionLabels, []string{"live"}) {
-		t.Errorf("remaining sessions = %v, want [live]", sessionLabels)
+	if !slices.Equal(sessionLabels, []string{"idle-in-a-minute", "live"}) {
+		t.Errorf("remaining sessions = %v, want [idle-in-a-minute live]", sessionLabels)
 	}
 
 	var remainingTokens int64

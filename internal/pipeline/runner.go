@@ -63,10 +63,12 @@ func ValidateFiles(files config.Files) error {
 	return errors.Join(problems...)
 }
 
-// validateTimeField requires the mapping entry that sets event time to read
-// from the instance's effective time_field. A typo in either makes an
-// event-time source look like an ingest-time source, which silently narrows
-// the run's overlap and drops late events.
+// validateTimeField requires the primary source of the mapping entry that sets
+// event time — the first `from` entry, which wins when it is present — to equal
+// the instance's effective time_field. A typo in either makes an event-time
+// source look like an ingest-time source, which silently narrows the run's
+// overlap and drops late events. Later `from` entries are fallbacks, so they
+// may name other fields.
 func validateTimeField(pipeline config.Pipeline, instance config.FetcherInstance, mappings []converter.Mapping) []error {
 	var problems []error
 	for _, mapping := range mappings {
@@ -74,13 +76,10 @@ func validateTimeField(pipeline config.Pipeline, instance config.FetcherInstance
 			if field.To != "metadata.event_timestamp" {
 				continue
 			}
-			for _, source := range field.From {
-				if source != instance.Defaults.TimeField {
-					problems = append(problems, fmt.Errorf(
-						"pipeline %q: mapping %q: metadata.event_timestamp reads from %q, but the instance's time_field is %q",
-						pipeline.ID, mapping.ID, source, instance.Defaults.TimeField))
-					break
-				}
+			if primary := field.From[0]; primary != instance.Defaults.TimeField {
+				problems = append(problems, fmt.Errorf(
+					"pipeline %q: mapping %q: metadata.event_timestamp's primary source is %q, but the instance's time_field is %q",
+					pipeline.ID, mapping.ID, primary, instance.Defaults.TimeField))
 			}
 		}
 	}

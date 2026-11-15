@@ -87,16 +87,23 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 	// The run transaction takes the window's advisory lock before reading the
 	// revision and holds it through the insert, so concurrent runs of one
 	// detection window are serialised and each gets the next revision. The
-	// evaluation runs inside it so the window and the row share one revision;
-	// the deadline covers a whole evaluation plus the writes, and survives the
-	// caller's cancellation so a canceled run still leaves its row.
-	runDeadline := time.Duration(manifest.Budgets.Timeout) + persistenceTimeout
-	transactionContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), runDeadline)
+	// evaluation runs inside it so the window and the row share one revision.
+	// The deadline covers waiting behind one run plus a full evaluation and the
+	// writes, and survives the caller's cancellation so a canceled run still
+	// leaves its row. lock_timeout caps the wait at one run, so a waiter that
+	// does acquire the lock still has its whole budget to evaluate.
+	runAllowance := time.Duration(manifest.Budgets.Timeout) + persistenceTimeout
+	transactionContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*runAllowance)
 	defer cancel()
 
 	var result RunResult
 	// shortcut: evaluation holds the window-lock transaction (one pooled connection per run for up to the evaluation budget); reserve the revision in a short transaction and evaluate outside it when the Phase 3 scheduler runs detections concurrently (bead simple-siem-tc3).
 	err = runner.Database.WithContext(transactionContext).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Exec(
+			fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", runAllowance.Milliseconds()),
+		).Error; err != nil {
+			return fmt.Errorf("set the run lock wait: %w", err)
+		}
 		if err := lockWindow(transaction, manifest.ID, windowStart, windowEnd); err != nil {
 			return err
 		}

@@ -683,7 +683,7 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 // the serve context ends. A failed pass is logged and retried on the next tick.
 func purgeExpiredAuthRows(ctx context.Context, service *auth.Service, logger *slog.Logger) {
 	purge := func() {
-		result, err := service.PurgeExpired(ctx, time.Now())
+		result, err := service.PurgeExpired(ctx)
 		if err != nil {
 			logger.Error("purge expired auth rows", "error", err)
 			return
