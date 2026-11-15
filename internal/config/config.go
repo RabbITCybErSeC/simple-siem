@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,6 +19,7 @@ const (
 	defaultShutdownTimeout         = 30 * time.Second
 	defaultSessionIdleTimeout      = 30 * time.Minute
 	defaultSessionAbsoluteLifetime = 12 * time.Hour
+	defaultMaxCasesPerHour         = 50
 
 	environmentVariable             = "SIMPLE_SIEM_ENV"
 	databaseURLVariable             = "SIMPLE_SIEM_DATABASE_URL"
@@ -26,6 +28,7 @@ const (
 	shutdownTimeoutVariable         = "SIMPLE_SIEM_SHUTDOWN_TIMEOUT"
 	sessionIdleTimeoutVariable      = "SIMPLE_SIEM_SESSION_IDLE_TIMEOUT"
 	sessionAbsoluteLifetimeVariable = "SIMPLE_SIEM_SESSION_ABSOLUTE_LIFETIME"
+	maxCasesPerHourVariable         = "SIMPLE_SIEM_MAX_CASES_PER_HOUR"
 )
 
 // PublicURLVariable names the environment variable that holds the externally
@@ -43,6 +46,7 @@ type Config struct {
 	ShutdownTimeout         time.Duration
 	SessionIdleTimeout      time.Duration
 	SessionAbsoluteLifetime time.Duration
+	MaxCasesPerHour         int
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -123,6 +127,12 @@ func Load(getenv func(string) string) (Config, error) {
 	settings.SessionIdleTimeout = idleTimeout
 	settings.SessionAbsoluteLifetime = absoluteLifetime
 
+	maxCasesPerHour, maxCasesPerHourError := parsePositiveInt(getenv, maxCasesPerHourVariable, defaultMaxCasesPerHour)
+	if maxCasesPerHourError != nil {
+		problems = append(problems, maxCasesPerHourError)
+	}
+	settings.MaxCasesPerHour = maxCasesPerHour
+
 	if err := errors.Join(problems...); err != nil {
 		return Config{}, err
 	}
@@ -150,4 +160,16 @@ func parsePositiveDuration(getenv func(string) string, variable string, fallback
 		return 0, fmt.Errorf("%s must be a positive duration", variable)
 	}
 	return duration, nil
+}
+
+func parsePositiveInt(getenv func(string) string, variable string, fallback int) (int, error) {
+	value := getenv(variable)
+	if value == "" {
+		return fallback, nil
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", variable)
+	}
+	return number, nil
 }

@@ -31,6 +31,7 @@ func TestLoad(t *testing.T) {
 				ShutdownTimeout:         30 * time.Second,
 				SessionIdleTimeout:      30 * time.Minute,
 				SessionAbsoluteLifetime: 12 * time.Hour,
+				MaxCasesPerHour:         50,
 			},
 		},
 		{
@@ -88,6 +89,7 @@ func TestLoad(t *testing.T) {
 				"SIMPLE_SIEM_SHUTDOWN_TIMEOUT":          "10s",
 				"SIMPLE_SIEM_SESSION_IDLE_TIMEOUT":      "15m",
 				"SIMPLE_SIEM_SESSION_ABSOLUTE_LIFETIME": "8h",
+				"SIMPLE_SIEM_MAX_CASES_PER_HOUR":        "120",
 			},
 			want: Config{
 				Environment:             EnvironmentProduction,
@@ -98,6 +100,7 @@ func TestLoad(t *testing.T) {
 				ShutdownTimeout:         10 * time.Second,
 				SessionIdleTimeout:      15 * time.Minute,
 				SessionAbsoluteLifetime: 8 * time.Hour,
+				MaxCasesPerHour:         120,
 			},
 		},
 		{
@@ -150,6 +153,33 @@ func TestLoad(t *testing.T) {
 				"SIMPLE_SIEM_SESSION_IDLE_TIMEOUT": "-5m",
 			},
 			wantErrors: []string{"SIMPLE_SIEM_SESSION_IDLE_TIMEOUT"},
+		},
+		{
+			name: "non-numeric max cases per hour",
+			environment: map[string]string{
+				"SIMPLE_SIEM_ENV":                "development",
+				"SIMPLE_SIEM_DATABASE_URL":       databaseURL,
+				"SIMPLE_SIEM_MAX_CASES_PER_HOUR": "many",
+			},
+			wantErrors: []string{"SIMPLE_SIEM_MAX_CASES_PER_HOUR"},
+		},
+		{
+			name: "zero max cases per hour",
+			environment: map[string]string{
+				"SIMPLE_SIEM_ENV":                "development",
+				"SIMPLE_SIEM_DATABASE_URL":       databaseURL,
+				"SIMPLE_SIEM_MAX_CASES_PER_HOUR": "0",
+			},
+			wantErrors: []string{"SIMPLE_SIEM_MAX_CASES_PER_HOUR"},
+		},
+		{
+			name: "negative max cases per hour",
+			environment: map[string]string{
+				"SIMPLE_SIEM_ENV":                "development",
+				"SIMPLE_SIEM_DATABASE_URL":       databaseURL,
+				"SIMPLE_SIEM_MAX_CASES_PER_HOUR": "-1",
+			},
+			wantErrors: []string{"SIMPLE_SIEM_MAX_CASES_PER_HOUR"},
 		},
 		{
 			name: "session idle timeout exceeds absolute lifetime",
@@ -214,6 +244,7 @@ func TestLoad(t *testing.T) {
 				ShutdownTimeout:         30 * time.Second,
 				SessionIdleTimeout:      30 * time.Minute,
 				SessionAbsoluteLifetime: 12 * time.Hour,
+				MaxCasesPerHour:         50,
 			},
 		},
 		{
