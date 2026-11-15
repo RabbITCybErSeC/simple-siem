@@ -1,12 +1,14 @@
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { Button } from "../../components/ui/button";
 
 interface EmptyStateProps {
   icon: LucideIcon;
   title: string;
   description?: string;
   action?: ReactNode;
+  onRetry?: () => void;
   tone?: "neutral" | "error";
 }
 
@@ -15,6 +17,7 @@ export function EmptyState({
   title,
   description,
   action,
+  onRetry,
   tone = "neutral",
 }: EmptyStateProps) {
   return (
@@ -38,6 +41,11 @@ export function EmptyState({
           <p className="max-w-sm text-sm text-muted-foreground">{description}</p>
         )}
       </div>
+      {onRetry === undefined ? null : (
+        <Button type="button" variant="outline" onClick={onRetry}>
+          Retry
+        </Button>
+      )}
       {action}
     </div>
   );

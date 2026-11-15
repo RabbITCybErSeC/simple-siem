@@ -26,6 +26,7 @@ import {
 } from "../../components/ui/table";
 import type { TimeZoneSetting } from "../shell/types";
 import { EmptyState } from "../shell/EmptyState";
+import { cn } from "@/lib/utils";
 import { formatExact, relativeTime } from "./timeRange";
 import type {
   CaseOutcome,
@@ -67,15 +68,18 @@ export interface SeverityStyle {
 export const SEVERITY_STYLES: Record<CaseSeverity, SeverityStyle> = {
   HIGH: {
     label: "HIGH",
-    className: "bg-severity-high text-severity-high-foreground",
+    className:
+      "bg-severity-high text-severity-high-foreground h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide",
   },
   MEDIUM: {
     label: "MEDIUM",
-    className: "bg-severity-medium text-severity-medium-foreground",
+    className:
+      "bg-severity-medium text-severity-medium-foreground h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide",
   },
   LOW: {
     label: "LOW",
-    className: "bg-severity-low text-severity-low-foreground",
+    className:
+      "bg-severity-low text-severity-low-foreground h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide",
   },
 };
 
@@ -235,13 +239,16 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
         data-slot="case-table-frame"
         className="overflow-hidden rounded-xl border"
       >
-        <Table aria-busy={loading}>
+        <Table
+          aria-busy={loading}
+          className="[&_td]:px-3 [&_th]:h-9 [&_th]:px-3"
+        >
           <TableCaption className="sr-only">
             {caption(tab, scope)}
           </TableCaption>
           <TableHeader className="bg-muted/50 text-xs font-medium">
             <TableRow className="h-9">
-              <TableHead className="h-9 w-10 px-3">
+              <TableHead className="w-10">
                 <Checkbox
                   aria-label="Select all on this page"
                   checked={
@@ -257,22 +264,22 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
                   }
                 />
               </TableHead>
-              <TableHead className="h-9 w-px px-3 text-muted-foreground">
+              <TableHead className="w-px text-muted-foreground">
                 Number
               </TableHead>
-              <TableHead className="h-9 w-full max-w-0 min-w-40 truncate px-3 text-muted-foreground">
+              <TableHead className="w-full max-w-0 min-w-40 truncate text-muted-foreground">
                 Title
               </TableHead>
-              <TableHead className="h-9 w-px px-3 text-muted-foreground">
+              <TableHead className="w-px text-muted-foreground">
                 Severity
               </TableHead>
-              <TableHead className="h-9 w-px px-3 text-muted-foreground">
+              <TableHead className="w-px text-muted-foreground">
                 Assignee
               </TableHead>
-              <TableHead className="h-9 w-px px-3 text-right text-muted-foreground">
+              <TableHead className="w-px text-right text-muted-foreground">
                 Last event
               </TableHead>
-              <TableHead className="h-9 w-px px-3 text-right text-muted-foreground">
+              <TableHead className="w-px text-right text-muted-foreground">
                 {lastColumnLabel(tab)}
               </TableHead>
             </TableRow>
@@ -286,11 +293,7 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
                   tone="error"
                   icon={TriangleAlertIcon}
                   title={caseErrorMessage(error)}
-                  action={
-                    <Button type="button" variant="outline" onClick={onRetry}>
-                      Retry
-                    </Button>
-                  }
+                  onRetry={onRetry}
                 />
               </StateRow>
             ) : cases.length === 0 ? (
@@ -394,40 +397,36 @@ function CaseRow({
       onFocus={onFocus}
       className="h-9 focus:bg-muted focus:ring-2 focus:ring-ring focus:ring-inset"
     >
-      <TableCell className="h-9 w-10 px-3">
+      <TableCell className="w-10">
         <Checkbox
           aria-label={`Select case #${item.caseNumber}`}
           checked={selected}
           onCheckedChange={(checked) => onSelect(item, checked === true)}
         />
       </TableCell>
-      <TableCell className="h-9 w-px px-3 font-mono text-[13px]">
+      <TableCell className="w-px font-mono text-[13px]">
         #{item.caseNumber}
       </TableCell>
       <TableCell
-        className={
-          onOpen === undefined
-            ? "h-9 w-full max-w-0 min-w-40 truncate px-3 font-medium"
-            : "h-9 w-full max-w-0 min-w-40 cursor-pointer truncate px-3 font-medium underline-offset-4 hover:underline"
-        }
+        className={cn(
+          "w-full max-w-0 min-w-40 truncate font-medium",
+          onOpen !== undefined &&
+            "cursor-pointer underline-offset-4 hover:underline",
+        )}
         onClick={onOpen === undefined ? undefined : () => onOpen(item)}
       >
         {item.title}
       </TableCell>
-      <TableCell className="h-9 w-px px-3">
-        <Badge
-          className={`${severity.className} h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide`}
-        >
-          {severity.label}
-        </Badge>
+      <TableCell className="w-px">
+        <Badge className={severity.className}>{severity.label}</Badge>
       </TableCell>
-      <TableCell className="h-9 w-px px-3">
+      <TableCell className="w-px">
         {item.assignee?.displayName ?? "Unassigned"}
       </TableCell>
-      <TableCell className="h-9 w-px px-3 text-right tabular-nums">
+      <TableCell className="w-px text-right tabular-nums">
         <TimeCell value={item.lastEventAt} timeZone={timeZone} now={now} />
       </TableCell>
-      <TableCell className="h-9 w-px px-3 text-right tabular-nums">
+      <TableCell className="w-px text-right tabular-nums">
         {item.status === "CLOSED" ? (
           outcomeLabel(item.outcome)
         ) : (
@@ -460,26 +459,26 @@ function SkeletonRows() {
     <>
       {Array.from({ length: SKELETON_ROWS }, (_, index) => (
         <TableRow key={index} className="h-9">
-          <TableCell className="h-9 w-10 px-3">
-            <div className="size-4 animate-pulse rounded bg-muted" />
+          <TableCell className="w-10">
+            <div className="skeleton size-4" />
           </TableCell>
-          <TableCell className="h-9 w-px px-3">
-            <div className="h-4 w-9 animate-pulse rounded bg-muted" />
+          <TableCell className="w-px">
+            <div className="skeleton h-4 w-9" />
           </TableCell>
-          <TableCell className="h-9 w-full max-w-0 min-w-40 px-3">
-            <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
+          <TableCell className="w-full max-w-0 min-w-40">
+            <div className="skeleton h-4 w-3/5" />
           </TableCell>
-          <TableCell className="h-9 w-px px-3">
-            <div className="h-5 w-14 animate-pulse rounded-md bg-muted" />
+          <TableCell className="w-px">
+            <div className="skeleton h-5 w-14" />
           </TableCell>
-          <TableCell className="h-9 w-px px-3">
-            <div className="h-4 w-20 animate-pulse rounded bg-muted" />
+          <TableCell className="w-px">
+            <div className="skeleton h-4 w-20" />
           </TableCell>
-          <TableCell className="h-9 w-px px-3">
-            <div className="h-4 w-12 animate-pulse rounded bg-muted" />
+          <TableCell className="w-px">
+            <div className="skeleton h-4 w-12" />
           </TableCell>
-          <TableCell className="h-9 w-px px-3">
-            <div className="h-4 w-12 animate-pulse rounded bg-muted" />
+          <TableCell className="w-px">
+            <div className="skeleton h-4 w-12" />
           </TableCell>
         </TableRow>
       ))}

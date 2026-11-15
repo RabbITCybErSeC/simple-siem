@@ -461,11 +461,7 @@ describe("EmptyState", () => {
         icon={TriangleAlertIcon}
         tone="error"
         title="Could not load cases."
-        action={
-          <button type="button" onClick={retry}>
-            Retry
-          </button>
-        }
+        onRetry={retry}
       />,
     );
 
@@ -476,6 +472,22 @@ describe("EmptyState", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("renders the Retry action for onRetry", () => {
+    const onRetry = vi.fn();
+    render(
+      <EmptyState
+        icon={TriangleAlertIcon}
+        tone="error"
+        title="Could not load cases."
+        onRetry={onRetry}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(onRetry).toHaveBeenCalledOnce();
   });
 
   it("renders only the icon and title when no hint or action is given", () => {
@@ -489,18 +501,18 @@ describe("EmptyState", () => {
 });
 
 describe("account menu", () => {
-  async function openAccountMenu() {
-    renderShell();
+  async function openAccountMenu(logout?: () => Response) {
+    const router = renderShell("/cases", logout);
     await screen.findByRole("heading", { name: "Cases" });
     const account = await screen.findByRole("button", {
       name: "Account: Alice Analyst",
     });
     fireEvent.click(account);
-    return account;
+    return { account, router };
   }
 
   it("shows the initials and the name, email, theme, and sign out", async () => {
-    const account = await openAccountMenu();
+    const { account } = await openAccountMenu();
 
     expect(account).toHaveTextContent("AA");
     expect(await screen.findByText("Alice Analyst")).toBeInTheDocument();
@@ -532,8 +544,7 @@ describe("account menu", () => {
   });
 
   it("reports a failed sign out and stays on Cases", async () => {
-    const router = renderShell(
-      "/cases",
+    const { router } = await openAccountMenu(
       () =>
         new Response(
           JSON.stringify({
@@ -544,10 +555,6 @@ describe("account menu", () => {
             headers: { "Content-Type": "application/json" },
           },
         ),
-    );
-    await screen.findByRole("heading", { name: "Cases" });
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Account: Alice Analyst" }),
     );
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
 

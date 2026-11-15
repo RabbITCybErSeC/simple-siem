@@ -274,29 +274,28 @@ export function CaseDetail({
           </h2>
           <div className="flex flex-wrap items-center gap-2">
             {detail === undefined || detail.status === "CLOSED" ? null : (
-              <Button
-                type="button"
-                size="default"
-                disabled={assignPending || me === undefined}
-                onClick={assignCase}
-              >
-                {detail.assignee?.id === me?.id ? "Unassign" : "Assign to me"}
-              </Button>
-            )}
-            {detail === undefined || detail.status === "CLOSED" ? null : (
-              <Button
-                type="button"
-                variant="outline"
-                size="default"
-                onClick={() => setCloseOpen(true)}
-              >
-                Close case
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  disabled={assignPending || me === undefined}
+                  onClick={assignCase}
+                >
+                  {detail.assignee?.id === me?.id
+                    ? "Unassign"
+                    : "Assign to me"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setCloseOpen(true)}
+                >
+                  Close case
+                </Button>
+              </>
             )}
             <Button
               type="button"
               variant="outline"
-              size="default"
               onClick={() => void copyLink()}
             >
               Copy link
@@ -331,9 +330,7 @@ export function CaseDetail({
         </div>
         {detail === undefined ? null : (
           <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-            <Badge
-              className={`${SEVERITY_STYLES[detail.severity].className} h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide`}
-            >
+            <Badge className={SEVERITY_STYLES[detail.severity].className}>
               {SEVERITY_STYLES[detail.severity].label}
             </Badge>
             <Badge variant="outline" className="rounded-md">
@@ -381,17 +378,10 @@ export function CaseDetail({
             tone="error"
             icon={TriangleAlertIcon}
             title={loadFailure.message}
-            action={
-              loadFailure.retry ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void detailQuery.refetch()}
-                >
-                  Retry
-                </Button>
-              ) : undefined
+            onRetry={
+              loadFailure.retry
+                ? () => void detailQuery.refetch()
+                : undefined
             }
           />
         </div>
@@ -401,7 +391,7 @@ export function CaseDetail({
         loadFailure === null ? (
           <div aria-busy="true" className="mt-4 space-y-4">
             <span className="sr-only">Loading case…</span>
-            <div className="h-6 w-1/2 animate-pulse rounded bg-muted" />
+            <div className="skeleton h-6 w-1/2" />
             <div className="rounded-xl border bg-card px-4 py-3">
               <div className="space-y-2">
                 {Array.from({ length: 4 }, (_, index) => (
@@ -409,8 +399,8 @@ export function CaseDetail({
                     key={index}
                     className="grid grid-cols-[8rem_minmax(0,1fr)] gap-4"
                   >
-                    <div className="h-4 w-20 animate-pulse rounded bg-muted" />
-                    <div className="h-4 w-2/5 animate-pulse rounded bg-muted" />
+                    <div className="skeleton h-4 w-20" />
+                    <div className="skeleton h-4 w-2/5" />
                   </div>
                 ))}
               </div>

@@ -27,7 +27,6 @@
   height: 42vh;
   min-height: 14rem;
   fill: var(--foreground);
-  will-change: transform;
   animation: login-wave-drift linear infinite;
 }
 

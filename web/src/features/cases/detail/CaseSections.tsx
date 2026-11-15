@@ -161,8 +161,8 @@ export function AlertsSection({ caseId, timeZone }: AlertsSectionProps) {
         <span className="sr-only">Loading alerts…</span>
         {Array.from({ length: 3 }, (_, index) => (
           <div key={index} className="flex items-center justify-between gap-4">
-            <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
-            <div className="h-4 w-16 animate-pulse rounded bg-muted" />
+            <div className="skeleton h-4 w-3/5" />
+            <div className="skeleton h-4 w-16" />
           </div>
         ))}
       </div>
@@ -174,16 +174,7 @@ export function AlertsSection({ caseId, timeZone }: AlertsSectionProps) {
         tone="error"
         icon={TriangleAlertIcon}
         title="Could not load the case alerts."
-        action={
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void alertQuery.refetch()}
-          >
-            Retry
-          </Button>
-        }
+        onRetry={() => void alertQuery.refetch()}
       />
     );
   }
@@ -295,9 +286,9 @@ export function TimelineSection({
         </span>
         {Array.from({ length: 3 }, (_, index) => (
           <div key={index} className="flex items-center gap-3">
-            <div className="size-2 animate-pulse rounded-full bg-muted" />
-            <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
-            <div className="ml-auto h-4 w-16 animate-pulse rounded bg-muted" />
+            <div className="skeleton size-2 rounded-full" />
+            <div className="skeleton h-4 w-3/5" />
+            <div className="skeleton ml-auto h-4 w-16" />
           </div>
         ))}
       </div>
@@ -313,16 +304,7 @@ export function TimelineSection({
             ? "Could not load the case activity."
             : "Could not load the case timeline."
         }
-        action={
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void timelineQuery.refetch()}
-          >
-            Retry
-          </Button>
-        }
+        onRetry={() => void timelineQuery.refetch()}
       />
     );
   }

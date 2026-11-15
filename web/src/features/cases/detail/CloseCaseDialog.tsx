@@ -297,6 +297,8 @@ export function ClosureFields({ form, idPrefix }: ClosureFieldsProps) {
           name="outcome"
           render={({ field, fieldState }) => (
             <RadioGroup
+              /* segmented's inline-flex and gap must beat RadioGroup's grid
+                 and gap-2, which cn cannot merge with a custom utility. */
               className="segmented inline-flex gap-0.5"
               value={field.value ?? ""}
               onValueChange={field.onChange}
@@ -306,7 +308,6 @@ export function ClosureFields({ form, idPrefix }: ClosureFieldsProps) {
               }
               aria-invalid={fieldState.error ? true : undefined}
             >
-              {/* cn cannot merge the custom utility, so drop RadioGroup's grid and gap-2. */}
               {OUTCOME_OPTIONS.map((outcome, index) => (
                 <label key={outcome} className="segmented-item">
                   <RadioGroupItem

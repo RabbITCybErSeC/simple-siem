@@ -55,7 +55,6 @@ const SEVERITY_SWATCHES: Record<(typeof severityOrder)[number], string> = {
 
 const TREND_HINT =
   "Drag across the bars to zoom; use the time range picker from the keyboard.";
-const TREND_HINT_ID = "trend-drag-hint";
 
 const tickFormats: Record<TimeZoneSetting, Intl.DateTimeFormat> = {
   local: new Intl.DateTimeFormat("en-US", {
@@ -213,9 +212,7 @@ export function TrendChart({
           ))}
         </div>
       </div>
-      <p id={TREND_HINT_ID} className="sr-only">
-        {TREND_HINT}
-      </p>
+      <p className="sr-only">{TREND_HINT}</p>
 
       {loading ? (
         <div
@@ -243,7 +240,6 @@ export function TrendChart({
               config={chartConfig}
               className="h-24 w-full sm:h-28"
               title={TREND_HINT}
-              aria-describedby={TREND_HINT_ID}
             >
               <BarChart
                 data={data}

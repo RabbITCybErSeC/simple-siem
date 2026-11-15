@@ -214,3 +214,7 @@
 @utility native-radio {
   @apply size-4 accent-primary;
 }
+
+@utility skeleton {
+  @apply animate-pulse rounded bg-muted;
+}
