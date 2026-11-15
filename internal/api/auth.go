@@ -32,6 +32,8 @@ const (
 	codeForbidden              = "FORBIDDEN"
 	codeValidationError        = "VALIDATION_ERROR"
 	codeRateLimited            = "RATE_LIMITED"
+
+	publicURLVariable = "SIMPLE_SIEM_PUBLIC_URL"
 )
 
 type authHandler struct {
@@ -50,11 +52,11 @@ func newOriginPolicy(publicURL string, development bool, logger *slog.Logger) or
 	parsed, err := url.Parse(publicURL)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") {
-		logger.Error("public URL is not usable as an origin", "public_url", publicURL, "error", err)
+		logger.Error("public URL is not usable as an origin", "variable", publicURLVariable)
 		return policy
 	}
 	if !isASCII(parsed.Hostname()) {
-		logger.Error("public URL host must be an ASCII host name", "public_url", publicURL)
+		logger.Error("public URL host must be an ASCII host name", "variable", publicURLVariable)
 		return policy
 	}
 	policy.publicOrigin = originFromURL(parsed)
@@ -239,8 +241,7 @@ func requireSession(service *auth.Service, logger *slog.Logger, policy originPol
 }
 
 // requirePermission rejects the request when the actor's roles lack one of the
-// permissions the route declares. The denial is audited on a best-effort
-// basis: an audit failure is logged and the request still gets its 403.
+// permissions the route declares.
 func requirePermission(service *auth.Service, logger *slog.Logger, permissions ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		actor := c.MustGet(ActorKey).(auth.Actor)
@@ -248,30 +249,36 @@ func requirePermission(service *auth.Service, logger *slog.Logger, permissions .
 			if actor.Can(permission) {
 				continue
 			}
-			// The client can cancel its request; the denial must still be
-			// recorded, but not indefinitely.
-			denialContext, cancel := context.WithTimeout(
-				context.WithoutCancel(c.Request.Context()), permissionDenialTimeout,
-			)
-			defer cancel()
-			err := service.RecordPermissionDenied(
-				denialContext,
-				actor, clientInfo(c), c.FullPath(), c.Request.Method, permissions,
-			)
-			if err != nil {
-				logger.Error("record permission denial failed",
-					"request_id", c.GetString(RequestIDKey),
-					"error", err,
-				)
-			}
-			c.Header("Cache-Control", "no-store")
-			c.AbortWithStatusJSON(http.StatusForbidden, errorResponse{
-				Error: errorDetail{Code: codeForbidden, Message: "permission denied"},
-			})
+			denyPermission(c, service, logger, actor, permissions...)
 			return
 		}
 		c.Next()
 	}
+}
+
+// denyPermission audits and answers one refused permission check. The route
+// middleware and the handler-level checks share it so every refusal has the
+// same body and audit event. The client can cancel its request; the denial
+// must still be recorded, but not indefinitely.
+func denyPermission(c *gin.Context, service *auth.Service, logger *slog.Logger, actor auth.Actor, permissions ...string) {
+	denialContext, cancel := context.WithTimeout(
+		context.WithoutCancel(c.Request.Context()), permissionDenialTimeout,
+	)
+	defer cancel()
+	err := service.RecordPermissionDenied(
+		denialContext,
+		actor, clientInfo(c), c.FullPath(), c.Request.Method, permissions,
+	)
+	if err != nil {
+		logger.Error("record permission denial failed",
+			"request_id", c.GetString(RequestIDKey),
+			"error", err,
+		)
+	}
+	c.Header("Cache-Control", "no-store")
+	c.AbortWithStatusJSON(http.StatusForbidden, errorResponse{
+		Error: errorDetail{Code: codeForbidden, Message: "permission denied"},
+	})
 }
 
 // internalError keeps database and configuration details out of responses while

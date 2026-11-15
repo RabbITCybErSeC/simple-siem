@@ -19,6 +19,7 @@ import (
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -233,8 +234,12 @@ func (service *Service) ResetPassword(ctx context.Context, email, password strin
 	}
 
 	err = service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Lock the user row, then the identity, the same order as
+		// ChangePassword. The identity lock makes a concurrent login rehash
+		// wait instead of bumping the version between this read and the update.
 		var user User
-		err := tx.Where("email = ?", normalizedEmail).First(&user).Error
+		err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).
+			Where("email = ?", normalizedEmail).First(&user).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrUserNotFound
 		}
@@ -242,25 +247,31 @@ func (service *Service) ResetPassword(ctx context.Context, email, password strin
 			return fmt.Errorf("find user: %w", err)
 		}
 
-		var identity Identity
-		if err := tx.Where("user_id = ? AND provider = ?", user.ID, ProviderLocal).First(&identity).Error; err != nil {
+		var identity lockedIdentity
+		err = tx.Raw(
+			"SELECT id::text AS id, version FROM user_identities WHERE user_id = ? AND provider = ? FOR UPDATE",
+			user.ID, ProviderLocal,
+		).Scan(&identity).Error
+		if err != nil {
 			return fmt.Errorf("find local identity: %w", err)
 		}
-		result := tx.Model(&Identity{}).
-			Where("id = ? AND version = ?", identity.ID, identity.Version).
-			Updates(map[string]any{
-				"password_hash": passwordHash,
-				"updated_at":    gorm.Expr("now()"),
-				"version":       gorm.Expr("version + 1"),
-			})
-		if result.Error != nil {
-			return fmt.Errorf("update password hash: %w", result.Error)
+		if identity.ID == "" {
+			return fmt.Errorf("find local identity: %w", gorm.ErrRecordNotFound)
 		}
-		if result.RowsAffected == 0 {
-			return fmt.Errorf("update password hash: the identity changed concurrently")
+		if err := tx.Exec(
+			"UPDATE user_identities SET password_hash = ?, version = version + 1, updated_at = now() WHERE id = ?",
+			passwordHash, identity.ID,
+		).Error; err != nil {
+			return fmt.Errorf("update password hash: %w", err)
 		}
 
-		result = tx.Exec("DELETE FROM sessions WHERE user_id = ?", user.ID)
+		if err := tx.Exec(
+			"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", user.ID,
+		).Error; err != nil {
+			return fmt.Errorf("delete reset tokens: %w", err)
+		}
+
+		result := tx.Exec("DELETE FROM sessions WHERE user_id = ?", user.ID)
 		if result.Error != nil {
 			return fmt.Errorf("delete sessions: %w", result.Error)
 		}
@@ -284,6 +295,43 @@ func (service *Service) ResetPassword(ctx context.Context, email, password strin
 		return 0, err
 	}
 	return sessionsRevoked, nil
+}
+
+// PurgeExpired deletes auth rows that can no longer count toward a rate limit,
+// authenticate a request, or reset a password. The three deletes share one
+// transaction, so a partial purge leaves no table behind.
+func (service *Service) PurgeExpired(ctx context.Context, now time.Time) (PurgeResult, error) {
+	var result PurgeResult
+	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		loginAttempts := tx.Exec(
+			"DELETE FROM login_attempts WHERE created_at < ?", now.Add(-failureWindowDuration),
+		)
+		if loginAttempts.Error != nil {
+			return fmt.Errorf("delete login attempts: %w", loginAttempts.Error)
+		}
+		result.LoginAttempts = loginAttempts.RowsAffected
+
+		sessions := tx.Exec(
+			"DELETE FROM sessions WHERE idle_expires_at <= ? OR absolute_expires_at <= ?", now, now,
+		)
+		if sessions.Error != nil {
+			return fmt.Errorf("delete sessions: %w", sessions.Error)
+		}
+		result.Sessions = sessions.RowsAffected
+
+		resetTokens := tx.Exec(
+			"DELETE FROM password_reset_tokens WHERE used_at IS NOT NULL OR expires_at <= ?", now,
+		)
+		if resetTokens.Error != nil {
+			return fmt.Errorf("delete reset tokens: %w", resetTokens.Error)
+		}
+		result.ResetTokens = resetTokens.RowsAffected
+		return nil
+	})
+	if err != nil {
+		return PurgeResult{}, err
+	}
+	return result, nil
 }
 
 func (service *Service) Login(ctx context.Context, request LoginRequest, client ClientInfo) (result LoginResult, err error) {
@@ -907,15 +955,23 @@ func (service *Service) startSession(ctx context.Context, user User, identity Ex
 	err := service.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Take the user row first, then the identity, the same order as the
 		// reset-token paths. NO KEY UPDATE still serializes the writers but
-		// does not block the foreign-key check of the session below.
-		if _, err := loadUserForNoKeyUpdate(tx, user.ID); err != nil {
+		// does not block the foreign-key check of the session below. The row
+		// can differ from the pre-check row if a disable committed while this
+		// login waited, so check the status again.
+		lockedUser, err := loadUserForNoKeyUpdate(tx, user.ID)
+		if err != nil {
 			return err
 		}
+		if lockedUser.Status != StatusActive {
+			credentialRejected = true
+			return recordFailedLoginEvent(tx, user.ID, client, "invalid_credentials")
+		}
+		user = lockedUser
 
 		var lockedIdentity struct {
 			Version *int `gorm:"column:version"`
 		}
-		err := tx.Raw(
+		err = tx.Raw(
 			"SELECT version FROM user_identities WHERE provider = ? AND subject = ? FOR UPDATE",
 			identity.Provider, identity.Subject,
 		).Scan(&lockedIdentity).Error

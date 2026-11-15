@@ -1283,6 +1283,160 @@ func TestResetPasswordValidatesInput(t *testing.T) {
 	}
 }
 
+func TestResetPasswordInvalidatesResetTokens(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	token, _, err := test.service.CreateResetToken(
+		context.Background(), testActorFor(user), testClient(), user.ID,
+	)
+	if err != nil {
+		t.Fatalf("CreateResetToken: %v", err)
+	}
+
+	const newPassword = "another correct horse"
+	if _, err := test.service.ResetPassword(context.Background(), testEmail, newPassword); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if err := test.service.UseResetToken(
+		context.Background(), token, "a third correct horse", testClient(),
+	); !errors.Is(err, ErrInvalidResetToken) {
+		t.Fatalf("UseResetToken after a CLI reset = %v, want ErrInvalidResetToken", err)
+	}
+	if got := countRows(t, test.database, "password_reset_tokens"); got != 0 {
+		t.Errorf("reset token rows = %d, want 0", got)
+	}
+}
+
+// TestResetPasswordSurvivesConcurrentIdentityVersionBump bumps the identity
+// version from another transaction after the CLI reset reads it. Locking the
+// identity makes the reset wait and then read the new version instead of
+// failing its update.
+func TestResetPasswordSurvivesConcurrentIdentityVersionBump(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+
+	identityLocked := make(chan struct{})
+	releaseIdentity := make(chan struct{})
+	lockResult := make(chan error, 1)
+	go func() {
+		lockResult <- test.database.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(
+				"SELECT id FROM user_identities WHERE id = ? FOR UPDATE", identity.ID,
+			).Error; err != nil {
+				return err
+			}
+			close(identityLocked)
+			<-releaseIdentity
+			return tx.Exec(
+				"UPDATE user_identities SET version = version + 1 WHERE id = ?", identity.ID,
+			).Error
+		})
+	}()
+	<-identityLocked
+
+	resetResult := make(chan error, 1)
+	go func() {
+		_, err := test.service.ResetPassword(context.Background(), testEmail, "another correct horse")
+		resetResult <- err
+	}()
+	waitForLockWaits(t, test.database, 1)
+	close(releaseIdentity)
+	if err := <-lockResult; err != nil {
+		t.Fatalf("bump the identity version: %v", err)
+	}
+	if err := <-resetResult; err != nil {
+		t.Fatalf("ResetPassword with a concurrent identity version bump = %v, want nil", err)
+	}
+
+	test.login(t, testEmail, "another correct horse")
+}
+
+// TestPurgeExpiredDeletesOnlyStaleRows puts rows on each side of every cutoff
+// and uses a fixed now, so the boundaries do not depend on the test clock.
+func TestPurgeExpiredDeletesOnlyStaleRows(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+	now := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+
+	insertFailedAttempt(t, test.database, "old@example.com", "192.0.2.1", now.Add(-16*time.Minute))
+	insertFailedAttempt(t, test.database, "recent@example.com", "192.0.2.2", now.Add(-14*time.Minute))
+
+	insertSession := func(label string, idleExpiresAt, absoluteExpiresAt time.Time) {
+		t.Helper()
+		tokenHash := sha256.Sum256([]byte(label))
+		err := test.database.Exec(`
+			INSERT INTO sessions (user_id, token_hash, auth_provider, idle_expires_at, absolute_expires_at, user_agent)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			user.ID, tokenHash[:], ProviderLocal, idleExpiresAt, absoluteExpiresAt, label,
+		).Error
+		if err != nil {
+			t.Fatalf("insert session %q: %v", label, err)
+		}
+	}
+	insertSession("idle-expired", now.Add(-time.Minute), now.Add(time.Hour))
+	insertSession("absolute-expired", now.Add(time.Hour), now.Add(-time.Minute))
+	insertSession("live", now.Add(time.Hour), now.Add(time.Hour))
+
+	insertResetToken := func(label string, expiresAt time.Time, usedAt *time.Time) {
+		t.Helper()
+		tokenHash := sha256.Sum256([]byte(label))
+		err := test.database.Exec(`
+			INSERT INTO password_reset_tokens (user_id, token_hash, created_by, expires_at, used_at)
+			VALUES (?, ?, ?, ?, ?)`,
+			user.ID, tokenHash[:], user.ID, expiresAt, usedAt,
+		).Error
+		if err != nil {
+			t.Fatalf("insert reset token %q: %v", label, err)
+		}
+	}
+	usedAt := now.Add(-time.Minute)
+	insertResetToken("used", now.Add(time.Hour), &usedAt)
+	insertResetToken("expired", now.Add(-time.Minute), nil)
+	insertResetToken("valid", now.Add(time.Hour), nil)
+
+	result, err := test.service.PurgeExpired(context.Background(), now)
+	if err != nil {
+		t.Fatalf("PurgeExpired: %v", err)
+	}
+	if result.LoginAttempts != 1 || result.Sessions != 2 || result.ResetTokens != 2 {
+		t.Errorf("purged %+v, want 1 login attempt, 2 sessions, and 2 reset tokens", result)
+	}
+
+	var attempts int64
+	if err := test.database.Raw(
+		"SELECT count(*) FROM login_attempts WHERE created_at = ?", now.Add(-14*time.Minute),
+	).Scan(&attempts).Error; err != nil {
+		t.Fatalf("count remaining login attempts: %v", err)
+	}
+	if attempts != 1 || countRows(t, test.database, "login_attempts") != 1 {
+		t.Errorf("kept login attempts = %d, want only the 14-minute-old row", attempts)
+	}
+
+	var sessionLabels []string
+	if err := test.database.Raw("SELECT user_agent FROM sessions ORDER BY user_agent").Scan(&sessionLabels).Error; err != nil {
+		t.Fatalf("read remaining sessions: %v", err)
+	}
+	if !slices.Equal(sessionLabels, []string{"live"}) {
+		t.Errorf("remaining sessions = %v, want [live]", sessionLabels)
+	}
+
+	var remainingTokens int64
+	validHash := sha256.Sum256([]byte("valid"))
+	if err := test.database.Raw(
+		"SELECT count(*) FROM password_reset_tokens WHERE token_hash = ?", validHash[:],
+	).Scan(&remainingTokens).Error; err != nil {
+		t.Fatalf("count remaining reset tokens: %v", err)
+	}
+	if remainingTokens != 1 || countRows(t, test.database, "password_reset_tokens") != 1 {
+		t.Errorf("remaining reset tokens = %d, want only the valid one", remainingTokens)
+	}
+}
+
 func TestLoginSuccess(t *testing.T) {
 	test := newTestService(t)
 	user := test.createAdmin(t, testEmail)
@@ -1566,6 +1720,72 @@ func TestLoginRejectsIdentityDeletedBeforeSession(t *testing.T) {
 	}
 	if got := countRows(t, test.database, "login_attempts"); got != 1 {
 		t.Errorf("login attempts = %d, want 1 (the attempt row is kept)", got)
+	}
+}
+
+// TestLoginRejectsUserDisabledBeforeSession disables the user while the login
+// waits for the user row lock. The login already passed the status check, so
+// only the recheck on the locked row can stop the session.
+func TestLoginRejectsUserDisabledBeforeSession(t *testing.T) {
+	test := newTestService(t)
+	user := test.createAdmin(t, testEmail)
+
+	var identity Identity
+	if err := test.database.Where("user_id = ?", user.ID).First(&identity).Error; err != nil {
+		t.Fatalf("read identity: %v", err)
+	}
+	test.service.provider = fixedProvider{identity: ExternalIdentity{
+		Provider:          ProviderLocal,
+		Subject:           user.ID,
+		CredentialVersion: identity.Version,
+	}}
+
+	var login LoginResult
+	loginErr := runWhileUserLocked(t, test.database, user.ID, func(tx *gorm.DB) error {
+		return tx.Exec("UPDATE users SET status = ? WHERE id = ?", StatusDisabled, user.ID).Error
+	}, func() error {
+		var err error
+		login, err = test.service.Login(
+			context.Background(),
+			LoginRequest{Email: testEmail, Password: testPassword},
+			testClient(),
+		)
+		return err
+	})
+	if !errors.Is(loginErr, ErrInvalidCredentials) {
+		t.Fatalf("Login for a user disabled during the session start = %v, want ErrInvalidCredentials", loginErr)
+	}
+	if login.Token != "" {
+		t.Error("Login for a user disabled during the session start returned a token")
+	}
+	var sessions int64
+	if err := test.database.Raw("SELECT count(*) FROM sessions WHERE user_id = ?", user.ID).Scan(&sessions).Error; err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessions != 0 {
+		t.Errorf("sessions count = %d, want 0", sessions)
+	}
+	events := authLoginEvents(t, test.database, user.ID)
+	if len(events) != 1 {
+		t.Fatalf("Login wrote %d audit events, want 1", len(events))
+	}
+	if events[0].EventOutcome != "FAILED" {
+		t.Errorf("login audit outcome = %q, want FAILED", events[0].EventOutcome)
+	}
+	if changes := storedChanges(t, events[0]); changes["reason"] != "invalid_credentials" {
+		t.Errorf("login audit reason = %v, want invalid_credentials", changes["reason"])
+	}
+
+	if _, err := test.service.EnableUser(
+		context.Background(), testActorFor(user), testClient(), user.ID, user.Version,
+	); err != nil {
+		t.Fatalf("EnableUser: %v", err)
+	}
+	if _, err := test.service.Authenticate(context.Background(), login.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("Authenticate after re-enabling the user = %v, want ErrUnauthenticated", err)
+	}
+	if got := countRows(t, test.database, "sessions"); got != 0 {
+		t.Errorf("sessions count = %d after re-enabling the user, want 0", got)
 	}
 }
 

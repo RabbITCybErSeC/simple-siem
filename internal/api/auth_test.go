@@ -949,6 +949,23 @@ func newAuthRouterFor(t *testing.T, publicURL string, development bool) (*gin.En
 	return router, service, database, &logs
 }
 
+func TestOriginPolicyLogOmitsThePublicURL(t *testing.T) {
+	for _, publicURL := range []string{
+		"https://user:pw@sïem.example",
+		"https://user:pw@siem.example.com/%zz",
+	} {
+		_, _, _, logs := newAuthRouterFor(t, publicURL, false)
+		if !strings.Contains(logs.String(), "SIMPLE_SIEM_PUBLIC_URL") {
+			t.Errorf("origin policy log %q does not name SIMPLE_SIEM_PUBLIC_URL", logs.String())
+		}
+		for _, secret := range []string{"user:pw", "siem.example"} {
+			if strings.Contains(logs.String(), secret) {
+				t.Errorf("origin policy log for %q leaks %q: %s", publicURL, secret, logs.String())
+			}
+		}
+	}
+}
+
 func createTestAdmin(t *testing.T, service *auth.Service) auth.User {
 	t.Helper()
 	user, err := service.CreateAdmin(context.Background(), authTestEmail, "Admin User", authTestPassword)

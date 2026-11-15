@@ -26,7 +26,6 @@ const (
 var ErrInvalidPage = errors.New("page is out of range")
 
 var sensitiveKeyParts = []string{
-	"api_key",
 	"apikey",
 	"authorization",
 	"bearer",
@@ -34,7 +33,6 @@ var sensitiveKeyParts = []string{
 	"credential",
 	"passwd",
 	"password",
-	"private_key",
 	"privatekey",
 	"secret",
 	"session",
@@ -136,7 +134,33 @@ func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) (
 		return nil, 0, errors.New("list audit events: pageSize must be at least 1")
 	}
 
-	query := db.WithContext(ctx).Model(&Event{})
+	query := filterQuery(db.WithContext(ctx), filter)
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count audit events: %w", err)
+	}
+
+	var rows []storedEvent
+	err := query.
+		Select(selectEventColumns).
+		Order("created_at DESC, id DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&rows).Error
+	if err != nil {
+		return nil, 0, fmt.Errorf("list audit events: %w", err)
+	}
+	events := make([]Event, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, row.event())
+	}
+	return events, total, nil
+}
+
+// filterQuery applies the non-zero filter fields to a query over audit_events.
+func filterQuery(db *gorm.DB, filter Filter) *gorm.DB {
+	query := db.Model(&Event{})
 	if filter.EventName != "" {
 		query = query.Where("event_name = ?", filter.EventName)
 	}
@@ -170,27 +194,7 @@ func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) (
 	if filter.CreatedBefore != nil {
 		query = query.Where("created_at < ?", *filter.CreatedBefore)
 	}
-
-	var total int64
-	if err := query.Count(&total).Error; err != nil {
-		return nil, 0, fmt.Errorf("count audit events: %w", err)
-	}
-
-	var rows []storedEvent
-	err := query.
-		Select(selectEventColumns).
-		Order("created_at DESC, id DESC").
-		Offset((page - 1) * pageSize).
-		Limit(pageSize).
-		Find(&rows).Error
-	if err != nil {
-		return nil, 0, fmt.Errorf("list audit events: %w", err)
-	}
-	events := make([]Event, 0, len(rows))
-	for _, row := range rows {
-		events = append(events, row.event())
-	}
-	return events, total, nil
+	return query
 }
 
 // Get returns one audit event by id.
@@ -332,7 +336,7 @@ func IsSensitiveKey(key string) bool {
 		return false
 	}
 	for _, part := range sensitiveKeyParts {
-		if strings.Contains(lowered, part) {
+		if strings.Contains(identifier, part) {
 			return true
 		}
 	}

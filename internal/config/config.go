@@ -77,6 +77,10 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	} else if parsed, err := url.Parse(settings.PublicURL); err != nil || !parsed.IsAbs() || parsed.Host == "" {
 		problems = append(problems, fmt.Errorf("%s must be an absolute URL", publicURLVariable))
+	} else if parsed.User != nil {
+		problems = append(problems, fmt.Errorf("%s must not contain user information", publicURLVariable))
+	} else if !isASCII(parsed.Hostname()) {
+		problems = append(problems, fmt.Errorf("%s host must be ASCII; use the punycode form", publicURLVariable))
 	} else if settings.Environment != EnvironmentDevelopment && parsed.Scheme != "https" {
 		problems = append(problems, fmt.Errorf("%s must use https outside development", publicURLVariable))
 	} else if parsed.Scheme != "http" && parsed.Scheme != "https" {
@@ -120,6 +124,17 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	return settings, nil
+}
+
+// isASCII reports whether value is plain ASCII. Host names in the
+// configuration use the punycode form instead of Unicode.
+func isASCII(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] > 127 {
+			return false
+		}
+	}
+	return true
 }
 
 func parsePositiveDuration(getenv func(string) string, variable string, fallback time.Duration) (time.Duration, error) {

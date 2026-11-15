@@ -160,6 +160,10 @@ func (users userHandler) create(c *gin.Context) {
 	}
 
 	actor := c.MustGet(ActorKey).(auth.Actor)
+	if len(request.Roles) > 0 && !actor.Can("role:assign") {
+		denyPermission(c, users.service, users.logger, actor, "role:assign")
+		return
+	}
 	created, err := users.service.CreateUser(c.Request.Context(), actor, clientInfo(c), auth.CreateUserRequest{
 		Email:       request.Email,
 		DisplayName: request.DisplayName,

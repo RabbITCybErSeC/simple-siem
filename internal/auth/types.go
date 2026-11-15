@@ -234,3 +234,10 @@ type RateLimitedError struct {
 func (rateLimited RateLimitedError) Error() string {
 	return "too many failed logins"
 }
+
+// PurgeResult is the number of stale rows PurgeExpired deleted per table.
+type PurgeResult struct {
+	LoginAttempts int64
+	Sessions      int64
+	ResetTokens   int64
+}

@@ -170,6 +170,53 @@ func TestLoad(t *testing.T) {
 			wantErrors: []string{"SIMPLE_SIEM_PUBLIC_URL"},
 		},
 		{
+			name: "public URL with user information",
+			environment: map[string]string{
+				"SIMPLE_SIEM_ENV":          "development",
+				"SIMPLE_SIEM_DATABASE_URL": databaseURL,
+				"SIMPLE_SIEM_PUBLIC_URL":   "https://user:pw@siem.example.com",
+			},
+			wantErrors:       []string{"SIMPLE_SIEM_PUBLIC_URL", "must not contain user information"},
+			wantNoErrorTexts: []string{"user:pw", "siem.example.com"},
+		},
+		{
+			name: "public URL with a non-ASCII host",
+			environment: map[string]string{
+				"SIMPLE_SIEM_ENV":          "development",
+				"SIMPLE_SIEM_DATABASE_URL": databaseURL,
+				"SIMPLE_SIEM_PUBLIC_URL":   "https://sïem.example",
+			},
+			wantErrors:       []string{"SIMPLE_SIEM_PUBLIC_URL", "ASCII", "punycode"},
+			wantNoErrorTexts: []string{"sïem.example"},
+		},
+		{
+			name: "public URL with another scheme in development",
+			environment: map[string]string{
+				"SIMPLE_SIEM_ENV":          "development",
+				"SIMPLE_SIEM_DATABASE_URL": databaseURL,
+				"SIMPLE_SIEM_PUBLIC_URL":   "ftp://siem.example.com",
+			},
+			wantErrors:       []string{"SIMPLE_SIEM_PUBLIC_URL", "http or https"},
+			wantNoErrorTexts: []string{"siem.example.com"},
+		},
+		{
+			name: "punycode public URL",
+			environment: map[string]string{
+				"SIMPLE_SIEM_ENV":          "development",
+				"SIMPLE_SIEM_DATABASE_URL": databaseURL,
+				"SIMPLE_SIEM_PUBLIC_URL":   "https://xn--bcher-kva.example",
+			},
+			want: Config{
+				Environment:             EnvironmentDevelopment,
+				DatabaseURL:             databaseURL,
+				Listen:                  ":8080",
+				PublicURL:               "https://xn--bcher-kva.example",
+				ShutdownTimeout:         30 * time.Second,
+				SessionIdleTimeout:      30 * time.Minute,
+				SessionAbsoluteLifetime: 12 * time.Hour,
+			},
+		},
+		{
 			name: "every problem is joined",
 			environment: map[string]string{
 				"SIMPLE_SIEM_ENV":              "production",

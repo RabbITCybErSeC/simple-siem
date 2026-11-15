@@ -465,6 +465,7 @@ func TestRecordRedactsEverySensitiveKeyPart(t *testing.T) {
 	for _, part := range []string{
 		"password", "token", "secret", "apikey", "api_key", "authorization",
 		"passwd", "credential", "cookie", "private_key", "privatekey", "session", "bearer",
+		"api-key", "private-key", "API_KEY", "Private_Key",
 	} {
 		t.Run(part, func(t *testing.T) {
 			key := "my" + strings.ToUpper(part) + "Value"
@@ -656,6 +657,57 @@ func TestListFiltersByEachEqualityField(t *testing.T) {
 			}
 			if len(events) != 1 || events[0].TargetID != match.TargetID {
 				t.Errorf("events = %v, want only %q", targetIDs(events), match.TargetID)
+			}
+		})
+	}
+}
+
+// TestListFilterPlansUseTheirIndexes runs the real list page query under
+// EXPLAIN with sequential scans disabled, so a missing index shows up as a
+// sequential scan instead of passing on a small table.
+func TestListFilterPlansUseTheirIndexes(t *testing.T) {
+	db := databasetest.New(t)
+	indexed := validEvent("indexed-filter")
+	indexed.EventName = "simple_siem.test.indexed_filter"
+	indexed.EventOutcome = "DENIED"
+	indexed.RequestID = "request-indexed"
+	indexed.TraceID = "trace-indexed"
+	if err := audit.Record(db, indexed); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		filter audit.Filter
+		index  string
+	}{
+		{"eventName", audit.Filter{EventName: indexed.EventName}, "audit_events_event_name_created_at_idx"},
+		{"eventOutcome", audit.Filter{EventOutcome: indexed.EventOutcome}, "audit_events_event_outcome_created_at_idx"},
+		{"requestId", audit.Filter{RequestID: indexed.RequestID}, "audit_events_request_id_idx"},
+		{"traceId", audit.Filter{TraceID: indexed.TraceID}, "audit_events_trace_id_idx"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Exec("SET LOCAL enable_seqscan = off").Error; err != nil {
+					return err
+				}
+				var events []audit.Event
+				statement := audit.ListPageQueryForTest(tx, testCase.filter, 1, 50).
+					Session(&gorm.Session{DryRun: true}).
+					Find(&events).Statement
+				sql := tx.Explain(statement.SQL.String(), statement.Vars...)
+				var plan []string
+				if err := tx.Raw("EXPLAIN " + sql).Scan(&plan).Error; err != nil {
+					return err
+				}
+				if joined := strings.Join(plan, "\n"); !strings.Contains(joined, testCase.index) {
+					t.Errorf("plan for %s does not use %s:\n%s", testCase.name, testCase.index, joined)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("explain %s: %v", testCase.name, err)
 			}
 		})
 	}

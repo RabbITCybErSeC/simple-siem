@@ -688,6 +688,135 @@ func apiInsertHelpdeskRole(t *testing.T, database *gorm.DB) {
 	}
 }
 
+// apiInsertPermissionRole adds a test-only role holding exactly one
+// permission, directly because the default mapping is fixed by migration.
+func apiInsertPermissionRole(t *testing.T, database *gorm.DB, role, permission string) {
+	t.Helper()
+	if err := database.Exec(
+		"INSERT INTO roles (name, description) VALUES (?, ?)", role, role,
+	).Error; err != nil {
+		t.Fatalf("insert %s role: %v", role, err)
+	}
+	if err := database.Exec(
+		"INSERT INTO role_permissions (role_name, permission) VALUES (?, ?)", role, permission,
+	).Error; err != nil {
+		t.Fatalf("grant %s %s: %v", role, permission, err)
+	}
+}
+
+// apiOnePermissionToken creates an active user whose only role holds one
+// permission and returns that caller's session token.
+func apiOnePermissionToken(
+	t *testing.T,
+	router http.Handler,
+	service *auth.Service,
+	database *gorm.DB,
+	admin auth.Actor,
+	role, permission string,
+) string {
+	t.Helper()
+	apiInsertPermissionRole(t, database, role, permission)
+	email := strings.ToLower(role) + "@example.com"
+	const password = "permission horse battery"
+	user := apiCreateUser(t, service, admin, email, "Permission Holder", role)
+	apiActivateUser(t, service, admin, user.User.ID, password)
+	return loginTokenFor(t, router, email, password)
+}
+
+func TestUserWriteAloneCreatesAUserWithoutRoles(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	admin, _ := apiAdmin(t, router, service)
+	token := apiOnePermissionToken(t, router, service, database, admin, "USER_WRITE_ONLY", "user:write")
+
+	response := sendJSONWithHeaders(router, http.MethodPost, "/api/v1/users", bearer(token), `{
+		"email": "without-roles@example.com", "displayName": "Without Roles"
+	}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("POST /api/v1/users without roles = %d, want 201: %s", response.Code, response.Body)
+	}
+	var created userBody
+	decodeJSON(t, response, &created)
+	if len(created.Roles) != 0 {
+		t.Errorf("created roles = %v, want none", created.Roles)
+	}
+}
+
+func TestUserWriteAloneCannotCreateAUserWithRoles(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	admin, _ := apiAdmin(t, router, service)
+	token := apiOnePermissionToken(t, router, service, database, admin, "USER_WRITE_ONLY", "user:write")
+
+	response := sendJSONWithHeaders(router, http.MethodPost, "/api/v1/users", bearer(token), `{
+		"email": "with-roles@example.com", "displayName": "With Roles", "roles": ["ANALYST"]
+	}`)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("POST /api/v1/users with roles = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "permission denied")
+
+	var count int64
+	if err := database.Raw(
+		"SELECT count(*) FROM users WHERE email = ?", "with-roles@example.com",
+	).Scan(&count).Error; err != nil {
+		t.Fatalf("count created users: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("users with the refused email = %d, want 0", count)
+	}
+}
+
+func TestUserWriteAloneCannotCreateAResetToken(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	admin, _ := apiAdmin(t, router, service)
+	token := apiOnePermissionToken(t, router, service, database, admin, "USER_WRITE_ONLY", "user:write")
+	target := apiCreateUser(t, service, admin, "reset-target@example.com", "Reset Target")
+
+	response := send(
+		router, http.MethodPost, "/api/v1/users/"+target.User.ID+"/password-reset", "", bearer(token),
+	)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("POST password-reset with user:write alone = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "permission denied")
+
+	var count int64
+	if err := database.Raw(
+		"SELECT count(*) FROM password_reset_tokens WHERE user_id = ?", target.User.ID,
+	).Scan(&count).Error; err != nil {
+		t.Fatalf("count reset tokens: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("reset tokens = %d, want 0", count)
+	}
+}
+
+func TestRoleAssignAloneCannotCreateAUser(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	admin, _ := apiAdmin(t, router, service)
+	token := apiOnePermissionToken(t, router, service, database, admin, "ROLE_ASSIGN_ONLY", "role:assign")
+
+	response := sendJSONWithHeaders(router, http.MethodPost, "/api/v1/users", bearer(token), `{
+		"email": "new-user@example.com", "displayName": "New User"
+	}`)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("POST /api/v1/users with role:assign alone = %d, want 403: %s", response.Code, response.Body)
+	}
+	assertNoStore(t, response)
+	assertErrorCode(t, response, "FORBIDDEN", "permission denied")
+
+	var count int64
+	if err := database.Raw(
+		"SELECT count(*) FROM users WHERE email = ?", "new-user@example.com",
+	).Scan(&count).Error; err != nil {
+		t.Fatalf("count created users: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("users with the refused email = %d, want 0", count)
+	}
+}
+
 func TestCreateResetToken(t *testing.T) {
 	router, service, _, _ := newAPIRouter(t)
 	admin, token := apiAdmin(t, router, service)

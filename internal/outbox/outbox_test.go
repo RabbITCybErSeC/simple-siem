@@ -165,6 +165,12 @@ func TestRecordRejectsInvalidEvents(t *testing.T) {
 		{"href key is not a reference", "payload.passwordResetHref", "", func(event *outbox.Event) {
 			event.Payload = map[string]any{"passwordResetHref": "https://example.com/r"}
 		}},
+		{"hyphenated sensitive key", "payload.api-key", "", func(event *outbox.Event) {
+			event.Payload = map[string]any{"api-key": "x"}
+		}},
+		{"nested hyphenated sensitive key", "payload.nested.private-key", "", func(event *outbox.Event) {
+			event.Payload = map[string]any{"nested": map[string]any{"private-key": "x"}}
+		}},
 		{"NUL in subject id", "subject", "", func(event *outbox.Event) { event.SubjectID = "a\x00b" }},
 		{"invalid UTF-8 actor id", "actor", "", func(event *outbox.Event) { event.Actor.ID = "\xff" }},
 		{"NUL in payload", "payload", "", func(event *outbox.Event) {

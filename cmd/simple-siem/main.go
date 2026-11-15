@@ -62,6 +62,8 @@ usage: simple-siem detect <detection-id> --fixture <path>`
 	readTimeout       = 30 * time.Second
 	writeTimeout      = 60 * time.Second
 	idleTimeout       = 120 * time.Second
+
+	authPurgeInterval = 10 * time.Minute
 )
 
 func main() {
@@ -665,6 +667,9 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 		logger.Warn(`no users exist; run "simple-siem admin create --email <email>"`)
 	}
 
+	// shortcut: purge ticker in serve, move into the scheduler when Phase 3 lands
+	go purgeExpiredAuthRows(ctx, authService, logger)
+
 	sqlDatabase, err := db.DB()
 	if err != nil {
 		logger.Error("get database connection pool", "error", err)
@@ -672,6 +677,35 @@ func runServe(ctx context.Context, args []string, getenv func(string) string, st
 	}
 	server := newHTTPServer(settings, sqlDatabase, db, authService, logger)
 	return serveHTTP(ctx, server, settings.ShutdownTimeout)
+}
+
+// purgeExpiredAuthRows deletes stale auth rows once, then on every tick until
+// the serve context ends. A failed pass is logged and retried on the next tick.
+func purgeExpiredAuthRows(ctx context.Context, service *auth.Service, logger *slog.Logger) {
+	purge := func() {
+		result, err := service.PurgeExpired(ctx, time.Now())
+		if err != nil {
+			logger.Error("purge expired auth rows", "error", err)
+			return
+		}
+		logger.Info("purged expired auth rows",
+			"login_attempts", result.LoginAttempts,
+			"sessions", result.Sessions,
+			"reset_tokens", result.ResetTokens,
+		)
+	}
+
+	purge()
+	ticker := time.NewTicker(authPurgeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			purge()
+		}
+	}
 }
 
 func newHTTPServer(settings config.Config, database api.ReadinessChecker, auditDatabase *gorm.DB, authService *auth.Service, logger *slog.Logger) *http.Server {
