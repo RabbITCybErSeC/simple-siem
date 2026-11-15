@@ -170,6 +170,9 @@ test("applies a time range from the picker with the keyboard", async ({
     .poll(() => new URL(page.url()).searchParams.get("from"))
     .toBe("now-4h");
   await expect(
+    page.getByRole("group", { name: "Commonly used" }),
+  ).toBeHidden();
+  await expect(
     page.getByRole("button", { name: "Last 4 hours" }),
   ).toBeVisible();
 });

@@ -53,7 +53,7 @@ export function CommandPalette({
   const caseCommands = useCaseCommands();
   const [theme, setTheme] = useState(readThemePreference);
   const opener = useRef<HTMLElement | null>(null);
-  const commandMovesFocus = useRef(false);
+  const pendingCommand = useRef<ShellCommand | undefined>(undefined);
 
   const chooseTheme = (preference: ThemePreference) => {
     writeThemePreference(preference);
@@ -77,9 +77,8 @@ export function CommandPalette({
   });
 
   const runCommand = (command: ShellCommand) => {
-    commandMovesFocus.current = command.movesFocus;
+    pendingCommand.current = command;
     onOpenChange(false);
-    command.run();
   };
 
   const handleOpenAutoFocus = () => {
@@ -90,12 +89,17 @@ export function CommandPalette({
   const handleCloseAutoFocus = (event: Event) => {
     event.preventDefault();
 
+    // The dialog's focus trap is gone once it has closed, so a command that
+    // moves focus can run now without the trap pulling focus back.
+    const command = pendingCommand.current;
     const target = opener.current;
+    pendingCommand.current = undefined;
     opener.current = null;
-    if (!commandMovesFocus.current) {
+
+    if (command === undefined || !command.movesFocus) {
       target?.focus();
     }
-    commandMovesFocus.current = false;
+    command?.run();
   };
 
   return (

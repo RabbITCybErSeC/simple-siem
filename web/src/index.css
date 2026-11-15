@@ -3,6 +3,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@custom-variant data-active (&:where([data-state="active"]));
+@custom-variant data-checked (&:where([data-state="checked"]));
+@custom-variant data-unchecked (&:where([data-state="unchecked"]));
+@custom-variant data-indeterminate (&:where([data-state="indeterminate"]));
+@custom-variant data-open (&:where([data-state="open"]));
+@custom-variant data-closed (&:where([data-state="closed"]));
+@custom-variant data-horizontal (&:where([data-orientation="horizontal"]));
+@custom-variant data-vertical (&:where([data-orientation="vertical"]));
+@custom-variant data-selected (&:where([data-selected="true"]));
+
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;

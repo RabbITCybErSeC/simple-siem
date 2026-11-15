@@ -166,31 +166,38 @@ export function AlertsSection({ caseId, timeZone }: AlertsSectionProps) {
 
   return (
     <div>
-      <Table aria-busy={alertQuery.isFetchingNextPage}>
-        <TableCaption>Alerts</TableCaption>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Title</TableHead>
-            <TableHead>Severity</TableHead>
-            <TableHead>Detection</TableHead>
-            <TableHead>Evidence</TableHead>
-            <TableHead>Occurrences</TableHead>
-            <TableHead>First event</TableHead>
-            <TableHead>Last event</TableHead>
-            <TableHead>Disposition</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {alerts.map((alert) => (
-            <AlertRow
-              key={alert.id}
-              alert={alert}
-              timeZone={timeZone}
-              now={now}
-            />
-          ))}
-        </TableBody>
-      </Table>
+      <div
+        role="region"
+        aria-label="Alerts"
+        tabIndex={0}
+        className="overflow-x-auto rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring [&>[data-slot=table-container]]:overflow-visible"
+      >
+        <Table aria-busy={alertQuery.isFetchingNextPage}>
+          <TableCaption>Alerts</TableCaption>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Title</TableHead>
+              <TableHead>Severity</TableHead>
+              <TableHead>Detection</TableHead>
+              <TableHead>Evidence</TableHead>
+              <TableHead>Occurrences</TableHead>
+              <TableHead>First event</TableHead>
+              <TableHead>Last event</TableHead>
+              <TableHead>Disposition</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {alerts.map((alert) => (
+              <AlertRow
+                key={alert.id}
+                alert={alert}
+                timeZone={timeZone}
+                now={now}
+              />
+            ))}
+          </TableBody>
+        </Table>
+      </div>
       {alertQuery.hasNextPage ? (
         <Button
           type="button"
