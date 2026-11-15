@@ -69,6 +69,9 @@ export function buildShellCommands(
   const queueState = parseCaseQueueState(
     new URLSearchParams(onCases ? context.search : ""),
   );
+  // Tab and scope commands keep the /cases pathname; from elsewhere they
+  // navigate there and the shell focuses the page heading.
+  const changesPathname = context.pathname !== "/cases";
 
   return [
     {
@@ -84,7 +87,7 @@ export function buildShellCommands(
       label,
       group: "Navigation" as const,
       keywords: ["case", "queue", "status", tab],
-      movesFocus: false,
+      movesFocus: changesPathname,
       run: () =>
         context.onNavigate(
           `/cases${caseQueueSearch({ ...queueState, tab })}`,
@@ -95,7 +98,7 @@ export function buildShellCommands(
       label,
       group: "Navigation" as const,
       keywords: ["case", "queue", "assignee", scope],
-      movesFocus: false,
+      movesFocus: changesPathname,
       run: () =>
         context.onNavigate(
           `/cases${caseQueueSearch({ ...queueState, scope })}`,

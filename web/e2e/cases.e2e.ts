@@ -12,7 +12,7 @@ function listRequests(api: { caseRequests: () => string[] }) {
     .filter((request) => request.startsWith("/api/v1/cases?"));
 }
 
-function openCases(page: Page) {
+function openCasesTable(page: Page) {
   return page.getByRole("table", { name: "Cases: Open, Mine" });
 }
 
@@ -24,7 +24,7 @@ test("shows my open cases, counts, and the trend chart", async ({
   await page.goto("/cases");
 
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
-  const table = openCases(page);
+  const table = openCasesTable(page);
   await expect(table).toBeVisible();
   await expect(table.locator("tbody tr")).toHaveCount(50);
   await expect(
@@ -82,7 +82,7 @@ test("restores a shared link and falls back for an invalid value", async ({
 test("Back steps through the views", async ({ page }) => {
   await signIn(page);
   await page.goto("/cases");
-  await expect(openCases(page)).toBeVisible();
+  await expect(openCasesTable(page)).toBeVisible();
 
   await page.getByRole("tab", { name: /^Closed/ }).click();
   await expect(new URL(page.url()).searchParams.get("tab")).toBe("closed");
@@ -94,13 +94,13 @@ test("Back steps through the views", async ({ page }) => {
     "aria-selected",
     "true",
   );
-  await expect(openCases(page)).toBeVisible();
+  await expect(openCasesTable(page)).toBeVisible();
 });
 
 test("changes tabs, scopes, and rows with the keyboard", async ({ page }) => {
   await signIn(page);
   await page.goto("/cases");
-  const table = openCases(page);
+  const table = openCasesTable(page);
   await expect(table.locator("tbody tr")).toHaveCount(50);
 
   const closedTab = page.getByRole("tab", { name: /^Closed/ });
@@ -134,7 +134,7 @@ test("changes tabs, scopes, and rows with the keyboard", async ({ page }) => {
     "aria-selected",
     "true",
   );
-  const openTable = openCases(page);
+  const openTable = openCasesTable(page);
   await expect(openTable).toBeVisible();
 
   const rows = openTable.locator("tbody tr");
@@ -151,7 +151,7 @@ test("applies a time range from the picker with the keyboard", async ({
 }) => {
   await signIn(page);
   await page.goto("/cases");
-  await expect(openCases(page)).toBeVisible();
+  await expect(openCasesTable(page)).toBeVisible();
 
   const trigger = page.getByRole("button", { name: "Last 24 hours" });
   await trigger.focus();
@@ -180,7 +180,7 @@ test("applies a time range from the picker with the keyboard", async ({
 test("drags across the chart to set an absolute range", async ({ page }) => {
   await signIn(page);
   await page.goto("/cases");
-  await expect(openCases(page)).toBeVisible();
+  await expect(openCasesTable(page)).toBeVisible();
   await expect(page.locator(".recharts-wrapper")).toBeVisible();
 
   const plot = page.locator(".recharts-wrapper");
@@ -221,7 +221,7 @@ test("announces a new case without moving the visible rows", async ({
 }) => {
   await signIn(page);
   await page.goto("/cases?refresh=30s");
-  const table = openCases(page);
+  const table = openCasesTable(page);
   await expect(table.locator("tbody tr")).toHaveCount(50);
 
   const rows = table.locator("tbody tr");
@@ -256,7 +256,7 @@ test("pauses refresh while the command palette is open", async ({
 }) => {
   await signIn(page);
   await page.goto("/cases?refresh=30s");
-  await expect(openCases(page).locator("tbody tr")).toHaveCount(50);
+  await expect(openCasesTable(page).locator("tbody tr")).toHaveCount(50);
 
   await page.keyboard.press("Control+k");
   await expect(page.getByPlaceholder("Type a command…")).toBeVisible();

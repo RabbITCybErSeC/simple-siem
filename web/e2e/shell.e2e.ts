@@ -69,6 +69,23 @@ test("Go to Cases leaves focus on the Cases heading", async ({ page }) => {
   await expect(heading).toBeFocused();
 });
 
+test("reopening the palette right after Go to Cases still navigates", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto("/nope");
+  await expect(
+    page.getByRole("heading", { name: "Page not found" }),
+  ).toBeVisible();
+
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("go to cases");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Control+k");
+
+  await expect(page).toHaveURL(/\/cases$/);
+});
+
 test("Keyboard shortcuts leaves focus inside the shortcuts dialog", async ({
   page,
 }) => {

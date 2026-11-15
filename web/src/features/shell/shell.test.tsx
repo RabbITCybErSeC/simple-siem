@@ -13,6 +13,7 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routes } from "../../App";
 import { createQueryClient } from "../auth/session";
+import { buildShellCommands } from "./commands";
 import { EmptyState } from "./EmptyState";
 import { shortcutFor } from "./shortcuts";
 
@@ -175,6 +176,31 @@ describe("shortcutFor", () => {
   });
 });
 
+describe("buildShellCommands focus", () => {
+  function tabAndScopeCommands(pathname: string) {
+    return buildShellCommands({
+      pathname,
+      search: "",
+      theme: "system",
+      timeZone: "local",
+      onNavigate: () => undefined,
+      onThemeChange: () => undefined,
+      onTimeZoneChange: () => undefined,
+      onShowShortcuts: () => undefined,
+      onSignOut: () => undefined,
+    }).filter((command) => /^cases-(?:tab|scope)-/.test(command.id));
+  }
+
+  it("moves focus for tab and scope commands outside the Cases pathname", () => {
+    for (const command of tabAndScopeCommands("/nope")) {
+      expect(command.movesFocus, `${command.id} from /nope`).toBe(true);
+    }
+    for (const command of tabAndScopeCommands("/cases")) {
+      expect(command.movesFocus, `${command.id} from /cases`).toBe(false);
+    }
+  });
+});
+
 describe("AppShell", () => {
   it("puts the skip link first", async () => {
     renderShell();
@@ -297,6 +323,15 @@ describe("CommandPalette and shortcuts", () => {
     });
     expect(document.documentElement).toHaveClass("dark");
     expect(localStorage.getItem("simple-siem.theme")).toBe("dark");
+  });
+
+  it("runs a command that does not move focus inside the gesture", async () => {
+    const input = await openPalette();
+    fireEvent.change(input, { target: { value: "dark" } });
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(document.documentElement).toHaveClass("dark");
   });
 
   it("opens the shortcuts dialog with a question mark", async () => {

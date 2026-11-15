@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import {
   Command,
@@ -77,9 +77,31 @@ export function CommandPalette({
   });
 
   const runCommand = (command: ShellCommand) => {
+    if (!command.movesFocus) {
+      // Clipboard writes need the user gesture, so run these commands now.
+      command.run();
+      onOpenChange(false);
+      return;
+    }
     pendingCommand.current = command;
     onOpenChange(false);
   };
+
+  // A command waiting for the close animation must not be lost when the
+  // palette reopens before that animation finishes. A layout effect runs at
+  // the open commit, before a command selected right after the first open
+  // could be mistaken for one from a reopen.
+  useLayoutEffect(() => {
+    if (!open) {
+      return;
+    }
+    const command = pendingCommand.current;
+    if (command === undefined) {
+      return;
+    }
+    pendingCommand.current = undefined;
+    command.run();
+  }, [open]);
 
   const handleOpenAutoFocus = () => {
     const active = document.activeElement;
@@ -89,17 +111,19 @@ export function CommandPalette({
   const handleCloseAutoFocus = (event: Event) => {
     event.preventDefault();
 
-    // The dialog's focus trap is gone once it has closed, so a command that
-    // moves focus can run now without the trap pulling focus back.
     const command = pendingCommand.current;
     const target = opener.current;
     pendingCommand.current = undefined;
     opener.current = null;
 
-    if (command === undefined || !command.movesFocus) {
+    if (command === undefined) {
       target?.focus();
+      return;
     }
-    command?.run();
+
+    // The dialog's focus trap is gone once it has closed, so a command that
+    // moves focus can run now without the trap pulling focus back.
+    command.run();
   };
 
   return (
