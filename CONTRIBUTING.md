@@ -17,18 +17,10 @@ as a typo or a broken link, can go straight to a pull request.
 ## Work in containers
 
 Nothing is installed on your host. Every tool runs in a container through
-`make`:
-
-```bash
-make dev    # PostgreSQL, the API, and Vite with live reload
-make test   # Go and frontend tests
-make lint   # linters and checks
-make build  # the web UI and bin/simple-siem
-```
+`make`; [README.md](README.md#development) lists the commands.
 
 Apple `container` is the default. With Docker, prefix any target with
-`CONTAINER=docker`, for example `CONTAINER=docker make test`, and use
-`CONTAINER=docker make dev` to develop with Docker.
+`CONTAINER=docker`, for example `CONTAINER=docker make test`.
 
 ## Write the failing test first
 
@@ -57,14 +49,8 @@ files.
 Add one line to [CHANGELOG.md](CHANGELOG.md) under `## [Unreleased]`
 describing the change.
 
-Checklist:
-
-- [ ] The pull request is linked to an issue (`Closes #`).
-- [ ] Tests were written first and fail without the change.
-- [ ] `make lint test build` passes.
-- [ ] `make e2e` passes for UI changes.
-- [ ] `CHANGELOG.md` has a line under `Unreleased`.
-- [ ] No secrets or personal data are included.
+Complete the checklist in
+[.github/pull_request_template.md](.github/pull_request_template.md).
 
 ## Commit subjects
 
