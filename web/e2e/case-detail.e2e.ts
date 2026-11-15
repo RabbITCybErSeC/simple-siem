@@ -1,11 +1,15 @@
 import type { Locator, Page } from "@playwright/test";
 import type { AlertSummary } from "../src/features/cases/detail/types.ts";
 import { FIXTURE_NOW } from "./support/cases.ts";
-import { APP_ORIGIN, expect, signIn, test } from "./support/test.ts";
-
-interface BrowserStorage {
-  localStorage: { setItem: (key: string, value: string) => void };
-}
+import {
+  APP_ORIGIN,
+  expect,
+  expectNoSideScroll,
+  signIn,
+  storeSidebar,
+  test,
+  VIEWPORTS,
+} from "./support/test.ts";
 
 interface LayoutElement {
   parentElement: LayoutElement | null;
@@ -13,12 +17,8 @@ interface LayoutElement {
 }
 
 interface LayoutGlobals {
-  document: {
-    documentElement: { scrollWidth: number };
-    querySelector(selector: string): LayoutElement | null;
-  };
+  document: { querySelector(selector: string): LayoutElement | null };
   getComputedStyle(element: LayoutElement): { gridTemplateColumns: string };
-  innerWidth: number;
 }
 
 const CLOSE_CASE_ALERTS = 4;
@@ -93,17 +93,22 @@ async function findOpenCaseWithAlerts(
       headers,
     });
     const list = (await listResponse.json()) as { data: { id: string }[] };
-    for (const item of list.data) {
-      const detailResponse = await fetch(`/api/v1/cases/${item.id}`, {
-        headers,
-      });
-      const detail = (await detailResponse.json()) as {
-        id: string;
-        caseNumber: number;
-        alertCount: number;
-      };
-      if (detail.alertCount === wanted) {
-        return { id: detail.id, caseNumber: detail.caseNumber };
+    for (let index = 0; index < list.data.length; index += 20) {
+      const details = await Promise.all(
+        list.data.slice(index, index + 20).map(async (item) => {
+          const detailResponse = await fetch(`/api/v1/cases/${item.id}`, {
+            headers,
+          });
+          return (await detailResponse.json()) as {
+            id: string;
+            caseNumber: number;
+            alertCount: number;
+          };
+        }),
+      );
+      const found = details.find((detail) => detail.alertCount === wanted);
+      if (found !== undefined) {
+        return { id: found.id, caseNumber: found.caseNumber };
       }
     }
     throw new Error(`no open case with ${wanted} alerts in the fixture`);
@@ -119,7 +124,7 @@ function unassignedOpenRow(page: Page, table: Locator): Locator {
 }
 
 test.describe("split layout", () => {
-  test.use({ viewport: { width: 1600, height: 900 } });
+  test.use({ viewport: VIEWPORTS.wide });
 
   test("opens by keyboard and returns to the row with Escape", async ({
     page,
@@ -254,11 +259,8 @@ test("the detail header actions share the control height", async ({ page }) => {
 test("the evidence table scrolls inside its frame in the split", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.addInitScript(() => {
-    const browser = globalThis as unknown as BrowserStorage;
-    browser.localStorage.setItem("simple-siem.sidebar", "collapsed");
-  });
+  await page.setViewportSize(VIEWPORTS.desktop);
+  await storeSidebar(page, true);
   await signIn(page);
   const target = await findOpenCaseWithAlerts(page, 2);
   await page.route(`**/api/v1/cases/${target.id}/timeline*`, (route) =>
@@ -333,21 +335,14 @@ test("the evidence table scrolls inside its frame in the split", async ({
 });
 
 test("an open case does not scroll sideways on a phone", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize(VIEWPORTS.phone);
   await signIn(page);
   await page.goto("/cases/7?view=timeline");
   await expect(
     page.getByRole("region", { name: "Case #7" }),
   ).toBeVisible();
 
-  const widths = await page.evaluate(() => {
-    const browser = globalThis as unknown as LayoutGlobals;
-    return {
-      document: browser.document.documentElement.scrollWidth,
-      viewport: browser.innerWidth,
-    };
-  });
-  expect(widths.document).toBeLessThanOrEqual(widths.viewport);
+  await expectNoSideScroll(page);
 });
 
 test("assigns to me with a and shows the analyst at once", async ({
@@ -661,7 +656,7 @@ test("traps focus in the close dialog and returns it on Escape", async ({
 });
 
 test("the close dialog fits a phone", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 900 });
+  await page.setViewportSize(VIEWPORTS.phone);
   await signIn(page);
   const target = await findOpenCaseWithAlerts(page, CLOSE_CASE_ALERTS);
   await page.goto(`/cases/${target.caseNumber}`);
@@ -691,11 +686,11 @@ test("the close dialog fits a phone", async ({ page }) => {
     expect(
       box.x + box.width,
       `${name} ends inside the viewport`,
-    ).toBeLessThanOrEqual(390);
+    ).toBeLessThanOrEqual(VIEWPORTS.phone.width);
     expect(
       box.y + box.height,
       `${name} ends inside the viewport`,
-    ).toBeLessThanOrEqual(900);
+    ).toBeLessThanOrEqual(VIEWPORTS.phone.height);
   }
 
   const selects = dispositions.getByRole("combobox");
@@ -714,6 +709,7 @@ test("the close dialog fits a phone", async ({ page }) => {
 test("the close dialog keeps its footer visible on a short screen", async ({
   page,
 }) => {
+  // Deliberately shorter than VIEWPORTS.tablet: the scenario is a short screen.
   await page.setViewportSize({ width: 1024, height: 600 });
   await signIn(page);
   const target = await findOpenCaseWithAlerts(page, 2);
@@ -758,7 +754,7 @@ test("the close dialog keeps its footer visible on a short screen", async ({
 });
 
 test("the close dialog controls share one height at 1440", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize(VIEWPORTS.desktop);
   await signIn(page);
   const target = await findOpenCaseWithAlerts(page, CLOSE_CASE_ALERTS);
   await page.goto(`/cases/${target.caseNumber}`);

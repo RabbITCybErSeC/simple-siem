@@ -1,8 +1,11 @@
-import { expect, openCases, signIn, test } from "./support/test.ts";
-
-type BrowserStorage = {
-  localStorage: { setItem: (key: string, value: string) => void };
-};
+import {
+  expect,
+  openCases,
+  signIn,
+  storeSidebar,
+  test,
+  VIEWPORTS,
+} from "./support/test.ts";
 
 test("palette opens without a CSP violation and locks scroll", async ({
   page,
@@ -183,11 +186,8 @@ test("keeps the sidebar collapsed after a reload", async ({ page }) => {
 test("the sidebar is a rail on a phone and restores the stored state at 1440", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 390, height: 900 });
-  await page.addInitScript(() => {
-    const browser = globalThis as unknown as BrowserStorage;
-    browser.localStorage.setItem("simple-siem.sidebar", "expanded");
-  });
+  await page.setViewportSize(VIEWPORTS.phone);
+  await storeSidebar(page, false);
 
   await openCases(page);
 
@@ -205,7 +205,7 @@ test("the sidebar is a rail on a phone and restores the stored state at 1440", a
     "the sidebar toggle is not shown on a phone",
   ).toBeHidden();
 
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize(VIEWPORTS.desktop);
 
   await expect(
     nav,
@@ -217,7 +217,7 @@ test("the sidebar is a rail on a phone and restores the stored state at 1440", a
 });
 
 test("the palette and account buttons fit on a phone", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 900 });
+  await page.setViewportSize(VIEWPORTS.phone);
   await openCases(page);
 
   const buttons = [
@@ -245,15 +245,21 @@ test("the palette and account buttons fit on a phone", async ({ page }) => {
     }
     expect(box.x, `${label} starts inside the viewport`).toBeGreaterThanOrEqual(0);
     expect(box.y, `${label} starts inside the viewport`).toBeGreaterThanOrEqual(0);
-    expect(box.x + box.width, `${label} ends inside the viewport`).toBeLessThanOrEqual(390);
-    expect(box.y + box.height, `${label} ends inside the viewport`).toBeLessThanOrEqual(900);
+    expect(
+      box.x + box.width,
+      `${label} ends inside the viewport`,
+    ).toBeLessThanOrEqual(VIEWPORTS.phone.width);
+    expect(
+      box.y + box.height,
+      `${label} ends inside the viewport`,
+    ).toBeLessThanOrEqual(VIEWPORTS.phone.height);
   }
 });
 
 test("the palette is inset and its overlay does not blur on a phone", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 390, height: 900 });
+  await page.setViewportSize(VIEWPORTS.phone);
   await openCases(page);
 
   await page.keyboard.press("Control+k");
@@ -271,7 +277,7 @@ test("the palette is inset and its overlay does not blur on a phone", async ({
   expect(
     box.x + box.width,
     "the palette is at least 16px from the right edge",
-  ).toBeLessThanOrEqual(390 - 16);
+  ).toBeLessThanOrEqual(VIEWPORTS.phone.width - 16);
 
   await expect(
     page.locator('[data-slot="dialog-overlay"]'),

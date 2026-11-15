@@ -1,17 +1,16 @@
 import type { Locator, Page } from "@playwright/test";
 import { FIXTURE_NOW } from "./support/cases.ts";
-import { expect, signIn, test } from "./support/test.ts";
+import {
+  expect,
+  expectNoSideScroll,
+  openCases,
+  signIn,
+  storeSidebar,
+  test,
+  VIEWPORTS,
+} from "./support/test.ts";
 
 type Rgba = [number, number, number, number];
-
-interface BrowserStorage {
-  localStorage: { setItem: (key: string, value: string) => void };
-}
-
-interface ScrollGlobals {
-  document: { documentElement: { scrollWidth: number } };
-  innerWidth: number;
-}
 
 interface ScrollableElement {
   scrollHeight: number;
@@ -79,23 +78,6 @@ function listRequests(api: { caseRequests: () => string[] }) {
 
 function openCasesTable(page: Page) {
   return page.getByRole("table", { name: "Cases: Open, Mine" });
-}
-
-async function storeSidebar(page: Page, value: "expanded" | "collapsed") {
-  await page.addInitScript((sidebar) => {
-    const browser = globalThis as unknown as BrowserStorage;
-    browser.localStorage.setItem("simple-siem.sidebar", sidebar);
-  }, value);
-}
-
-async function pageWidths(page: Page) {
-  return page.evaluate(() => {
-    const browser = globalThis as unknown as ScrollGlobals;
-    return {
-      scrollWidth: browser.document.documentElement.scrollWidth,
-      innerWidth: browser.innerWidth,
-    };
-  });
 }
 
 async function controlHeights(page: Page): Promise<Record<string, number>> {
@@ -228,13 +210,10 @@ test("shows my open cases, counts, and the trend chart", async ({
   page,
   api,
 }) => {
-  await signIn(page);
-  await page.goto("/cases");
+  const table = await openCases(page);
 
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
-  const table = openCasesTable(page);
   await expect(table).toBeVisible();
-  await expect(table.locator("tbody tr")).toHaveCount(50);
   await expect(
     page.getByText("Open work ignores the time range."),
   ).toBeVisible();
@@ -306,10 +285,7 @@ test("Back steps through the views", async ({ page }) => {
 });
 
 test("changes tabs, scopes, and rows with the keyboard", async ({ page }) => {
-  await signIn(page);
-  await page.goto("/cases");
-  const table = openCasesTable(page);
-  await expect(table.locator("tbody tr")).toHaveCount(50);
+  await openCases(page);
 
   const closedTab = page.getByRole("tab", { name: /^Closed/ });
   await closedTab.focus();
@@ -478,11 +454,10 @@ test("pauses refresh while the command palette is open", async ({
 test("the header and filter controls share one rendered height", async ({
   page,
 }) => {
-  await signIn(page);
+  await openCases(page);
 
-  for (const width of [1440, 1024]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.goto("/cases");
+  for (const viewport of [VIEWPORTS.desktop, VIEWPORTS.tablet]) {
+    await page.setViewportSize(viewport);
     await expect(openCasesTable(page).locator("tbody tr")).toHaveCount(50);
 
     const heights = Object.entries(await controlHeights(page));
@@ -490,7 +465,7 @@ test("the header and filter controls share one rendered height", async ({
     for (const [name, height] of heights.slice(1)) {
       expect(
         Math.abs(height - referenceHeight),
-        `at ${width}px, ${name} is as tall as ${referenceName}`,
+        `at ${viewport.width}px, ${name} is as tall as ${referenceName}`,
       ).toBeLessThanOrEqual(1);
     }
   }
@@ -499,11 +474,8 @@ test("the header and filter controls share one rendered height", async ({
 test("the time range sits with the heading and lines up with the table", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await signIn(page);
-  await page.goto("/cases");
-  const table = openCasesTable(page);
-  await expect(table.locator("tbody tr")).toHaveCount(50);
+  await page.setViewportSize(VIEWPORTS.desktop);
+  const table = await openCases(page);
 
   const heading = await page
     .getByRole("heading", { name: "Cases" })
@@ -572,21 +544,15 @@ test("the selected scope is distinct and its text passes contrast", async ({
 });
 
 test("the queue does not scroll sideways at 390", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 900 });
-  await signIn(page);
-  await page.goto("/cases");
-  await expect(openCasesTable(page).locator("tbody tr")).toHaveCount(50);
+  await page.setViewportSize(VIEWPORTS.phone);
+  await openCases(page);
 
-  const widths = await pageWidths(page);
-  expect(
-    widths.scrollWidth,
-    "the document is no wider than the viewport",
-  ).toBeLessThanOrEqual(widths.innerWidth);
+  await expectNoSideScroll(page);
 });
 
 test("the split keeps the timeline inside the detail pane", async ({ page }) => {
-  await storeSidebar(page, "collapsed");
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await storeSidebar(page, true);
+  await page.setViewportSize(VIEWPORTS.desktop);
   await signIn(page);
   await page.goto("/cases/7?scope=all&view=timeline");
 
@@ -603,16 +569,12 @@ test("the split keeps the timeline inside the detail pane", async ({ page }) => 
     "the detail pane starts where the queue ends",
   ).toBeLessThanOrEqual(detail.x + 1);
 
-  const widths = await pageWidths(page);
-  expect(
-    widths.scrollWidth,
-    "the split does not widen the document",
-  ).toBeLessThanOrEqual(widths.innerWidth);
+  await expectNoSideScroll(page, "the split does not widen the document");
 });
 
 test("the split panes scroll on their own", async ({ page }) => {
-  await storeSidebar(page, "collapsed");
-  await page.setViewportSize({ width: 1600, height: 900 });
+  await storeSidebar(page, true);
+  await page.setViewportSize(VIEWPORTS.wide);
   await signIn(page);
   await page.goto("/cases/7?scope=all&view=timeline");
   await expect(page.getByRole("list", { name: "Timeline" })).toBeVisible();
@@ -649,12 +611,10 @@ test("the split panes scroll on their own", async ({ page }) => {
 test("an open case fills the main area below the split width", async ({
   page,
 }) => {
-  await signIn(page);
+  const table = await openCases(page);
 
-  for (const width of [1024, 1440]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.goto("/cases");
-    const table = openCasesTable(page);
+  for (const viewport of [VIEWPORTS.tablet, VIEWPORTS.desktop]) {
+    await page.setViewportSize(viewport);
     await expect(table.locator("tbody tr")).toHaveCount(50);
 
     const row = table.locator("tbody tr").first();
@@ -669,7 +629,7 @@ test("an open case fills the main area below the split width", async ({
     ).toBeVisible();
     await expect(
       page.locator("[data-case-list]"),
-      `at ${width}px the queue makes room for the case`,
+      `at ${viewport.width}px the queue makes room for the case`,
     ).toBeHidden();
 
     const main = await page.locator("main").boundingBox();
@@ -679,7 +639,7 @@ test("an open case fills the main area below the split width", async ({
     }
     expect(
       Math.abs(pane.width - (main.width - 48)),
-      `at ${width}px the detail pane fills the main content width`,
+      `at ${viewport.width}px the detail pane fills the main content width`,
     ).toBeLessThanOrEqual(2);
 
     await page.keyboard.press("Escape");
@@ -695,10 +655,7 @@ test("an open case fills the main area below the split width", async ({
 test("the select-all checkbox shows a minus for a partial selection", async ({
   page,
 }) => {
-  await signIn(page);
-  await page.goto("/cases");
-  const table = openCasesTable(page);
-  await expect(table.locator("tbody tr")).toHaveCount(50);
+  const table = await openCases(page);
 
   for (let index = 0; index < 3; index += 1) {
     await table

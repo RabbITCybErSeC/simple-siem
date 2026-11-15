@@ -11,6 +11,13 @@ export const BROWSER_HEADERS = {
   Origin: APP_ORIGIN,
 };
 
+export const VIEWPORTS = {
+  phone: { width: 390, height: 844 },
+  tablet: { width: 1024, height: 900 },
+  desktop: { width: 1440, height: 900 },
+  wide: { width: 1600, height: 900 },
+} as const;
+
 const TEST_PASSWORD = "correct horse battery staple";
 
 export const TEST_USERS = {
@@ -50,6 +57,38 @@ export async function openCases(page: Page): Promise<Locator> {
   const table = page.getByRole("table", { name: "Cases: Open, Mine" });
   await expect(table.locator("tbody tr")).toHaveCount(50);
   return table;
+}
+
+export async function storeSidebar(
+  page: Page,
+  collapsed: boolean,
+): Promise<void> {
+  await page.addInitScript((isCollapsed) => {
+    const browser = globalThis as unknown as {
+      localStorage: { setItem: (key: string, value: string) => void };
+    };
+    browser.localStorage.setItem(
+      "simple-siem.sidebar",
+      isCollapsed ? "collapsed" : "expanded",
+    );
+  }, collapsed);
+}
+
+export async function expectNoSideScroll(
+  page: Page,
+  message = "the document is no wider than the viewport",
+): Promise<void> {
+  const { scrollWidth, innerWidth } = await page.evaluate(() => {
+    const browser = globalThis as unknown as {
+      document: { documentElement: { scrollWidth: number } };
+      innerWidth: number;
+    };
+    return {
+      scrollWidth: browser.document.documentElement.scrollWidth,
+      innerWidth: browser.innerWidth,
+    };
+  });
+  expect(scrollWidth, message).toBeLessThanOrEqual(innerWidth);
 }
 
 export const BASE_CONTENT_SECURITY_POLICY =

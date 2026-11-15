@@ -3,9 +3,11 @@ import {
   APP_ORIGIN,
   BROWSER_HEADERS,
   expect,
+  expectNoSideScroll,
   signIn,
   TEST_USERS,
   test,
+  VIEWPORTS,
 } from "./support/test.ts";
 
 interface BrowserStorage {
@@ -26,10 +28,8 @@ interface BrowserGlobals {
   sessionStorage: BrowserStorage;
   document: {
     cookie: string;
-    documentElement: { scrollWidth: number };
     getAnimations(): BrowserAnimation[];
   };
-  innerWidth: number;
 }
 
 const ANALYST = TEST_USERS.analyst;
@@ -307,7 +307,7 @@ test.describe("login waves", () => {
   });
 
   test.describe("at 390px", () => {
-    test.use({ viewport: { width: 390, height: 844 } });
+    test.use({ viewport: VIEWPORTS.phone });
 
     test("fits without sideways scrolling", async ({ page }) => {
       await page.goto("/login");
@@ -318,16 +318,7 @@ test.describe("login waves", () => {
       const card = page.locator("section");
       await expect(card).toBeVisible();
 
-      const { scrollWidth, innerWidth } = await page.evaluate(() => {
-        const browser = globalThis as unknown as BrowserGlobals;
-        return {
-          scrollWidth: browser.document.documentElement.scrollWidth,
-          innerWidth: browser.innerWidth,
-        };
-      });
-      expect(scrollWidth, "document width at 390px").toBeLessThanOrEqual(
-        innerWidth,
-      );
+      await expectNoSideScroll(page, "document width at 390px");
 
       const box = await card.boundingBox();
       if (box === null) {
