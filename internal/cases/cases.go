@@ -555,7 +555,7 @@ func (service *Service) List(ctx context.Context, actorUserID string, filter Lis
 	rows, nextCursor := trimPage(rows, filter.Limit, filterHash, func(row summaryRow) (time.Time, string) {
 		return row.sortValue(filter.Sort), row.ID
 	})
-	page := CasePage{Items: make([]CaseSummary, 0, len(rows)), NextCursor: nextCursor}
+	page := CasePage{Items: make([]CaseSummary, 0, len(rows)), NextCursor: nextCursor, Limit: filter.Limit}
 	for _, row := range rows {
 		page.Items = append(page.Items, row.summary())
 	}
@@ -1045,7 +1045,7 @@ func (service *Service) ListAlerts(ctx context.Context, caseID string, limit int
 	rows, nextCursor := trimPage(rows, limit, filterHash, func(row alertSummaryRow) (time.Time, string) {
 		return row.FirstEventAt, row.ID
 	})
-	page := AlertPage{Items: make([]AlertSummary, 0, len(rows)), NextCursor: nextCursor}
+	page := AlertPage{Items: make([]AlertSummary, 0, len(rows)), NextCursor: nextCursor, Limit: limit}
 	for _, row := range rows {
 		page.Items = append(page.Items, row.summary())
 	}
@@ -1125,7 +1125,7 @@ func (service *Service) Timeline(ctx context.Context, caseID string, kind string
 	rows, nextCursor := trimPage(rows, limit, filterHash, func(row timelineRow) (time.Time, string) {
 		return row.At, row.ID
 	})
-	page := TimelinePage{Items: make([]TimelineEntry, 0, len(rows)), NextCursor: nextCursor}
+	page := TimelinePage{Items: make([]TimelineEntry, 0, len(rows)), NextCursor: nextCursor, Limit: limit}
 	for _, row := range rows {
 		entry, err := row.entry()
 		if err != nil {
@@ -1164,12 +1164,17 @@ func (row timelineRow) entry() (TimelineEntry, error) {
 		if row.Action != nil {
 			entry.Action = *row.Action
 		}
-		entry.Details = map[string]any{}
+		details := map[string]any{}
 		if len(row.Details) > 0 {
-			if err := json.Unmarshal(row.Details, &entry.Details); err != nil {
+			if err := json.Unmarshal(row.Details, &details); err != nil {
 				return TimelineEntry{}, fmt.Errorf("decode timeline details: %w", err)
 			}
 		}
+		encoded, err := json.Marshal(details)
+		if err != nil {
+			return TimelineEntry{}, fmt.Errorf("encode timeline details: %w", err)
+		}
+		entry.Details = encoded
 	}
 	return entry, nil
 }
@@ -1292,22 +1297,20 @@ func (service *Service) Assign(ctx context.Context, actor Actor, caseID string, 
 	return detail, nil
 }
 
-// Counts returns the capped status and scope counts of the case queue.
-func (service *Service) Counts(ctx context.Context, actorUserID string, filter ListFilter, tab string) (Counts, error) {
+// Counts returns the capped status and scope counts of the case queue. status
+// selects the tab whose scope counts follow, or "" for every status.
+func (service *Service) Counts(ctx context.Context, actorUserID string, filter ListFilter, status string) (Counts, error) {
 	filter = normalizeFilter(filter)
 	if err := ValidateListFilter(filter); err != nil {
 		return Counts{}, err
 	}
-	if tab == "" {
-		tab = TabAll
-	}
-	status, err := countsStatus(tab)
+	tabStatus, err := countsStatus(status)
 	if err != nil {
 		return Counts{}, err
 	}
 
 	base := countsBase(filter)
-	cacheKey := countsCacheKey(actorUserID, base, tab)
+	cacheKey := countsCacheKey(actorUserID, base, status)
 	if cached, ok := service.cachedCounts(cacheKey); ok {
 		return cached, nil
 	}
@@ -1327,8 +1330,8 @@ func (service *Service) Counts(ctx context.Context, actorUserID string, filter L
 		}
 	}
 
-	scopeBase := withStatus(base, status)
-	if status != StatusClosed && status != "" {
+	scopeBase := withStatus(base, tabStatus)
+	if tabStatus != StatusClosed && tabStatus != "" {
 		scopeBase.From, scopeBase.To = nil, nil
 	}
 	scopeMine := scopeBase
@@ -1344,7 +1347,7 @@ func (service *Service) Counts(ctx context.Context, actorUserID string, filter L
 			return Counts{}, err
 		}
 	}
-	counts.Scope.All = tabStatusCount(counts.Status, status)
+	counts.Scope.All = tabStatusCount(counts.Status, tabStatus)
 
 	service.storeCounts(cacheKey, counts)
 	return counts, nil
@@ -1416,26 +1419,19 @@ func withStatus(filter ListFilter, status string) ListFilter {
 	return filter
 }
 
-// countsStatus maps a counts tab to the status its scope counts follow, or ""
-// for every status.
-func countsStatus(tab string) (string, error) {
-	switch tab {
-	case TabAll:
-		return "", nil
-	case TabOpen:
-		return StatusOpen, nil
-	case TabInProgress:
-		return StatusInProgress, nil
-	case TabClosed:
-		return StatusClosed, nil
+// countsStatus checks the counts tab: a case status, or "" for every status.
+func countsStatus(status string) (string, error) {
+	switch status {
+	case "", StatusOpen, StatusInProgress, StatusClosed:
+		return status, nil
 	default:
-		return "", invalid("status", "status %q is not open, in_progress, closed, or all", tab)
+		return "", invalid("status", "status %q is not OPEN, IN_PROGRESS, or CLOSED", status)
 	}
 }
 
 // countsCacheKey holds the user and the base filter the counts depend on.
-func countsCacheKey(actorUserID string, base ListFilter, tab string) string {
-	return hashParts("counts", actorUserID, listFilterHash(base, actorUserID), tab)
+func countsCacheKey(actorUserID string, base ListFilter, status string) string {
+	return hashParts("counts", actorUserID, listFilterHash(base, actorUserID), status)
 }
 
 // cachedCounts returns a live cache entry.

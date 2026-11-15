@@ -22,6 +22,7 @@ import (
 	"github.com/RabbITCybErSeC/simple-siem/internal/alerts"
 	"github.com/RabbITCybErSeC/simple-siem/internal/api"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
+	"github.com/RabbITCybErSeC/simple-siem/internal/cases"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database"
 	"github.com/RabbITCybErSeC/simple-siem/internal/dataset"
@@ -391,7 +392,7 @@ func runDetectWindow(ctx context.Context, registration detection.Registration, m
 		Store:    dataset.NewPostgresStore(db),
 		Registry: registry,
 		Logger:   logger,
-		Alerts:   &alerts.Service{},
+		Alerts:   &alerts.Service{Hooks: cases.NewService(db, settings.PublicURL, settings.MaxCasesPerHour)},
 	}
 	result, err := runner.RunWindow(ctx, registration, windowEnd, detection.RunOptions{Shadow: shadow})
 	if err != nil {
@@ -726,6 +727,7 @@ func newHTTPServer(settings config.Config, database api.ReadinessChecker, auditD
 			AuditDatabase:  auditDatabase,
 			Logger:         logger,
 			Auth:           authService,
+			Cases:          cases.NewService(auditDatabase, settings.PublicURL, settings.MaxCasesPerHour),
 			Web:            web.Files(),
 			TrustedProxies: settings.TrustedProxies,
 			PublicURL:      settings.PublicURL,

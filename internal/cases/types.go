@@ -49,14 +49,6 @@ const (
 	KindActivity = "ACTIVITY"
 )
 
-// Counts tabs name the status whose scope counts are returned.
-const (
-	TabOpen       = "open"
-	TabInProgress = "in_progress"
-	TabClosed     = "closed"
-	TabAll        = "all"
-)
-
 // Limits of the case reads. Group 3 validates query strings against them.
 const (
 	DefaultListLimit   = 50
@@ -216,6 +208,7 @@ type CaseDetail struct {
 type CasePage struct {
 	Items      []CaseSummary `json:"items"`
 	NextCursor *string       `json:"nextCursor"`
+	Limit      int           `json:"limit"`
 }
 
 // AlertSummary is one alert of a case.
@@ -238,6 +231,7 @@ type AlertSummary struct {
 type AlertPage struct {
 	Items      []AlertSummary `json:"items"`
 	NextCursor *string        `json:"nextCursor"`
+	Limit      int            `json:"limit"`
 }
 
 // TimelineEntry is one evidence or activity entry of a case's timeline. The
@@ -251,13 +245,14 @@ type TimelineEntry struct {
 	UDM      json.RawMessage `json:"udm,omitempty"`
 	Actor    json.RawMessage `json:"actor,omitempty"`
 	Action   string          `json:"action,omitempty"`
-	Details  map[string]any  `json:"details,omitempty"`
+	Details  json.RawMessage `json:"details,omitempty"`
 }
 
 // TimelinePage is one page of a case's timeline.
 type TimelinePage struct {
 	Items      []TimelineEntry `json:"items"`
 	NextCursor *string         `json:"nextCursor"`
+	Limit      int             `json:"limit"`
 }
 
 // StatusCounts is the status block of the counts response.

@@ -47,6 +47,7 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	users := userHandler{service: dependencies.Auth, logger: dependencies.Logger}
 	account := accountHandler{service: dependencies.Auth, logger: dependencies.Logger, policy: policy}
 	auditEvents := auditHandler{database: dependencies.AuditDatabase, logger: dependencies.Logger}
+	caseHandlers := caseHandler{service: dependencies.Cases, logger: dependencies.Logger}
 	v1 := router.Group("/api/v1")
 	v1.GET("/auth/providers", authentication.providers)
 	v1.POST("/auth/login", authentication.login)
@@ -76,6 +77,21 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	authenticated.GET("/audit-events", requirePermission(dependencies.Auth, dependencies.Logger, "audit:read"), auditEvents.list)
 	authenticated.GET("/audit-events/:auditEventId", requirePermission(dependencies.Auth, dependencies.Logger, "audit:read"), auditEvents.get)
 
+	caseGroup := authenticated.Group("/cases", noStore)
+	caseGroup.GET("", requirePermission(dependencies.Auth, dependencies.Logger, "case:read"), caseHandlers.list)
+	caseGroup.GET("/counts", requirePermission(dependencies.Auth, dependencies.Logger, "case:read"), caseHandlers.counts)
+	caseGroup.GET("/histogram", requirePermission(dependencies.Auth, dependencies.Logger, "case:read"), caseHandlers.histogram)
+	caseGroup.GET("/:caseId", requirePermission(dependencies.Auth, dependencies.Logger, "case:read"), caseHandlers.detail)
+	caseGroup.GET("/:caseId/alerts", requirePermission(dependencies.Auth, dependencies.Logger, "case:read"), caseHandlers.alerts)
+	caseGroup.GET("/:caseId/timeline", requirePermission(dependencies.Auth, dependencies.Logger, "case:read"), caseHandlers.timeline)
+	caseGroup.PATCH("/:caseId", requirePermission(dependencies.Auth, dependencies.Logger, "case:write"), caseHandlers.assign)
+
 	router.NoRoute(web.page)
 	return router
+}
+
+// noStore keeps a route's responses out of browser and proxy caches.
+func noStore(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.Next()
 }

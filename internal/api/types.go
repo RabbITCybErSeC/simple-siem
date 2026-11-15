@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
+	"github.com/RabbITCybErSeC/simple-siem/internal/cases"
 	"gorm.io/gorm"
 )
 
@@ -45,6 +47,7 @@ type Dependencies struct {
 	AuditDatabase  *gorm.DB         // full handle for the audit and role reads
 	Logger         *slog.Logger
 	Auth           *auth.Service
+	Cases          *cases.Service
 	Web            fs.FS
 	TrustedProxies []string
 	PublicURL      string
@@ -233,4 +236,23 @@ type auditEventResponse struct {
 type auditListResponse struct {
 	Data       []auditEventResponse `json:"data"`
 	Pagination pagination           `json:"pagination"`
+}
+
+// cursorPagination is the pagination block of a cursor list.
+type cursorPagination struct {
+	Limit      int     `json:"limit"`
+	NextCursor *string `json:"nextCursor"`
+}
+
+// cursorListResponse is the cursor list envelope every case page shares.
+type cursorListResponse[T any] struct {
+	Data       []T              `json:"data"`
+	Pagination cursorPagination `json:"pagination"`
+}
+
+// assignCaseRequest keeps AssigneeID raw, so an absent field is a 400 while the
+// literal null clears the assignee.
+type assignCaseRequest struct {
+	AssigneeID json.RawMessage `json:"assigneeId"`
+	Version    *int            `json:"version"`
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/api"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
+	"github.com/RabbITCybErSeC/simple-siem/internal/cases"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -997,6 +998,7 @@ func newAPIRouter(t *testing.T) (*gin.Engine, *auth.Service, *gorm.DB, *bytes.Bu
 		Logger:        logger,
 		Auth:          service,
 		AuditDatabase: database,
+		Cases:         cases.NewService(database, authTestPublicURL, 50),
 		PublicURL:     authTestPublicURL,
 	})
 	return router, service, database, &logs

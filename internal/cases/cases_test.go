@@ -19,7 +19,9 @@ import (
 	"github.com/RabbITCybErSeC/simple-siem/internal/alerts"
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
+	"github.com/RabbITCybErSeC/simple-siem/internal/dataset"
 	"github.com/RabbITCybErSeC/simple-siem/internal/outbox"
+	"github.com/RabbITCybErSeC/simple-siem/internal/udm"
 	"gorm.io/gorm"
 )
 
@@ -1357,6 +1359,16 @@ func insertCaseAudit(t *testing.T, db *gorm.DB, caseID, eventName, actorType str
 	return auditID
 }
 
+// entryDetails decodes an activity entry's allowlisted details.
+func entryDetails(t *testing.T, entry TimelineEntry) map[string]any {
+	t.Helper()
+	var details map[string]any
+	if err := json.Unmarshal(entry.Details, &details); err != nil {
+		t.Fatalf("decode entry details %s: %v", entry.Details, err)
+	}
+	return details
+}
+
 func timelineAll(t *testing.T, service *Service, caseID, kind string, limit int) []TimelineEntry {
 	t.Helper()
 	all := make([]TimelineEntry, 0)
@@ -1625,15 +1637,17 @@ func TestTimelineActivityOnly(t *testing.T) {
 	if actor.ID != analyst || actor.DisplayName != "analyst@example.com" {
 		t.Errorf("assigned actor = %+v, want the analyst", actor)
 	}
-	if len(entries[0].Details) != 0 {
-		t.Errorf("CASE_CREATED details = %v, want {}", entries[0].Details)
+	if string(entries[0].Details) != "{}" {
+		t.Errorf("CASE_CREATED details = %s, want {}", entries[0].Details)
 	}
-	if entries[1].Details["alertId"] != alertID {
-		t.Errorf("ALERT_ADDED details = %v, want alertId %q", entries[1].Details, alertID)
+	added := entryDetails(t, entries[1])
+	if added["alertId"] != alertID {
+		t.Errorf("ALERT_ADDED details = %v, want alertId %q", added, alertID)
 	}
-	assignee, ok := entries[2].Details["assignee"].(map[string]any)
+	assigned := entryDetails(t, entries[2])
+	assignee, ok := assigned["assignee"].(map[string]any)
 	if !ok || assignee["id"] != analyst || assignee["displayName"] != "analyst@example.com" {
-		t.Errorf("ASSIGNED details = %v, want the assignee", entries[2].Details)
+		t.Errorf("ASSIGNED details = %v, want the assignee", assigned)
 	}
 
 	encoded, err := json.Marshal(entries[0])
@@ -1642,6 +1656,9 @@ func TestTimelineActivityOnly(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"actor":null`) {
 		t.Errorf("system activity JSON = %s, want actor null", encoded)
+	}
+	if !strings.Contains(string(encoded), `"details":{}`) {
+		t.Errorf("system activity JSON = %s, want empty details", encoded)
 	}
 	if strings.Contains(string(encoded), `"udm"`) || strings.Contains(string(encoded), `"sourceId"`) {
 		t.Errorf("activity JSON = %s, want no evidence fields", encoded)
@@ -1664,15 +1681,17 @@ func TestTimelineActivityDetailsFromAllowlist(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("entries = %d, want the unknown audit event skipped", len(entries))
 	}
-	if entries[0].Action != "ASSIGNED" || len(entries[0].Details) != 1 {
+	assigned := entryDetails(t, entries[0])
+	if entries[0].Action != "ASSIGNED" || len(assigned) != 1 {
 		t.Fatalf("ASSIGNED entry = %+v, want only the assignee detail", entries[0])
 	}
-	if _, leaked := entries[0].Details["secret"]; leaked {
-		t.Errorf("ASSIGNED details leaked a field: %v", entries[0].Details)
+	if _, leaked := assigned["secret"]; leaked {
+		t.Errorf("ASSIGNED details leaked a field: %v", assigned)
 	}
-	if entries[1].Action != "STATUS_CHANGED" || len(entries[1].Details) != 2 ||
-		entries[1].Details["from"] != StatusOpen || entries[1].Details["to"] != StatusInProgress {
-		t.Errorf("STATUS_CHANGED details = %v, want only from and to", entries[1].Details)
+	changed := entryDetails(t, entries[1])
+	if entries[1].Action != "STATUS_CHANGED" || len(changed) != 2 ||
+		changed["from"] != StatusOpen || changed["to"] != StatusInProgress {
+		t.Errorf("STATUS_CHANGED details = %v, want only from and to", changed)
 	}
 }
 
@@ -2037,7 +2056,7 @@ func TestCountsCapped(t *testing.T) {
 
 	counts, err := service.Counts(context.Background(), actor, ListFilter{
 		From: timePointer(testNow.Add(-24 * time.Hour)), To: timePointer(testNow),
-	}, TabAll)
+	}, "")
 	if err != nil {
 		t.Fatalf("Counts: %v", err)
 	}
@@ -2076,7 +2095,7 @@ func TestCountsOpenIgnoresTimeRange(t *testing.T) {
 		From: timePointer(testNow.Add(-24 * time.Hour)), To: timePointer(testNow),
 		TimeField: TimeFieldLastEventAt,
 	}
-	counts, err := service.Counts(context.Background(), actor, filter, TabAll)
+	counts, err := service.Counts(context.Background(), actor, filter, "")
 	if err != nil {
 		t.Fatalf("Counts: %v", err)
 	}
@@ -2090,14 +2109,14 @@ func TestCountsOpenIgnoresTimeRange(t *testing.T) {
 		t.Errorf("ALL = %d, want only the cases inside the range", counts.Status.All)
 	}
 
-	openScopes, err := service.Counts(context.Background(), actor, filter, TabOpen)
+	openScopes, err := service.Counts(context.Background(), actor, filter, StatusOpen)
 	if err != nil {
 		t.Fatalf("Counts tab open: %v", err)
 	}
 	if openScopes.Scope.All != 1 || openScopes.Scope.Unassigned != 1 {
 		t.Errorf("open scopes = %+v, want the old open case counted", openScopes.Scope)
 	}
-	closedScopes, err := service.Counts(context.Background(), actor, filter, TabClosed)
+	closedScopes, err := service.Counts(context.Background(), actor, filter, StatusClosed)
 	if err != nil {
 		t.Fatalf("Counts tab closed: %v", err)
 	}
@@ -2116,17 +2135,18 @@ func TestCountsScopeFollowsTab(t *testing.T) {
 	filter := ListFilter{Scope: ScopeMine}
 
 	tests := []struct {
-		tab  string
-		want ScopeCounts
+		name   string
+		status string
+		want   ScopeCounts
 	}{
-		{TabOpen, ScopeCounts{Mine: 1, Unassigned: 1, All: 2}},
-		{TabInProgress, ScopeCounts{Mine: 1, Unassigned: 0, All: 1}},
-		{TabClosed, ScopeCounts{Mine: 0, Unassigned: 1, All: 1}},
-		{TabAll, ScopeCounts{Mine: 2, Unassigned: 2, All: 4}},
+		{"open", StatusOpen, ScopeCounts{Mine: 1, Unassigned: 1, All: 2}},
+		{"in progress", StatusInProgress, ScopeCounts{Mine: 1, Unassigned: 0, All: 1}},
+		{"closed", StatusClosed, ScopeCounts{Mine: 0, Unassigned: 1, All: 1}},
+		{"all", "", ScopeCounts{Mine: 2, Unassigned: 2, All: 4}},
 	}
 	for _, test := range tests {
-		t.Run(test.tab, func(t *testing.T) {
-			counts, err := service.Counts(context.Background(), alice, filter, test.tab)
+		t.Run(test.name, func(t *testing.T) {
+			counts, err := service.Counts(context.Background(), alice, filter, test.status)
 			if err != nil {
 				t.Fatalf("Counts: %v", err)
 			}
@@ -2149,11 +2169,11 @@ func TestCountsArePerUserWithinCacheWindow(t *testing.T) {
 	insertCase(t, db, caseFixture{Title: "Bob one", AssigneeID: &bob})
 
 	filter := ListFilter{Scope: ScopeMine}
-	aliceCounts, err := service.Counts(context.Background(), alice, filter, TabAll)
+	aliceCounts, err := service.Counts(context.Background(), alice, filter, "")
 	if err != nil {
 		t.Fatalf("Counts for alice: %v", err)
 	}
-	bobCounts, err := service.Counts(context.Background(), bob, filter, TabAll)
+	bobCounts, err := service.Counts(context.Background(), bob, filter, "")
 	if err != nil {
 		t.Fatalf("Counts for bob: %v", err)
 	}
@@ -2170,7 +2190,7 @@ func TestCountsCacheExpires(t *testing.T) {
 	actor := createUser(t, db, "actor@example.com", "ANALYST")
 	insertCase(t, db, caseFixture{Title: "First"})
 
-	first, err := service.Counts(context.Background(), actor, ListFilter{}, TabAll)
+	first, err := service.Counts(context.Background(), actor, ListFilter{}, "")
 	if err != nil {
 		t.Fatalf("Counts: %v", err)
 	}
@@ -2179,7 +2199,7 @@ func TestCountsCacheExpires(t *testing.T) {
 	}
 	insertCase(t, db, caseFixture{Title: "Second"})
 
-	stale, err := service.Counts(context.Background(), actor, ListFilter{}, TabAll)
+	stale, err := service.Counts(context.Background(), actor, ListFilter{}, "")
 	if err != nil {
 		t.Fatalf("Counts inside the window: %v", err)
 	}
@@ -2188,7 +2208,7 @@ func TestCountsCacheExpires(t *testing.T) {
 	}
 
 	service.now = func() time.Time { return testNow.Add(countsCacheTTL + time.Second) }
-	fresh, err := service.Counts(context.Background(), actor, ListFilter{}, TabAll)
+	fresh, err := service.Counts(context.Background(), actor, ListFilter{}, "")
 	if err != nil {
 		t.Fatalf("Counts after the window: %v", err)
 	}
@@ -2316,4 +2336,154 @@ func TestAssignInvalidCaseID(t *testing.T) {
 	if !errors.Is(err, ErrCaseNotFound) {
 		t.Fatalf("error = %v, want ErrCaseNotFound", err)
 	}
+}
+
+// TestAlertWriterOpensAndMovesCase drives the case hooks through pipeline's
+// real alert writer, as the detect command does.
+func TestAlertWriterOpensAndMovesCase(t *testing.T) {
+	service, db := newTestService(t, 50)
+	writer := &alerts.Service{Hooks: service}
+	policy := alerts.Policy{Mode: alerts.ModeMerge, CoalesceWindow: 15 * time.Minute, MaxAlertSpan: time.Hour}
+	runID := insertDetectionRun(t, db, "brute-force")
+	ensureEnabledRuntime(t, db, "brute-force")
+
+	firstEventAt := testNow.Add(-10 * time.Minute)
+	created := applyAlertProposal(t, db, writer, policy,
+		alertProposal(runID, "brute-force", "identity-1", "doc-1", firstEventAt))
+	if created.Action != alerts.ActionCreated || created.AlertID == "" {
+		t.Fatalf("first apply = %+v, want a created alert", created)
+	}
+	opened := loadCaseForAlert(t, db, created.AlertID)
+	if opened.Title != "Brute force" || opened.Status != StatusOpen {
+		t.Errorf("case = %q/%q, want Brute force/OPEN", opened.Title, opened.Status)
+	}
+	if !opened.LastEventAt.Equal(firstEventAt) {
+		t.Errorf("case last event = %v, want %v", opened.LastEventAt, firstEventAt)
+	}
+
+	laterEventAt := testNow.Add(-5 * time.Minute)
+	merged := applyAlertProposal(t, db, writer, policy,
+		alertProposal(runID, "brute-force", "identity-1", "doc-2", laterEventAt))
+	if merged.Action != alerts.ActionMerged || merged.AlertID != created.AlertID {
+		t.Fatalf("second apply = %+v, want a merge into %q", merged, created.AlertID)
+	}
+	moved := loadCaseForAlert(t, db, created.AlertID)
+	if !moved.LastEventAt.Equal(laterEventAt) {
+		t.Errorf("case last event after the retrigger = %v, want %v", moved.LastEventAt, laterEventAt)
+	}
+	if moved.Version <= opened.Version {
+		t.Errorf("case version = %d after a retrigger, want more than %d", moved.Version, opened.Version)
+	}
+}
+
+// TestCaseRateGuardrailShadowsDetection drives the guardrail through the alert
+// writer: the crossing alert still gets a case, and pipeline shadows the
+// detection with exactly one outbox row.
+func TestCaseRateGuardrailShadowsDetection(t *testing.T) {
+	service, db := newTestService(t, 1)
+	writer := &alerts.Service{Hooks: service}
+	policy := alerts.Policy{Mode: alerts.ModeMerge, CoalesceWindow: 15 * time.Minute, MaxAlertSpan: time.Hour}
+	runID := insertDetectionRun(t, db, "det-guardrail")
+	ensureEnabledRuntime(t, db, "det-guardrail")
+
+	first := applyAlertProposal(t, db, writer, policy,
+		alertProposal(runID, "det-guardrail", "identity-a", "doc-1", testNow.Add(-10*time.Minute)))
+	if first.Action != alerts.ActionCreated || first.GuardrailTripped {
+		t.Fatalf("first apply = %+v, want a created alert without a guardrail crossing", first)
+	}
+	second := applyAlertProposal(t, db, writer, policy,
+		alertProposal(runID, "det-guardrail", "identity-b", "doc-2", testNow.Add(-5*time.Minute)))
+	if second.Action != alerts.ActionCreated || !second.GuardrailTripped {
+		t.Fatalf("second apply = %+v, want the guardrail crossing", second)
+	}
+
+	runtime := loadDetectionRuntime(t, db, "det-guardrail")
+	if runtime.Status != string(alerts.RuntimeStatusShadow) {
+		t.Errorf("detection status = %q, want %q", runtime.Status, alerts.RuntimeStatusShadow)
+	}
+	if runtime.Reason == nil || *runtime.Reason != "case_rate_exceeded" {
+		t.Errorf("detection reason = %v, want case_rate_exceeded", runtime.Reason)
+	}
+
+	if events := countRows(t, db, "event_outbox WHERE type = ?", outbox.TypeDetectionStatusChanged); events != 1 {
+		t.Errorf("detection.status_changed outbox rows = %d, want 1", events)
+	}
+
+	// Every alert still opens its case, including the one that crossed.
+	loadCaseForAlert(t, db, first.AlertID)
+	loadCaseForAlert(t, db, second.AlertID)
+}
+
+// insertDetectionRun registers the finished run the proposals reference.
+func insertDetectionRun(t *testing.T, db *gorm.DB, detectionID string) string {
+	t.Helper()
+	var runID string
+	err := db.Raw(`
+		INSERT INTO detection_runs (detection_id, detection_version, status,
+		                            window_start, window_end, revision, started_at)
+		VALUES (?, '2026.11.15', 'OK', ?, ?, 1, ?)
+		RETURNING id::text AS id`,
+		detectionID, testNow.Add(-2*time.Hour), testNow, testNow.Add(-2*time.Hour)).Scan(&runID).Error
+	if err != nil {
+		t.Fatalf("insert detection run: %v", err)
+	}
+	return runID
+}
+
+func ensureEnabledRuntime(t *testing.T, db *gorm.DB, detectionID string) {
+	t.Helper()
+	if err := alerts.EnsureRuntime(db, detectionID, string(alerts.RuntimeStatusEnabled)); err != nil {
+		t.Fatalf("ensure detection runtime: %v", err)
+	}
+}
+
+// alertProposal builds one proposal the way the detection runner does.
+func alertProposal(runID, detectionID, identityHash, documentID string, eventTime time.Time) alerts.Proposal {
+	userName := "alice"
+	return alerts.Proposal{
+		DetectionID:           detectionID,
+		DetectionVersion:      "2026.11.15",
+		DetectionRunID:        runID,
+		IdentityHash:          identityHash,
+		IdentitySchemaVersion: 1,
+		Identity:              map[string]*string{"user.name": &userName},
+		Subject:               udm.Event{Metadata: udm.Metadata{EventTimestamp: eventTime, VendorName: "linux"}},
+		Summary:               "Brute force",
+		Details:               map[string]string{},
+		Severity:              alerts.SeverityHigh,
+		Evidence: []alerts.Evidence{{
+			SourceKey: dataset.SourceKey{FetcherInstanceID: "fetcher-1", Index: "auth", DocumentID: documentID},
+			EventTime: eventTime,
+		}},
+	}
+}
+
+func applyAlertProposal(t *testing.T, db *gorm.DB, writer *alerts.Service, policy alerts.Policy, proposal alerts.Proposal) alerts.Outcome {
+	t.Helper()
+	var outcome alerts.Outcome
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var applyErr error
+		outcome, applyErr = writer.Apply(context.Background(), tx, policy, proposal)
+		return applyErr
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	return outcome
+}
+
+type detectionRuntimeState struct {
+	Status string  `gorm:"column:status"`
+	Reason *string `gorm:"column:reason"`
+}
+
+func loadDetectionRuntime(t *testing.T, db *gorm.DB, detectionID string) detectionRuntimeState {
+	t.Helper()
+	var runtime detectionRuntimeState
+	err := db.Raw("SELECT status, reason FROM detection_runtime WHERE detection_id = ?",
+		detectionID).Scan(&runtime).Error
+	if err != nil {
+		t.Fatalf("load detection runtime %q: %v", detectionID, err)
+	}
+	return runtime
 }
