@@ -27,6 +27,8 @@ CREATE INDEX cases_queue_last_event_idx ON cases (status, last_event_at DESC, id
 CREATE INDEX cases_queue_created_idx ON cases (status, created_at, id);
 CREATE INDEX cases_assignee_idx ON cases (assignee_user_id, status);
 CREATE INDEX cases_title_prefix_idx ON cases (lower(title) text_pattern_ops);
+CREATE INDEX cases_previous_case_idx ON cases (previous_case_id)
+    WHERE previous_case_id IS NOT NULL;
 
 CREATE TABLE case_alerts (
     case_id uuid NOT NULL REFERENCES cases(id),
@@ -51,6 +53,7 @@ CREATE TABLE on_call_rotation (
 INSERT INTO on_call_rotation (id) VALUES (1);
 
 -- +goose Down
+DROP INDEX cases_previous_case_idx;
 DROP TABLE on_call_rotation;
 DROP TABLE detection_guardrails;
 DROP TABLE case_alerts;
