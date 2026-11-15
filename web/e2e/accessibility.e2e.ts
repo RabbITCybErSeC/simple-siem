@@ -190,7 +190,7 @@ test("the close and bulk close dialogs are accessible in both themes", async ({
     exact: true,
   });
   await expect(
-    closeDialog.getByRole("table", { name: "Alert dispositions" }),
+    closeDialog.getByRole("list", { name: "Alert dispositions" }),
   ).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press("Escape");
@@ -217,7 +217,10 @@ test("the close and bulk close dialogs are accessible in both themes", async ({
   await expect(bulkDialog).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await bulkDialog.getByRole("radio", { name: "Accepted" }).click();
+  await bulkDialog
+    .getByRole("radiogroup", { name: "Outcome" })
+    .getByText("Accepted", { exact: true })
+    .click();
   await bulkDialog
     .getByRole("combobox", { name: "Closure reason", exact: true })
     .selectOption({ label: "Authorized activity" });

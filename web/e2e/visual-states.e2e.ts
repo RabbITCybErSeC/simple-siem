@@ -255,6 +255,7 @@ test("the built stylesheet maps Radix state and orientation attributes", async (
 test("the Alerts table region takes keyboard focus and scrolls sideways", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page);
   await page.goto("/cases/7");
   await page.getByRole("tab", { name: /^Alerts/ }).click();
