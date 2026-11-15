@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/detections"
+	"github.com/RabbITCybErSeC/simple-siem/internal/alerts"
 	"github.com/RabbITCybErSeC/simple-siem/internal/api"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
@@ -52,7 +53,7 @@ commands:
 usage: simple-siem admin reset-password --email <email> [--password-file <path>]`
 	configUsage = "usage: simple-siem config validate [--config-dir DIR]"
 	runUsage    = "usage: simple-siem run <pipeline-id> [--config-dir DIR]"
-	detectUsage = `usage: simple-siem detect <detection-id> --window-end <RFC3339> [--config-dir DIR]
+	detectUsage = `usage: simple-siem detect <detection-id> --window-end <RFC3339> [--shadow] [--config-dir DIR]
 usage: simple-siem detect <detection-id> --fixture <path>`
 	versionUsage = "usage: simple-siem version"
 
@@ -284,6 +285,7 @@ func runDetect(ctx context.Context, args []string, getenv func(string) string, s
 	flags := newFlagSet("detect", stderr, detectUsage)
 	windowEndValue := flags.String("window-end", "", "end of the window in RFC 3339")
 	fixturePath := flags.String("fixture", "", "fixture file to evaluate")
+	shadow := flags.Bool("shadow", false, "store proposals even when the detection is ENABLED")
 	directory := flags.String("config-dir", "config", "configuration directory")
 	options, positionals := splitArguments(args, "window-end", "fixture", "config-dir")
 	if err := flags.Parse(options); err != nil {
@@ -293,6 +295,10 @@ func runDetect(ctx context.Context, args []string, getenv func(string) string, s
 		return 2
 	}
 	if len(positionals) != 1 || (*windowEndValue == "") == (*fixturePath == "") {
+		flags.Usage()
+		return 2
+	}
+	if *shadow && *fixturePath != "" {
 		flags.Usage()
 		return 2
 	}
@@ -315,7 +321,7 @@ func runDetect(ctx context.Context, args []string, getenv func(string) string, s
 		_, _ = fmt.Fprintf(stderr, "invalid --window-end %q: not a whole second\n", *windowEndValue)
 		return 2
 	}
-	return runDetectWindow(ctx, registration, manifest, windowEnd, *directory, getenv, stdout, stderr)
+	return runDetectWindow(ctx, registration, manifest, windowEnd, *shadow, *directory, getenv, stdout, stderr)
 }
 
 // findCompiledDetection resolves one id from detections.All to its
@@ -351,7 +357,7 @@ func runDetectFixture(registration detection.Registration, manifest config.Detec
 
 // runDetectWindow runs one window with the database and file configuration.
 func runDetectWindow(ctx context.Context, registration detection.Registration, manifest config.DetectionManifest,
-	windowEnd time.Time, directory string, getenv func(string) string, stdout, stderr io.Writer) int {
+	windowEnd time.Time, shadow bool, directory string, getenv func(string) string, stdout, stderr io.Writer) int {
 	settings, err := config.Load(getenv)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
@@ -385,8 +391,9 @@ func runDetectWindow(ctx context.Context, registration detection.Registration, m
 		Store:    dataset.NewPostgresStore(db),
 		Registry: registry,
 		Logger:   logger,
+		Alerts:   &alerts.Service{},
 	}
-	result, err := runner.RunWindow(ctx, registration, windowEnd)
+	result, err := runner.RunWindow(ctx, registration, windowEnd, detection.RunOptions{Shadow: shadow})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		if errors.Is(err, detection.ErrInputNotReady) {

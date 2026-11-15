@@ -28,6 +28,14 @@ const (
 	SeverityHigh   Severity = "HIGH"
 )
 
+// RuntimeStatus is a detection's status in detection_runtime.
+type RuntimeStatus string
+
+const (
+	RuntimeStatusEnabled RuntimeStatus = "ENABLED"
+	RuntimeStatusShadow  RuntimeStatus = "SHADOW"
+)
+
 // Policy is a detection's coalescing settings.
 type Policy struct {
 	Mode           Mode
