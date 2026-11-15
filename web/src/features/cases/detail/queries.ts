@@ -7,7 +7,7 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 import { apiRequest, get } from "../../../api/client";
-import { casesListPrefix } from "../queries";
+import { casesLatestPrefix, casesListPrefix } from "../queries";
 import type { CaseListResponse, CaseSummary } from "../types";
 import type {
   AlertSummary,
@@ -110,34 +110,54 @@ export function useBulkCloseCases() {
   return useMutation({
     mutationFn: ({ request }: BulkCloseVariables) =>
       apiRequest<BulkCloseResponse>("POST", "/cases/bulk-close", request),
-    onSuccess: async (response, { request, caseNumbers }) => {
-      const closedIds = response.results
-        .filter((result) => result.status === "CLOSED")
-        .map((result) => result.caseId);
-      markQueueCasesClosed(queryClient, closedIds, request);
-
-      const conflicts = response.results
-        .filter((result) => result.status === "VERSION_CONFLICT")
-        .map((result) => result.caseId);
-      const refreshes = await Promise.allSettled(
-        conflicts.map(async (caseId) => ({
-          caseId,
-          detail: await get<CaseDetail>(`/cases/${caseId}`),
-        })),
+    onSuccess: (response, { request, caseNumbers }) => {
+      // Keep the closed rows closed at once; the GETs below replace them with
+      // the server's version and closedAt, so the next refresh tick sees the
+      // analyst's own change as already loaded.
+      const closedIds = new Set(
+        response.results
+          .filter((result) => result.status === "CLOSED")
+          .map((result) => result.caseId),
       );
-      const refreshed = new Set<string>();
-      for (const result of refreshes) {
-        if (result.status !== "fulfilled") {
-          continue;
-        }
-        const { caseId, detail } = result.value;
-        refreshed.add(caseId);
-        mergeCaseIntoQueue(queryClient, detail);
-        const caseNumber = caseNumbers[caseId];
-        if (caseNumber !== undefined) {
-          queryClient.setQueryData(caseQueryKey(caseNumber), detail);
-        }
-      }
+      updateQueuePages(queryClient, (item) =>
+        closedIds.has(item.id)
+          ? {
+              ...item,
+              status: "CLOSED",
+              outcome: request.outcome,
+              closureReason: request.closureReason,
+            }
+          : item,
+      );
+
+      const refreshIds = response.results
+        .filter(
+          (result) =>
+            result.status === "CLOSED" ||
+            result.status === "VERSION_CONFLICT",
+        )
+        .map((result) => result.caseId);
+      const refreshing = new Set(refreshIds);
+      void Promise.allSettled(
+        refreshIds.map(async (caseId) => {
+          try {
+            const detail = await get<CaseDetail>(`/cases/${caseId}`);
+            mergeCaseIntoQueue(queryClient, detail);
+            const caseNumber = caseNumbers[caseId];
+            if (caseNumber !== undefined) {
+              queryClient.setQueryData(caseQueryKey(caseNumber), detail);
+            }
+          } catch {
+            // The local patch keeps the queue usable; refetch an open detail.
+            const caseNumber = caseNumbers[caseId];
+            if (caseNumber !== undefined) {
+              void queryClient.invalidateQueries({
+                queryKey: ["case", caseNumber],
+              });
+            }
+          }
+        }),
+      );
 
       void queryClient.invalidateQueries({ queryKey: ["cases", "counts"] });
       void queryClient.invalidateQueries({ queryKey: ["cases", "histogram"] });
@@ -149,7 +169,7 @@ export function useBulkCloseCases() {
           queryKey: ["case", id, "timeline"],
         });
         const caseNumber = caseNumbers[id];
-        if (caseNumber !== undefined && !refreshed.has(id)) {
+        if (caseNumber !== undefined && !refreshing.has(id)) {
           void queryClient.invalidateQueries({
             queryKey: ["case", caseNumber],
           });
@@ -179,45 +199,41 @@ export function useCaseTimeline(caseId: string, kind?: "ACTIVITY") {
   });
 }
 
-/** Every cached queue row's version, for a submit-time read. */
+/** The newest cached version of every queue row, for a submit-time read. */
 export function cachedCaseVersions(
   queryClient: QueryClient,
 ): Map<string, number> {
   const versions = new Map<string, number>();
+  const remember = (row: CaseSummary) => {
+    versions.set(row.id, Math.max(versions.get(row.id) ?? 0, row.version));
+  };
+
   const pages = queryClient.getQueriesData<InfiniteData<CaseListResponse>>({
     queryKey: casesListPrefix,
   });
   for (const [, data] of pages) {
     for (const page of data?.pages ?? []) {
       for (const row of page.data) {
-        versions.set(row.id, row.version);
+        remember(row);
       }
     }
   }
+
+  const latest = queryClient.getQueriesData<CaseListResponse>({
+    queryKey: casesLatestPrefix,
+  });
+  for (const [, page] of latest) {
+    for (const row of page?.data ?? []) {
+      remember(row);
+    }
+  }
+
   return versions;
 }
 
 function mergeCaseIntoQueue(queryClient: QueryClient, detail: CaseDetail) {
   updateQueuePages(queryClient, (item) =>
     item.id === detail.id ? caseSummaryOf(detail) : item,
-  );
-}
-
-function markQueueCasesClosed(
-  queryClient: QueryClient,
-  caseIds: string[],
-  request: BulkCloseRequest,
-) {
-  const closed = new Set(caseIds);
-  updateQueuePages(queryClient, (item) =>
-    closed.has(item.id)
-      ? {
-          ...item,
-          status: "CLOSED",
-          outcome: request.outcome,
-          closureReason: request.closureReason,
-        }
-      : item,
   );
 }
 
@@ -268,6 +284,7 @@ function caseAllAlertsQueryKey(caseId: string | undefined) {
 
 async function fetchAllAlerts(caseId: string): Promise<AlertSummary[]> {
   const alerts: AlertSummary[] = [];
+  const seenCursors = new Set<string>();
   let cursor: string | null = null;
 
   do {
@@ -276,6 +293,12 @@ async function fetchAllAlerts(caseId: string): Promise<AlertSummary[]> {
     );
     alerts.push(...page.data);
     cursor = page.pagination.nextCursor;
+    if (cursor !== null) {
+      if (seenCursors.has(cursor)) {
+        throw new Error("The alert list cursor did not advance.");
+      }
+      seenCursors.add(cursor);
+    }
   } while (cursor !== null);
 
   return alerts;

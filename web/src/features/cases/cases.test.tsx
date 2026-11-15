@@ -571,6 +571,46 @@ describe("Cases page", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the chart when a histogram refetch fails", async () => {
+    let histogramCalls = 0;
+    renderCases("/cases", {
+      histogram: () => {
+        histogramCalls += 1;
+        return histogramCalls === 1
+          ? jsonResponse(HISTOGRAM)
+          : jsonResponse(
+              {
+                error: {
+                  code: "INTERNAL_ERROR",
+                  message: "boom",
+                  details: {},
+                },
+              },
+              500,
+            );
+      },
+    });
+
+    expect(
+      await screen.findByRole("table", {
+        name: "Cases over time by severity",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
+
+    await waitFor(() => {
+      expect(histogramCalls).toBeGreaterThan(1);
+    });
+    await act(async () => {});
+    expect(
+      screen.queryByText("Could not load the trend."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("table", { name: "Cases over time by severity" }),
+    ).toBeInTheDocument();
+  });
+
   it("appends the next page with Load more", async () => {
     stubApi({
       list: (url) => {
@@ -1721,6 +1761,23 @@ describe("bulk close", () => {
             { caseId: "case_311", status: "CLOSED" },
           ],
         }),
+      detail: (url) => {
+        const caseId = url.pathname.split("/").pop();
+        const found = OPEN_CASES.find((item) => item.id === caseId);
+        return found === undefined
+          ? jsonResponse(
+              { error: { code: "NOT_FOUND", message: "Not found", details: {} } },
+              404,
+            )
+          : jsonResponse({
+              ...caseDetail(found),
+              status: "CLOSED",
+              outcome: "ACCEPTED",
+              closureReason: "AUTHORIZED_ACTIVITY",
+              closedAt: "2026-11-09T12:00:00Z",
+              version: 2,
+            });
+      },
     });
     const table = await screen.findByRole("table", {
       name: "Cases: Open, Mine",
@@ -1779,6 +1836,153 @@ describe("bulk close", () => {
     expect(selectionToolbar()).not.toBeInTheDocument();
     expect(within(caseRow(table, 312)).getByText("Accepted")).toBeInTheDocument();
     expect(within(caseRow(table, 311)).getByText("Accepted")).toBeInTheDocument();
+  });
+
+  it("sends the newest cached version when the caches disagree", async () => {
+    const newest = { ...OPEN_CASES[0], version: 5 };
+    const { recorded, queryClient } = renderCases("/cases", {
+      list: () => jsonResponse(listResponse([newest])),
+      bulkClose: () =>
+        jsonResponse({
+          results: [{ caseId: "case_312", status: "CLOSED" }],
+        }),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+
+    // Another filter's page still holds the old version and is iterated last.
+    queryClient.setQueryData(["cases", "list", "stale-filter"], {
+      pages: [listResponse([{ ...OPEN_CASES[0], version: 3 }])],
+      pageParams: [null],
+    });
+    queryClient.setQueryData(["cases", "latest", "refresh"], {
+      data: [{ ...OPEN_CASES[0], version: 6 }],
+      pagination: { limit: 50, nextCursor: null },
+    });
+
+    fireEvent.click(rowCheckbox(table, 312));
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    await waitFor(() => {
+      expect(bulkCloseRequests(recorded)).toHaveLength(1);
+    });
+    expect(bulkCloseRequests(recorded)[0].body).toMatchObject({
+      cases: [{ id: "case_312", version: 6 }],
+    });
+  });
+
+  it("does not report the analyst's own bulk close as news", async () => {
+    const open = [
+      caseSummary({
+        id: "case_312",
+        caseNumber: 312,
+        title: "Brute force → success",
+        version: 2,
+      }),
+      caseSummary({
+        id: "case_311",
+        caseNumber: 311,
+        title: "Impossible travel",
+        version: 2,
+      }),
+    ];
+    const closed = open.map((item) => ({
+      ...item,
+      status: "CLOSED" as const,
+      outcome: "ACCEPTED" as const,
+      closureReason: "AUTHORIZED_ACTIVITY",
+      closedAt: "2026-11-09T12:00:00Z",
+      version: 3,
+    }));
+    let isClosed = false;
+    const { recorded } = renderCases("/cases", {
+      list: () => jsonResponse(listResponse(isClosed ? closed : open)),
+      bulkClose: () => {
+        isClosed = true;
+        return jsonResponse({
+          results: [
+            { caseId: "case_312", status: "CLOSED" },
+            { caseId: "case_311", status: "CLOSED" },
+          ],
+        });
+      },
+      detail: (url) => {
+        const caseId = url.pathname.split("/").pop();
+        const found = closed.find((item) => item.id === caseId);
+        return found === undefined
+          ? jsonResponse(
+              { error: { code: "NOT_FOUND", message: "Not found", details: {} } },
+              404,
+            )
+          : jsonResponse(caseDetail(found));
+      },
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+    fireEvent.click(rowCheckbox(table, 311));
+
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+    expect(await within(dialog).findByRole("status")).toHaveTextContent(
+      "2 closed, 0 not closed",
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Close selected cases" }),
+      ).not.toBeInTheDocument();
+    });
+
+    const countsBefore = recorded.filter((request) =>
+      request.path.startsWith("/api/v1/cases/counts"),
+    ).length;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
+
+    await waitFor(() => {
+      expect(
+        recorded.filter((request) =>
+          request.path.startsWith("/api/v1/cases/counts"),
+        ).length,
+      ).toBeGreaterThan(countsBefore);
+    });
+    expect(screen.queryByText(/new or updated case/)).not.toBeInTheDocument();
+  });
+
+  it("shows the results without waiting for the version refreshes", async () => {
+    renderCases("/cases", {
+      bulkClose: () =>
+        jsonResponse({
+          results: [{ caseId: "case_312", status: "CLOSED" }],
+        }),
+      detail: () => new Promise<Response>(() => {}),
+    });
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    await within(table).findByText("Brute force → success");
+    fireEvent.click(rowCheckbox(table, 312));
+
+    const dialog = await openBulkCloseDialog();
+    await fillBulkClosureFields(dialog);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close selected cases" }),
+    );
+
+    expect(await within(dialog).findByRole("status")).toHaveTextContent(
+      "1 closed, 0 not closed",
+    );
   });
 
   it("keeps the cases that did not close selected for a retry", async () => {
@@ -2077,7 +2281,7 @@ describe("review fixes: row shortcuts and detail state", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("invalidates the case alerts, timeline, and detail after a bulk close", async () => {
+  it("invalidates the alerts and timeline after a bulk close and refreshes the details", async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -2092,6 +2296,25 @@ describe("review fixes: row shortcuts and detail state", () => {
               { caseId: "case_311", status: "CLOSED" },
             ],
           }),
+        detail: (url) => {
+          const caseId = url.pathname.split("/").pop();
+          const found = OPEN_CASES.find((item) => item.id === caseId);
+          return found === undefined
+            ? jsonResponse(
+                {
+                  error: { code: "NOT_FOUND", message: "Not found", details: {} },
+                },
+                404,
+              )
+            : jsonResponse({
+                ...caseDetail(found),
+                status: "CLOSED",
+                outcome: "ACCEPTED",
+                closureReason: "AUTHORIZED_ACTIVITY",
+                closedAt: "2026-11-09T12:00:00Z",
+                version: 2,
+              });
+        },
       },
       queryClient,
     );
@@ -2118,11 +2341,14 @@ describe("review fixes: row shortcuts and detail state", () => {
       expect.arrayContaining([
         ["case", "case_312", "alerts"],
         ["case", "case_312", "timeline"],
-        ["case", 312],
         ["case", "case_311", "alerts"],
         ["case", "case_311", "timeline"],
-        ["case", 311],
       ]),
     );
+    expect(keys).not.toContainEqual(["case", 312]);
+    expect(keys).not.toContainEqual(["case", 311]);
+    expect(
+      queryClient.getQueryData<CaseDetail>(["case", 312])?.status,
+    ).toBe("CLOSED");
   });
 });

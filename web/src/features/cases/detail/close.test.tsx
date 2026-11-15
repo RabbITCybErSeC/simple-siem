@@ -408,6 +408,28 @@ describe("close case dialog", () => {
     expect(requests[1].search.get("cursor")).toBe("next-alerts");
   });
 
+  it("stops when the alert cursor repeats", async () => {
+    let calls = 0;
+    renderClose({
+      alerts: () => {
+        calls += 1;
+        if (calls > 4) {
+          throw new Error("cursor did not advance");
+        }
+        return jsonResponse({
+          data: ALERTS,
+          pagination: { limit: 100, nextCursor: "same-cursor" },
+        });
+      },
+    });
+    const dialog = await openCloseDialog();
+
+    expect(
+      await within(dialog).findByText("Could not load the case alerts."),
+    ).toBeInTheDocument();
+    expect(calls).toBeLessThanOrEqual(2);
+  });
+
   it("sends only the overridden alert rows", async () => {
     const { api } = renderClose({
       close: () => jsonResponse(makeDetail()),

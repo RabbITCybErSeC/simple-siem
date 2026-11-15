@@ -61,7 +61,7 @@ export function BulkCloseDialog({
         request: {
           cases: cases.map((item) => ({
             id: item.id,
-            version: versions.get(item.id) ?? item.version,
+            version: Math.max(versions.get(item.id) ?? 0, item.version),
           })),
           outcome: values.outcome,
           closureReason: values.closureReason,

@@ -196,7 +196,7 @@ export function TrendChart({
           aria-busy="true"
           className="h-40 animate-pulse rounded-lg bg-muted"
         />
-      ) : error ? (
+      ) : error && histogram === undefined ? (
         <SectionError message="Could not load the trend." onRetry={onRetry} />
       ) : !hasCases ? (
         <p className="text-sm text-muted-foreground">No cases in this range.</p>

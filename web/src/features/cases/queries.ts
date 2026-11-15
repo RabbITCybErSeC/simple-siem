@@ -19,6 +19,8 @@ const CASES_PATH = "/cases";
 
 /** The prefix of every cached queue page; detail mutations merge into them. */
 export const casesListPrefix = ["cases", "list"] as const;
+/** The prefix of the refresh tick's latest-first-page cache. */
+export const casesLatestPrefix = ["cases", "latest"] as const;
 
 export function useCaseList(state: CaseQueueState) {
   const queryClient = useQueryClient();
@@ -91,7 +93,7 @@ export function fetchLatestFirstPage(
   const parameters = listParams(state).toString();
 
   return queryClient.fetchQuery({
-    queryKey: ["cases", "latest", parameters],
+    queryKey: [...casesLatestPrefix, parameters],
     queryFn: () => get<CaseListResponse>(`${CASES_PATH}?${parameters}`),
     staleTime: 0,
   });
