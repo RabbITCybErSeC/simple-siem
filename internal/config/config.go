@@ -22,12 +22,15 @@ const (
 	environmentVariable             = "SIMPLE_SIEM_ENV"
 	databaseURLVariable             = "SIMPLE_SIEM_DATABASE_URL"
 	listenVariable                  = "SIMPLE_SIEM_LISTEN"
-	publicURLVariable               = "SIMPLE_SIEM_PUBLIC_URL"
 	trustedProxiesVariable          = "SIMPLE_SIEM_TRUSTED_PROXIES"
 	shutdownTimeoutVariable         = "SIMPLE_SIEM_SHUTDOWN_TIMEOUT"
 	sessionIdleTimeoutVariable      = "SIMPLE_SIEM_SESSION_IDLE_TIMEOUT"
 	sessionAbsoluteLifetimeVariable = "SIMPLE_SIEM_SESSION_ABSOLUTE_LIFETIME"
 )
+
+// PublicURLVariable names the environment variable that holds the externally
+// reachable base URL of the API.
+const PublicURLVariable = "SIMPLE_SIEM_PUBLIC_URL"
 
 type Environment string
 
@@ -47,7 +50,7 @@ func Load(getenv func(string) string) (Config, error) {
 		Environment: EnvironmentProduction,
 		DatabaseURL: getenv(databaseURLVariable),
 		Listen:      getenv(listenVariable),
-		PublicURL:   getenv(publicURLVariable),
+		PublicURL:   getenv(PublicURLVariable),
 	}
 	if settings.Listen == "" {
 		settings.Listen = defaultListen
@@ -73,18 +76,18 @@ func Load(getenv func(string) string) (Config, error) {
 		if settings.Environment == EnvironmentDevelopment {
 			settings.PublicURL = defaultPublicURL
 		} else {
-			problems = append(problems, fmt.Errorf("%s is required outside development", publicURLVariable))
+			problems = append(problems, fmt.Errorf("%s is required outside development", PublicURLVariable))
 		}
 	} else if parsed, err := url.Parse(settings.PublicURL); err != nil || !parsed.IsAbs() || parsed.Host == "" {
-		problems = append(problems, fmt.Errorf("%s must be an absolute URL", publicURLVariable))
+		problems = append(problems, fmt.Errorf("%s must be an absolute URL", PublicURLVariable))
 	} else if parsed.User != nil {
-		problems = append(problems, fmt.Errorf("%s must not contain user information", publicURLVariable))
+		problems = append(problems, fmt.Errorf("%s must not contain user information", PublicURLVariable))
 	} else if !isASCII(parsed.Hostname()) {
-		problems = append(problems, fmt.Errorf("%s host must be ASCII; use the punycode form", publicURLVariable))
+		problems = append(problems, fmt.Errorf("%s host must be ASCII; use the punycode form", PublicURLVariable))
 	} else if settings.Environment != EnvironmentDevelopment && parsed.Scheme != "https" {
-		problems = append(problems, fmt.Errorf("%s must use https outside development", publicURLVariable))
+		problems = append(problems, fmt.Errorf("%s must use https outside development", PublicURLVariable))
 	} else if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		problems = append(problems, fmt.Errorf("%s must use http or https", publicURLVariable))
+		problems = append(problems, fmt.Errorf("%s must use http or https", PublicURLVariable))
 	}
 
 	if value := getenv(trustedProxiesVariable); value != "" {

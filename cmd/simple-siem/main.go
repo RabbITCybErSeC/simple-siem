@@ -688,6 +688,9 @@ func purgeExpiredAuthRows(ctx context.Context, service *auth.Service, logger *sl
 			logger.Error("purge expired auth rows", "error", err)
 			return
 		}
+		if result.LoginAttempts == 0 && result.Sessions == 0 && result.ResetTokens == 0 {
+			return
+		}
 		logger.Info("purged expired auth rows",
 			"login_attempts", result.LoginAttempts,
 			"sessions", result.Sessions,

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
+	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/gin-gonic/gin"
 )
 
@@ -32,8 +33,6 @@ const (
 	codeForbidden              = "FORBIDDEN"
 	codeValidationError        = "VALIDATION_ERROR"
 	codeRateLimited            = "RATE_LIMITED"
-
-	publicURLVariable = "SIMPLE_SIEM_PUBLIC_URL"
 )
 
 type authHandler struct {
@@ -43,34 +42,22 @@ type authHandler struct {
 }
 
 // newOriginPolicy reads the public URL once so every request compares against
-// the same origin without parsing the configuration again.
+// the same origin without parsing the configuration again. config.Load has
+// already rejected a userinfo URL, a non-ASCII host, and a non-http scheme, so
+// only a parse failure or a missing host can remain.
 func newOriginPolicy(publicURL string, development bool, logger *slog.Logger) originPolicy {
 	policy := originPolicy{development: development}
 	if publicURL == "" {
 		return policy
 	}
 	parsed, err := url.Parse(publicURL)
-	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||
-		(parsed.Scheme != "http" && parsed.Scheme != "https") {
-		logger.Error("public URL is not usable as an origin", "variable", publicURLVariable)
-		return policy
-	}
-	if !isASCII(parsed.Hostname()) {
-		logger.Error("public URL host must be an ASCII host name", "variable", publicURLVariable)
+	if err != nil || parsed.Host == "" {
+		logger.Error("public URL is not usable as an origin", "variable", config.PublicURLVariable)
 		return policy
 	}
 	policy.publicOrigin = originFromURL(parsed)
 	policy.secureCookie = parsed.Scheme == "https"
 	return policy
-}
-
-func isASCII(value string) bool {
-	for index := 0; index < len(value); index++ {
-		if value[index] > 127 {
-			return false
-		}
-	}
-	return true
 }
 
 // originFromURL renders scheme://host[:port] and drops a default port.

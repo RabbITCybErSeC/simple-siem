@@ -56,8 +56,9 @@ type sessionRow struct {
 	AuthProvider      string    `gorm:"column:auth_provider"`
 }
 
-// lockedIdentity is the identity row ChangePassword and UseResetToken lock to
-// check the credential version.
+// lockedIdentity is the identity row lockLocalIdentity returns: its id names
+// the row a password update rewrites, and its version lets the callers reject
+// a credential that changed since the password was checked.
 type lockedIdentity struct {
 	ID      string `gorm:"column:id"`
 	Version int    `gorm:"column:version"`
@@ -247,16 +248,12 @@ func (service *Service) ResetPassword(ctx context.Context, email, password strin
 			return fmt.Errorf("find user: %w", err)
 		}
 
-		var identity lockedIdentity
-		err = tx.Raw(
-			"SELECT id::text AS id, version FROM user_identities WHERE user_id = ? AND provider = ? FOR UPDATE",
-			user.ID, ProviderLocal,
-		).Scan(&identity).Error
-		if err != nil {
+		identity, err := lockLocalIdentity(tx, user.ID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("find local identity: %w", err)
 		}
-		if identity.ID == "" {
-			return fmt.Errorf("find local identity: %w", gorm.ErrRecordNotFound)
+		if err != nil {
+			return fmt.Errorf("lock local identity: %w", err)
 		}
 		if err := tx.Exec(
 			"UPDATE user_identities SET password_hash = ?, version = version + 1, updated_at = now() WHERE id = ?",
@@ -265,10 +262,8 @@ func (service *Service) ResetPassword(ctx context.Context, email, password strin
 			return fmt.Errorf("update password hash: %w", err)
 		}
 
-		if err := tx.Exec(
-			"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", user.ID,
-		).Error; err != nil {
-			return fmt.Errorf("delete reset tokens: %w", err)
+		if err := revokeUnusedResetTokens(tx, user.ID); err != nil {
+			return err
 		}
 
 		result := tx.Exec("DELETE FROM sessions WHERE user_id = ?", user.ID)
@@ -312,7 +307,7 @@ func (service *Service) PurgeExpired(ctx context.Context, now time.Time) (PurgeR
 		result.LoginAttempts = loginAttempts.RowsAffected
 
 		sessions := tx.Exec(
-			"DELETE FROM sessions WHERE idle_expires_at <= ? OR absolute_expires_at <= ?", now, now,
+			"DELETE FROM sessions WHERE idle_expires_at <= ?", now,
 		)
 		if sessions.Error != nil {
 			return fmt.Errorf("delete sessions: %w", sessions.Error)
@@ -522,15 +517,11 @@ func (service *Service) ChangePassword(ctx context.Context, actor Actor, client 
 			return ErrUnauthenticated
 		}
 
-		var identityRow lockedIdentity
-		err = tx.Raw(
-			"SELECT id::text AS id, version FROM user_identities WHERE user_id = ? AND provider = ? FOR UPDATE",
-			actor.UserID, identity.Provider,
-		).Scan(&identityRow).Error
-		if err != nil {
+		identityRow, err := lockLocalIdentity(tx, actor.UserID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("lock local identity: %w", err)
 		}
-		if identityRow.ID == "" || identityRow.Version != identity.CredentialVersion {
+		if errors.Is(err, gorm.ErrRecordNotFound) || identityRow.Version != identity.CredentialVersion {
 			credentialRejected = true
 			return recordFailedPasswordChangeEvent(tx, actor, client, "credential_changed")
 		}
@@ -550,10 +541,8 @@ func (service *Service) ChangePassword(ctx context.Context, actor Actor, client 
 		}
 		revokedCount = sessions.RowsAffected
 
-		if err := tx.Exec(
-			"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", actor.UserID,
-		).Error; err != nil {
-			return fmt.Errorf("delete reset tokens: %w", err)
+		if err := revokeUnusedResetTokens(tx, actor.UserID); err != nil {
+			return err
 		}
 		if err := tx.Exec(
 			"UPDATE login_attempts SET succeeded = true WHERE id = ?", attemptID,

@@ -1379,7 +1379,9 @@ func TestPurgeExpiredDeletesOnlyStaleRows(t *testing.T) {
 		}
 	}
 	insertSession("idle-expired", now.Add(-time.Minute), now.Add(time.Hour))
-	insertSession("absolute-expired", now.Add(time.Hour), now.Add(-time.Minute))
+	// idle_expires_at is capped at absolute_expires_at (auth.go:719), so a
+	// session past both cutoffs is the realistic second expired row.
+	insertSession("both-expired", now.Add(-2*time.Minute), now.Add(-time.Minute))
 	insertSession("live", now.Add(time.Hour), now.Add(time.Hour))
 
 	insertResetToken := func(label string, expiresAt time.Time, usedAt *time.Time) {

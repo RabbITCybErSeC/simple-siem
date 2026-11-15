@@ -612,7 +612,7 @@ func TestRoleList(t *testing.T) {
 func TestNonAdminCannotChangeAdminsOverHTTP(t *testing.T) {
 	router, service, database, _ := newAPIRouter(t)
 	admin, _ := apiAdmin(t, router, service)
-	apiInsertHelpdeskRole(t, database)
+	apiInsertPermissionRole(t, database, "HELPDESK", "user:write", "role:assign")
 	helpdesk := apiCreateUser(t, service, admin, "helpdesk@example.com", "Help Desk", "HELPDESK")
 	const helpdeskPassword = "helpdesk horse battery"
 	apiActivateUser(t, service, admin, helpdesk.User.ID, helpdeskPassword)
@@ -671,36 +671,21 @@ func TestNonAdminCannotChangeAdminsOverHTTP(t *testing.T) {
 	}
 }
 
-// apiInsertHelpdeskRole adds a custom role with user administration
-// permissions but without ADMIN, directly because the default mapping is
-// fixed by migration.
-func apiInsertHelpdeskRole(t *testing.T, database *gorm.DB) {
-	t.Helper()
-	if err := database.Exec(
-		"INSERT INTO roles (name, description) VALUES ('HELPDESK', 'Help desk')",
-	).Error; err != nil {
-		t.Fatalf("insert HELPDESK role: %v", err)
-	}
-	if err := database.Exec(`
-		INSERT INTO role_permissions (role_name, permission) VALUES
-		('HELPDESK', 'user:write'), ('HELPDESK', 'role:assign')`).Error; err != nil {
-		t.Fatalf("grant HELPDESK permissions: %v", err)
-	}
-}
-
-// apiInsertPermissionRole adds a test-only role holding exactly one
-// permission, directly because the default mapping is fixed by migration.
-func apiInsertPermissionRole(t *testing.T, database *gorm.DB, role, permission string) {
+// apiInsertPermissionRole adds a test-only role holding exactly the given
+// permissions, directly because the default mapping is fixed by migration.
+func apiInsertPermissionRole(t *testing.T, database *gorm.DB, role string, permissions ...string) {
 	t.Helper()
 	if err := database.Exec(
 		"INSERT INTO roles (name, description) VALUES (?, ?)", role, role,
 	).Error; err != nil {
 		t.Fatalf("insert %s role: %v", role, err)
 	}
-	if err := database.Exec(
-		"INSERT INTO role_permissions (role_name, permission) VALUES (?, ?)", role, permission,
-	).Error; err != nil {
-		t.Fatalf("grant %s %s: %v", role, permission, err)
+	for _, permission := range permissions {
+		if err := database.Exec(
+			"INSERT INTO role_permissions (role_name, permission) VALUES (?, ?)", role, permission,
+		).Error; err != nil {
+			t.Fatalf("grant %s %s: %v", role, permission, err)
+		}
 	}
 }
 

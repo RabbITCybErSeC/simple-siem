@@ -839,8 +839,9 @@ func validatePipelineFetchers(pipeline *Pipeline, fetchers map[string]FetcherIns
 }
 
 // validateEffectiveIndex requires the index a fetcher step will query — its
-// index input, else the instance default — to be set and allowed. The runner
-// repeats both checks as a defence.
+// index input, else the instance default — to be set and allowed. The
+// Elasticsearch fetcher checks the resolved index against the allowlist at
+// runtime too.
 func validateEffectiveIndex(pipeline *Pipeline, step *FetcherStep, prefix string, instance FetcherInstance) []error {
 	index := instance.Defaults.Index
 	if input, set := step.Inputs["index"]; set {

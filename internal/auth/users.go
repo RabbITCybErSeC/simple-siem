@@ -379,10 +379,8 @@ func (service *Service) DisableUser(ctx context.Context, actor Actor, client Cli
 			return userMutationConflict(tx, user.ID)
 		}
 
-		if err := tx.Exec(
-			"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", user.ID,
-		).Error; err != nil {
-			return fmt.Errorf("delete reset tokens: %w", err)
+		if err := revokeUnusedResetTokens(tx, user.ID); err != nil {
+			return err
 		}
 		sessions := tx.Exec("DELETE FROM sessions WHERE user_id = ?", user.ID)
 		if sessions.Error != nil {
@@ -553,10 +551,8 @@ func (service *Service) AssignRole(ctx context.Context, actor Actor, client Clie
 			return err
 		}
 		if role == RoleAdmin {
-			if err := tx.Exec(
-				"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", user.ID,
-			).Error; err != nil {
-				return fmt.Errorf("delete reset tokens: %w", err)
+			if err := revokeUnusedResetTokens(tx, user.ID); err != nil {
+				return err
 			}
 		}
 
@@ -655,10 +651,8 @@ func (service *Service) CreateResetToken(ctx context.Context, actor Actor, clien
 		if user.Status == StatusDisabled {
 			return fmt.Errorf("%w: user is disabled", ErrStateConflict)
 		}
-		if err := tx.Exec(
-			"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", user.ID,
-		).Error; err != nil {
-			return fmt.Errorf("delete reset tokens: %w", err)
+		if err := revokeUnusedResetTokens(tx, user.ID); err != nil {
+			return err
 		}
 
 		var created struct {
@@ -730,15 +724,11 @@ func (service *Service) UseResetToken(ctx context.Context, token, password strin
 			return ErrInvalidResetToken
 		}
 
-		var identity lockedIdentity
-		err = tx.Raw(
-			"SELECT id::text AS id, version FROM user_identities WHERE user_id = ? AND provider = ? FOR UPDATE",
-			lookup.UserID, ProviderLocal,
-		).Scan(&identity).Error
-		if err != nil {
+		identity, err := lockLocalIdentity(tx, lookup.UserID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("lock local identity: %w", err)
 		}
-		if identity.ID == "" {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			err = tx.Exec(
 				"INSERT INTO user_identities (user_id, provider, subject, password_hash) VALUES (?, ?, ?, ?)",
 				lookup.UserID, ProviderLocal, lookup.UserID, passwordHash,
@@ -823,6 +813,33 @@ func loadUser(database *gorm.DB, userID string) (User, error) {
 // writes without blocking the foreign-key check of a new session.
 func loadUserForNoKeyUpdate(database *gorm.DB, userID string) (User, error) {
 	return loadUser(database.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}), userID)
+}
+
+// lockLocalIdentity locks the user's local identity row. ChangePassword,
+// ResetPassword, and UseResetToken hold the user row lock already, so the
+// user-then-identity order is the same everywhere.
+func lockLocalIdentity(tx *gorm.DB, userID string) (lockedIdentity, error) {
+	var identity lockedIdentity
+	err := tx.Model(&Identity{}).
+		Select("id::text AS id, version").
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id = ? AND provider = ?", userID, ProviderLocal).
+		First(&identity).Error
+	if err != nil {
+		return lockedIdentity{}, err
+	}
+	return identity, nil
+}
+
+// revokeUnusedResetTokens deletes the user's unused reset tokens, so a token
+// issued before a password change cannot set the password again.
+func revokeUnusedResetTokens(tx *gorm.DB, userID string) error {
+	if err := tx.Exec(
+		"DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", userID,
+	).Error; err != nil {
+		return fmt.Errorf("delete reset tokens: %w", err)
+	}
+	return nil
 }
 
 func loadUserWithRoles(database *gorm.DB, userID string) (UserWithRoles, error) {

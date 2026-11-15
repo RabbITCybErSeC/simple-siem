@@ -46,9 +46,6 @@ type attempts struct {
 // recordFailure counts one failure and keeps it as evidence, dropping the
 // oldest kept failure once the ring is full.
 func (current *attempts) recordFailure(record dataset.Record) {
-	if current.recent == nil {
-		current.recent = make([]dataset.Record, 0, maxBufferedFailures)
-	}
 	current.failureCount++
 	if len(current.recent) < maxBufferedFailures {
 		current.recent = append(current.recent, record)
@@ -56,12 +53,6 @@ func (current *attempts) recordFailure(record dataset.Record) {
 	}
 	current.recent[current.oldest] = record
 	current.oldest = (current.oldest + 1) % maxBufferedFailures
-}
-
-// bufferedFailures is the number of failures kept for evidence. The memory
-// bound test reads it; nothing else should depend on the buffer's size.
-func (current *attempts) bufferedFailures() int {
-	return len(current.recent)
 }
 
 // evidenceOf lists the kept failures oldest first, followed by the success.

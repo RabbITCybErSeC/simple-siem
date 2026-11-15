@@ -54,11 +54,11 @@ func TestFailureBufferIsBounded(t *testing.T) {
 
 	for index := 0; index < failures; index++ {
 		current.recordFailure(dataset.Record{Key: dataset.SourceKey{DocumentID: strconv.Itoa(index)}})
-		if buffered := current.bufferedFailures(); buffered > maxBufferedFailures {
+		if buffered := len(current.recent); buffered > maxBufferedFailures {
 			t.Fatalf("buffered failures after %d = %d, want at most %d", index+1, buffered, maxBufferedFailures)
 		}
 	}
-	if buffered := current.bufferedFailures(); buffered != maxBufferedFailures {
+	if buffered := len(current.recent); buffered != maxBufferedFailures {
 		t.Fatalf("buffered failures = %d, want the latest %d", buffered, maxBufferedFailures)
 	}
 	if current.failureCount != failures {

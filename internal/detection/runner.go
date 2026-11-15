@@ -95,7 +95,7 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 	defer cancel()
 
 	var result RunResult
-	var run runRow
+	// shortcut: evaluation holds the window-lock transaction (one pooled connection per run for up to the evaluation budget); reserve the revision in a short transaction and evaluate outside it when the Phase 3 scheduler runs detections concurrently (bead simple-siem-tc3).
 	err = runner.Database.WithContext(transactionContext).Transaction(func(transaction *gorm.DB) error {
 		if err := lockWindow(transaction, manifest.ID, windowStart, windowEnd); err != nil {
 			return err
@@ -130,7 +130,7 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 			result.Error = outcome.err.Error()
 		}
 
-		run = runRow{
+		run := runRow{
 			DetectionID:      manifest.ID,
 			DetectionVersion: manifest.Version,
 			Status:           string(result.Status),
@@ -145,6 +145,7 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 		if err := transaction.Create(&run).Error; err != nil {
 			return fmt.Errorf("insert the run record: %w", err)
 		}
+		result.RunID = run.ID
 		if outcome.status != RunStatusOK {
 			return nil
 		}
@@ -185,7 +186,6 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 		return RunResult{}, fmt.Errorf("detection %q: %w", manifest.ID, err)
 	}
 
-	result.RunID = run.ID
 	return result, nil
 }
 

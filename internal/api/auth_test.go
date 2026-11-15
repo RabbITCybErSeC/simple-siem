@@ -17,6 +17,7 @@ import (
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/api"
 	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
+	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -950,18 +951,14 @@ func newAuthRouterFor(t *testing.T, publicURL string, development bool) (*gin.En
 }
 
 func TestOriginPolicyLogOmitsThePublicURL(t *testing.T) {
-	for _, publicURL := range []string{
-		"https://user:pw@sïem.example",
-		"https://user:pw@siem.example.com/%zz",
-	} {
-		_, _, _, logs := newAuthRouterFor(t, publicURL, false)
-		if !strings.Contains(logs.String(), "SIMPLE_SIEM_PUBLIC_URL") {
-			t.Errorf("origin policy log %q does not name SIMPLE_SIEM_PUBLIC_URL", logs.String())
-		}
-		for _, secret := range []string{"user:pw", "siem.example"} {
-			if strings.Contains(logs.String(), secret) {
-				t.Errorf("origin policy log for %q leaks %q: %s", publicURL, secret, logs.String())
-			}
+	const publicURL = "https://user:pw@siem.example.com/%zz"
+	_, _, _, logs := newAuthRouterFor(t, publicURL, false)
+	if !strings.Contains(logs.String(), config.PublicURLVariable) {
+		t.Errorf("origin policy log %q does not name %s", logs.String(), config.PublicURLVariable)
+	}
+	for _, secret := range []string{"user:pw", "siem.example"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("origin policy log for %q leaks %q: %s", publicURL, secret, logs.String())
 		}
 	}
 }

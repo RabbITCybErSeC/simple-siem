@@ -134,21 +134,15 @@ func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) (
 		return nil, 0, errors.New("list audit events: pageSize must be at least 1")
 	}
 
-	query := filterQuery(db.WithContext(ctx), filter)
+	database := db.WithContext(ctx)
 
 	var total int64
-	if err := query.Count(&total).Error; err != nil {
+	if err := filterQuery(database, filter).Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count audit events: %w", err)
 	}
 
 	var rows []storedEvent
-	err := query.
-		Select(selectEventColumns).
-		Order("created_at DESC, id DESC").
-		Offset((page - 1) * pageSize).
-		Limit(pageSize).
-		Find(&rows).Error
-	if err != nil {
+	if err := pageQuery(database, filter, page, pageSize).Find(&rows).Error; err != nil {
 		return nil, 0, fmt.Errorf("list audit events: %w", err)
 	}
 	events := make([]Event, 0, len(rows))
@@ -156,6 +150,16 @@ func List(ctx context.Context, db *gorm.DB, filter Filter, page, pageSize int) (
 		events = append(events, row.event())
 	}
 	return events, total, nil
+}
+
+// pageQuery builds the newest-first page statement of List; the EXPLAIN test
+// measures this chain.
+func pageQuery(database *gorm.DB, filter Filter, page, pageSize int) *gorm.DB {
+	return filterQuery(database, filter).
+		Select(selectEventColumns).
+		Order("created_at DESC, id DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize)
 }
 
 // filterQuery applies the non-zero filter fields to a query over audit_events.
