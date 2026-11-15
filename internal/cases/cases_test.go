@@ -357,7 +357,35 @@ func TestOnCallRotationIsSerialized(t *testing.T) {
 	}
 }
 
-func TestGuardrailReportsFirstCrossingPerHour(t *testing.T) {
+func TestCaseCreationWithoutOnCallDoesNotLockRotation(t *testing.T) {
+	service, db := newTestService(t, 50)
+	firstAlertID := insertAlert(t, db, "detection-a", "First", alerts.SeverityHigh)
+	secondAlertID := insertAlert(t, db, "detection-b", "Second", alerts.SeverityHigh)
+
+	first := db.Begin()
+	if first.Error != nil {
+		t.Fatalf("begin first transaction: %v", first.Error)
+	}
+	defer first.Rollback()
+	if _, err := service.AlertCreated(context.Background(), first, newAlert(firstAlertID, "detection-a", "First")); err != nil {
+		t.Fatalf("first AlertCreated: %v", err)
+	}
+
+	// The first transaction stays open; the second must not wait on the
+	// rotation row when nobody is on call.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	second := db.WithContext(ctx).Begin()
+	if second.Error != nil {
+		t.Fatalf("begin second transaction: %v", second.Error)
+	}
+	defer second.Rollback()
+	if _, err := service.AlertCreated(ctx, second, newAlert(secondAlertID, "detection-b", "Second")); err != nil {
+		t.Fatalf("second AlertCreated with nobody on call: %v", err)
+	}
+}
+
+func TestGuardrailReportsEveryCasePastTheLimit(t *testing.T) {
 	service, db := newTestService(t, 2)
 
 	for index := 1; index <= 2; index++ {
@@ -369,11 +397,11 @@ func TestGuardrailReportsFirstCrossingPerHour(t *testing.T) {
 
 	outcome, _, _ := openAlertCase(t, service, db, "noisy", "Noisy")
 	if !outcome.GuardrailTripped {
-		t.Fatalf("case 3 did not trip the guardrail, want the first crossing reported")
+		t.Fatalf("case 3 did not trip the guardrail, want the crossing reported")
 	}
 
-	if outcome, _, _ := openAlertCase(t, service, db, "noisy", "Noisy"); outcome.GuardrailTripped {
-		t.Errorf("case 4 reported the guardrail again, want only the first crossing")
+	if outcome, _, _ := openAlertCase(t, service, db, "noisy", "Noisy"); !outcome.GuardrailTripped {
+		t.Errorf("case 4 did not report the guardrail, want every case past the limit reported")
 	}
 	if outcome, _, _ := openAlertCase(t, service, db, "quiet", "Quiet"); outcome.GuardrailTripped {
 		t.Errorf("another detection tripped the guardrail, want its own count")
@@ -389,6 +417,21 @@ func TestGuardrailReportsFirstCrossingPerHour(t *testing.T) {
 	service.now = func() time.Time { return testNow.Add(time.Hour) }
 	if outcome, _, _ := openAlertCase(t, service, db, "noisy", "Noisy"); outcome.GuardrailTripped {
 		t.Errorf("the next hour tripped the guardrail, want a fresh count")
+	}
+}
+
+func TestGuardrailReportsAfterReenable(t *testing.T) {
+	service, db := newTestService(t, 2)
+	// The hour already tripped, as if the detection was re-enabled within it.
+	if err := db.Exec(`
+		INSERT INTO detection_guardrails (detection_id, hour_bucket, cases_opened)
+		VALUES ('noisy', date_trunc('hour', ?::timestamptz), 3)`, testNow).Error; err != nil {
+		t.Fatalf("seed guardrail row: %v", err)
+	}
+
+	outcome, _, _ := openAlertCase(t, service, db, "noisy", "Noisy")
+	if !outcome.GuardrailTripped {
+		t.Errorf("the next case after a re-enable did not report the guardrail, want it reported again")
 	}
 }
 
@@ -807,7 +850,7 @@ func TestListEveryFilter(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			filter := test.filter
-			filter.Limit = MaxListLimit
+			filter.Limit = intPointer(MaxListLimit)
 			page, err := service.List(context.Background(), alice, filter)
 			if err != nil {
 				t.Fatalf("List: %v", err)
@@ -825,7 +868,7 @@ func TestListEveryFilter(t *testing.T) {
 		})
 	}
 
-	all, err := service.List(context.Background(), alice, ListFilter{Limit: MaxListLimit})
+	all, err := service.List(context.Background(), alice, ListFilter{Limit: intPointer(MaxListLimit)})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -873,7 +916,7 @@ func TestListSortsPaginate(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			filter := ListFilter{Sort: test.sort, Limit: 2}
+			filter := ListFilter{Sort: test.sort, Limit: intPointer(2)}
 			var pages [][]string
 			for {
 				page, err := service.List(context.Background(), "", filter)
@@ -905,7 +948,7 @@ func TestListOldestWaitingFirst(t *testing.T) {
 	second := insertCase(t, db, caseFixture{Title: "10:00", CreatedAt: testNow.Add(-2 * time.Hour)})
 	third := insertCase(t, db, caseFixture{Title: "11:00", CreatedAt: testNow.Add(-time.Hour)})
 
-	filter := ListFilter{Statuses: []string{StatusOpen}, Sort: SortCreatedAtAsc, Limit: 2}
+	filter := ListFilter{Statuses: []string{StatusOpen}, Sort: SortCreatedAtAsc, Limit: intPointer(2)}
 	firstPage, err := service.List(context.Background(), "", filter)
 	if err != nil {
 		t.Fatalf("list first page: %v", err)
@@ -936,7 +979,7 @@ func TestListRejectsCursorFromOtherFilters(t *testing.T) {
 	insertCase(t, db, caseFixture{Title: "Two", LastEventAt: testNow.Add(-2 * time.Hour)})
 
 	page, err := service.List(context.Background(), "", ListFilter{
-		Statuses: []string{StatusOpen}, Sort: SortLastEventAtDesc, Limit: 1,
+		Statuses: []string{StatusOpen}, Sort: SortLastEventAtDesc, Limit: intPointer(1),
 	})
 	if err != nil {
 		t.Fatalf("list first page: %v", err)
@@ -946,7 +989,7 @@ func TestListRejectsCursorFromOtherFilters(t *testing.T) {
 	}
 
 	_, err = service.List(context.Background(), "", ListFilter{
-		Statuses: []string{StatusClosed}, Sort: SortLastEventAtDesc, Limit: 1, Cursor: *page.NextCursor,
+		Statuses: []string{StatusClosed}, Sort: SortLastEventAtDesc, Limit: intPointer(1), Cursor: *page.NextCursor,
 	})
 	if !errors.Is(err, ErrInvalidCursor) {
 		t.Fatalf("reused cursor error = %v, want ErrInvalidCursor", err)
@@ -958,7 +1001,7 @@ func TestListRejectsTamperedCursor(t *testing.T) {
 	insertCase(t, db, caseFixture{Title: "One", LastEventAt: testNow.Add(-time.Hour)})
 	insertCase(t, db, caseFixture{Title: "Two", LastEventAt: testNow.Add(-2 * time.Hour)})
 
-	page, err := service.List(context.Background(), "", ListFilter{Limit: 1})
+	page, err := service.List(context.Background(), "", ListFilter{Limit: intPointer(1)})
 	if err != nil {
 		t.Fatalf("list first page: %v", err)
 	}
@@ -968,7 +1011,7 @@ func TestListRejectsTamperedCursor(t *testing.T) {
 
 	t.Run("flipped byte", func(t *testing.T) {
 		cursor := flipFirstByte(*page.NextCursor)
-		_, err := service.List(context.Background(), "", ListFilter{Limit: 1, Cursor: cursor})
+		_, err := service.List(context.Background(), "", ListFilter{Limit: intPointer(1), Cursor: cursor})
 		if !errors.Is(err, ErrInvalidCursor) {
 			t.Fatalf("tampered cursor error = %v, want ErrInvalidCursor", err)
 		}
@@ -978,7 +1021,7 @@ func TestListRejectsTamperedCursor(t *testing.T) {
 		payload := decodeCursorPayload(t, *page.NextCursor)
 		payload.ID = "not-a-uuid"
 		cursor := encodeCursorPayload(t, payload)
-		_, err := service.List(context.Background(), "", ListFilter{Limit: 1, Cursor: cursor})
+		_, err := service.List(context.Background(), "", ListFilter{Limit: intPointer(1), Cursor: cursor})
 		if !errors.Is(err, ErrInvalidCursor) {
 			t.Fatalf("tampered cursor error = %v, want ErrInvalidCursor", err)
 		}
@@ -994,7 +1037,7 @@ func TestListTimeRangeOnlyWhenSent(t *testing.T) {
 	})
 
 	withoutRange, err := service.List(context.Background(), "", ListFilter{
-		Statuses: []string{StatusOpen}, Limit: MaxListLimit,
+		Statuses: []string{StatusOpen}, Limit: intPointer(MaxListLimit),
 	})
 	if err != nil {
 		t.Fatalf("list without range: %v", err)
@@ -1004,7 +1047,7 @@ func TestListTimeRangeOnlyWhenSent(t *testing.T) {
 	}
 
 	withRange, err := service.List(context.Background(), "", ListFilter{
-		Statuses: []string{StatusOpen}, Limit: MaxListLimit,
+		Statuses: []string{StatusOpen}, Limit: intPointer(MaxListLimit),
 		From: timePointer(testNow.Add(-24 * time.Hour)), To: timePointer(testNow),
 		TimeField: TimeFieldLastEventAt,
 	})
@@ -1013,6 +1056,33 @@ func TestListTimeRangeOnlyWhenSent(t *testing.T) {
 	}
 	if len(withRange.Items) != 0 {
 		t.Errorf("range returned %d cases, want none", len(withRange.Items))
+	}
+}
+
+func TestListCursorUsesRelativeExpressions(t *testing.T) {
+	service, db := newTestService(t, 50)
+	insertCase(t, db, caseFixture{Title: "One", LastEventAt: testNow.Add(-time.Hour)})
+	insertCase(t, db, caseFixture{Title: "Two", LastEventAt: testNow.Add(-2 * time.Hour)})
+
+	from := testNow.Add(-24 * time.Hour)
+	filter := ListFilter{
+		FromExpression: "now-24h", ToExpression: "now",
+		From: &from, To: timePointer(testNow), Limit: intPointer(1),
+	}
+	page, err := service.List(context.Background(), "", filter)
+	if err != nil {
+		t.Fatalf("list first page: %v", err)
+	}
+	if page.NextCursor == nil {
+		t.Fatalf("first page has no next cursor")
+	}
+
+	// The next request resolves the same expressions a second later.
+	filter.From = timePointer(from.Add(time.Second))
+	filter.To = timePointer(testNow.Add(time.Second))
+	filter.Cursor = *page.NextCursor
+	if _, err := service.List(context.Background(), "", filter); err != nil {
+		t.Fatalf("list second page of a relative range: %v", err)
 	}
 }
 
@@ -1033,7 +1103,7 @@ func TestListTitleMetacharactersMatchLiterally(t *testing.T) {
 		{"userx", other.ID},
 	}
 	for _, test := range tests {
-		page, err := service.List(context.Background(), "", ListFilter{Query: test.query, Limit: MaxListLimit})
+		page, err := service.List(context.Background(), "", ListFilter{Query: test.query, Limit: intPointer(MaxListLimit)})
 		if err != nil {
 			t.Fatalf("list %q: %v", test.query, err)
 		}
@@ -1047,7 +1117,7 @@ func TestCaseSummaryJSONShape(t *testing.T) {
 	service, db := newTestService(t, 50)
 	inserted := insertCase(t, db, caseFixture{Title: "Shape"})
 
-	page, err := service.List(context.Background(), "", ListFilter{Limit: 1})
+	page, err := service.List(context.Background(), "", ListFilter{Limit: intPointer(1)})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -1096,21 +1166,21 @@ func TestValidateListFilter(t *testing.T) {
 			Statuses: []string{StatusOpen}, Scope: ScopeMine, AssigneeIDs: []string{validAssignee},
 			Severities: []string{string(alerts.SeverityHigh)}, DetectionIDs: []string{"brute-force"},
 			Outcomes: []string{"ACCEPTED"}, Query: "alpha", From: &from, To: timePointer(testNow),
-			TimeField: TimeFieldCreatedAt, Sort: SortCreatedAtAsc, Limit: MaxListLimit,
+			TimeField: TimeFieldCreatedAt, Sort: SortCreatedAtAsc, Limit: intPointer(MaxListLimit),
 		}, ""},
-		{"status outside the allowlist", ListFilter{Statuses: []string{"open"}, Limit: 50}, "status"},
-		{"empty status item", ListFilter{Statuses: []string{StatusOpen, ""}, Limit: 50}, "status"},
-		{"scope outside the allowlist", ListFilter{Scope: "team", Limit: 50}, "scope"},
-		{"too many assignees", ListFilter{AssigneeIDs: tooManyAssignees, Limit: 50}, "assignee"},
-		{"assignee not a UUID", ListFilter{AssigneeIDs: []string{"alice"}, Limit: 50}, "assignee"},
-		{"detection outside the pattern", ListFilter{DetectionIDs: []string{"Bad_ID"}, Limit: 50}, "detection"},
-		{"query too long", ListFilter{Query: strings.Repeat("é", MaxQueryRunes+1), Limit: 50}, "q"},
-		{"numeric query overflows int64", ListFilter{Query: "99999999999999999999", Limit: 50}, "q"},
-		{"limit below one", ListFilter{Limit: 0}, "limit"},
-		{"limit above the maximum", ListFilter{Limit: MaxListLimit + 1}, "limit"},
-		{"from after to", ListFilter{From: timePointer(testNow), To: timePointer(testNow.Add(-time.Hour)), Limit: 50}, "from"},
-		{"timeField outside the allowlist", ListFilter{TimeField: "updatedAt", Limit: 50}, "timeField"},
-		{"sort outside the allowlist", ListFilter{Sort: "createdAt:desc", Limit: 50}, "sort"},
+		{"status outside the allowlist", ListFilter{Statuses: []string{"open"}, Limit: intPointer(50)}, "status"},
+		{"empty status item", ListFilter{Statuses: []string{StatusOpen, ""}, Limit: intPointer(50)}, "status"},
+		{"scope outside the allowlist", ListFilter{Scope: "team", Limit: intPointer(50)}, "scope"},
+		{"too many assignees", ListFilter{AssigneeIDs: tooManyAssignees, Limit: intPointer(50)}, "assignee"},
+		{"assignee not a UUID", ListFilter{AssigneeIDs: []string{"alice"}, Limit: intPointer(50)}, "assignee"},
+		{"detection outside the pattern", ListFilter{DetectionIDs: []string{"Bad_ID"}, Limit: intPointer(50)}, "detection"},
+		{"query too long", ListFilter{Query: strings.Repeat("é", MaxQueryRunes+1), Limit: intPointer(50)}, "q"},
+		{"numeric query overflows int64", ListFilter{Query: "99999999999999999999", Limit: intPointer(50)}, "q"},
+		{"limit below one", ListFilter{Limit: intPointer(0)}, "limit"},
+		{"limit above the maximum", ListFilter{Limit: intPointer(MaxListLimit + 1)}, "limit"},
+		{"from after to", ListFilter{From: timePointer(testNow), To: timePointer(testNow.Add(-time.Hour)), Limit: intPointer(50)}, "from"},
+		{"timeField outside the allowlist", ListFilter{TimeField: "updatedAt", Limit: intPointer(50)}, "timeField"},
+		{"sort outside the allowlist", ListFilter{Sort: "createdAt:desc", Limit: intPointer(50)}, "sort"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1173,6 +1243,10 @@ func timePointer(value time.Time) *time.Time {
 	return &value
 }
 
+func intPointer(value int) *int {
+	return &value
+}
+
 // expectValidationError checks that err is a ValidationError naming parameter.
 func expectValidationError(t *testing.T, err error, parameter string) {
 	t.Helper()
@@ -1188,7 +1262,7 @@ func TestListRejectsOversizedCursor(t *testing.T) {
 
 	_, err := service.List(context.Background(), "", ListFilter{
 		Cursor: strings.Repeat("a", MaxCursorBytes+1),
-		Limit:  50,
+		Limit:  intPointer(50),
 	})
 	if !errors.Is(err, ErrInvalidCursor) {
 		t.Fatalf("oversized cursor error = %v, want ErrInvalidCursor", err)
@@ -1374,7 +1448,7 @@ func timelineAll(t *testing.T, service *Service, caseID, kind string, limit int)
 	all := make([]TimelineEntry, 0)
 	cursor := ""
 	for pageNumber := 1; pageNumber <= 100; pageNumber++ {
-		page, err := service.Timeline(context.Background(), caseID, kind, limit, cursor)
+		page, err := service.Timeline(context.Background(), caseID, kind, &limit, cursor)
 		if err != nil {
 			t.Fatalf("timeline page %d: %v", pageNumber, err)
 		}
@@ -1508,7 +1582,7 @@ func TestListAlertsOrderAndCursor(t *testing.T) {
 		t.Fatalf("set alert disposition: %v", err)
 	}
 
-	page, err := service.ListAlerts(context.Background(), detail.ID, 2, "")
+	page, err := service.ListAlerts(context.Background(), detail.ID, intPointer(2), "")
 	if err != nil {
 		t.Fatalf("ListAlerts first page: %v", err)
 	}
@@ -1535,7 +1609,7 @@ func TestListAlertsOrderAndCursor(t *testing.T) {
 			page.Items[1].Outcome, page.Items[1].ClosureReason)
 	}
 
-	secondPage, err := service.ListAlerts(context.Background(), detail.ID, 2, *page.NextCursor)
+	secondPage, err := service.ListAlerts(context.Background(), detail.ID, intPointer(2), *page.NextCursor)
 	if err != nil {
 		t.Fatalf("ListAlerts second page: %v", err)
 	}
@@ -1546,7 +1620,7 @@ func TestListAlertsOrderAndCursor(t *testing.T) {
 		t.Errorf("second page cursor = %q, want nil", *secondPage.NextCursor)
 	}
 
-	if _, err := service.ListAlerts(context.Background(), "00000000-0000-0000-0000-000000000000", 50, ""); !errors.Is(err, ErrCaseNotFound) {
+	if _, err := service.ListAlerts(context.Background(), "00000000-0000-0000-0000-000000000000", intPointer(50), ""); !errors.Is(err, ErrCaseNotFound) {
 		t.Fatalf("unknown case error = %v, want ErrCaseNotFound", err)
 	}
 }
@@ -1734,9 +1808,9 @@ func TestTimelineRejectsInvalidKind(t *testing.T) {
 	service, db := newTestService(t, 50)
 	detail := insertCase(t, db, caseFixture{Title: "Kind"})
 
-	_, err := service.Timeline(context.Background(), detail.ID, "NOTE", 50, "")
+	_, err := service.Timeline(context.Background(), detail.ID, "NOTE", intPointer(50), "")
 	expectValidationError(t, err, "kind")
-	if _, err := service.Timeline(context.Background(), "00000000-0000-0000-0000-000000000000", "", 50, ""); !errors.Is(err, ErrCaseNotFound) {
+	if _, err := service.Timeline(context.Background(), "00000000-0000-0000-0000-000000000000", "", intPointer(50), ""); !errors.Is(err, ErrCaseNotFound) {
 		t.Fatalf("unknown case error = %v, want ErrCaseNotFound", err)
 	}
 }
@@ -2217,6 +2291,37 @@ func TestCountsCacheExpires(t *testing.T) {
 	}
 }
 
+func TestCountsCacheUsesRelativeExpressions(t *testing.T) {
+	service, db := newTestService(t, 50)
+	actor := createUser(t, db, "actor@example.com", "ANALYST")
+	insertCase(t, db, caseFixture{Title: "First"})
+
+	from := testNow.Add(-24 * time.Hour)
+	filter := ListFilter{
+		FromExpression: "now-24h", ToExpression: "now",
+		From: &from, To: timePointer(testNow),
+	}
+	first, err := service.Counts(context.Background(), actor, filter, "")
+	if err != nil {
+		t.Fatalf("Counts first call: %v", err)
+	}
+	if first.Scope.All != 1 {
+		t.Fatalf("first all = %d, want 1", first.Scope.All)
+	}
+
+	insertCase(t, db, caseFixture{Title: "Second"})
+	filter.From = timePointer(from.Add(time.Second))
+	filter.To = timePointer(testNow.Add(time.Second))
+	second, err := service.Counts(context.Background(), actor, filter, "")
+	if err != nil {
+		t.Fatalf("Counts second call: %v", err)
+	}
+	if second.Scope.All != first.Scope.All {
+		t.Errorf("second all = %d, want the cached %d for the same expressions",
+			second.Scope.All, first.Scope.All)
+	}
+}
+
 func TestCountsCacheEntryCap(t *testing.T) {
 	service := &Service{
 		now:         func() time.Time { return testNow },
@@ -2292,7 +2397,7 @@ func TestHistogramAutoInterval(t *testing.T) {
 	}
 
 	listFilter := filter
-	listFilter.Limit = MaxListLimit
+	listFilter.Limit = intPointer(MaxListLimit)
 	page, err := service.List(context.Background(), "", listFilter)
 	if err != nil {
 		t.Fatalf("List: %v", err)

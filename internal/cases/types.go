@@ -126,10 +126,6 @@ type ValidationError struct {
 	Message   string
 }
 
-func (validation ValidationError) Error() string {
-	return validation.Parameter + ": " + validation.Message
-}
-
 // Actor is the authenticated user behind a case write.
 type Actor struct {
 	UserID    string
@@ -138,22 +134,56 @@ type Actor struct {
 	IP        net.IP
 }
 
-// ListFilter is the parsed filter of a case list. From and To are absolute UTC
-// times; a relative expression is resolved by ParseTime before it gets here.
+// ListFilter is the parsed filter of a case list. From and To are the resolved
+// UTC times; FromExpression and ToExpression are the raw time expressions
+// exactly as sent, empty when absent. The cursor hash and counts cache key
+// cover the expressions, never the resolved instants, so a relative range
+// pages and caches alike on every request.
 type ListFilter struct {
-	Statuses     []string
-	Scope        string
-	AssigneeIDs  []string
-	Severities   []string
-	DetectionIDs []string
-	Outcomes     []string
-	Query        string
-	From         *time.Time
-	To           *time.Time
-	TimeField    string
-	Sort         string
-	Limit        int
-	Cursor       string
+	Statuses       []string
+	Scope          string
+	AssigneeIDs    []string
+	Severities     []string
+	DetectionIDs   []string
+	Outcomes       []string
+	Query          string
+	FromExpression string
+	ToExpression   string
+	From           *time.Time
+	To             *time.Time
+	TimeField      string
+	Sort           string
+	Limit          *int
+	Cursor         string
+}
+
+// cursorPayload is the JSON a keyset cursor carries.
+type cursorPayload struct {
+	SortValue string `json:"s"`
+	ID        string `json:"i"`
+	Filter    string `json:"f"`
+}
+
+// cursorKey is a decoded cursor with its sort value parsed.
+type cursorKey struct {
+	SortValue time.Time
+	ID        string
+}
+
+// filterHashInput is the canonical encoding a list cursor's hash covers.
+type filterHashInput struct {
+	Statuses       []string `json:"statuses"`
+	Scope          string   `json:"scope"`
+	AssigneeIDs    []string `json:"assigneeIds"`
+	Severities     []string `json:"severities"`
+	DetectionIDs   []string `json:"detectionIds"`
+	Outcomes       []string `json:"outcomes"`
+	Query          string   `json:"query"`
+	FromExpression string   `json:"fromExpression"`
+	ToExpression   string   `json:"toExpression"`
+	TimeField      string   `json:"timeField"`
+	Sort           string   `json:"sort"`
+	ActorUserID    string   `json:"actorUserID,omitempty"`
 }
 
 // CaseAssignee is the person a case is assigned to.
@@ -211,6 +241,34 @@ type CasePage struct {
 	Limit      int           `json:"limit"`
 }
 
+// summaryRow is the read-side row of a case list item.
+type summaryRow struct {
+	ID                  string     `gorm:"column:id"`
+	CaseNumber          int64      `gorm:"column:case_number"`
+	Title               string     `gorm:"column:title"`
+	Status              string     `gorm:"column:status"`
+	Severity            string     `gorm:"column:severity"`
+	Outcome             *string    `gorm:"column:outcome"`
+	ClosureReason       *string    `gorm:"column:closure_reason"`
+	AssigneeUserID      *string    `gorm:"column:assignee_user_id"`
+	AssigneeDisplayName *string    `gorm:"column:assignee_display_name"`
+	FirstEventAt        time.Time  `gorm:"column:first_event_at"`
+	LastEventAt         time.Time  `gorm:"column:last_event_at"`
+	CreatedAt           time.Time  `gorm:"column:created_at"`
+	ClosedAt            *time.Time `gorm:"column:closed_at"`
+	Version             int        `gorm:"column:version"`
+}
+
+// detailRow is the read-side row of a case detail.
+type detailRow struct {
+	Summary             summaryRow `gorm:"embedded"`
+	PreviousCaseID      *string    `gorm:"column:previous_case_id"`
+	LastActivityAt      time.Time  `gorm:"column:last_activity_at"`
+	Conclusion          *string    `gorm:"column:conclusion"`
+	ClosedByID          *string    `gorm:"column:closed_by_id"`
+	ClosedByDisplayName *string    `gorm:"column:closed_by_display_name"`
+}
+
 // AlertSummary is one alert of a case.
 type AlertSummary struct {
 	ID               string    `json:"id"`
@@ -234,6 +292,22 @@ type AlertPage struct {
 	Limit      int            `json:"limit"`
 }
 
+// alertSummaryRow is the read-side row of a case's alert.
+type alertSummaryRow struct {
+	ID               string    `gorm:"column:id"`
+	Title            string    `gorm:"column:title"`
+	Severity         string    `gorm:"column:severity"`
+	Status           string    `gorm:"column:status"`
+	DetectionID      string    `gorm:"column:detection_id"`
+	DetectionVersion string    `gorm:"column:detection_version"`
+	EvidenceCount    int       `gorm:"column:evidence_count"`
+	OccurrenceCount  int       `gorm:"column:occurrence_count"`
+	FirstEventAt     time.Time `gorm:"column:first_event_at"`
+	LastEventAt      time.Time `gorm:"column:last_event_at"`
+	Outcome          *string   `gorm:"column:outcome"`
+	ClosureReason    *string   `gorm:"column:closure_reason"`
+}
+
 // TimelineEntry is one evidence or activity entry of a case's timeline. The
 // fields of the other kind are omitted, so a client can switch on Kind.
 type TimelineEntry struct {
@@ -253,6 +327,20 @@ type TimelinePage struct {
 	Items      []TimelineEntry `json:"items"`
 	NextCursor *string         `json:"nextCursor"`
 	Limit      int             `json:"limit"`
+}
+
+// timelineRow is the common read-side row of both timeline kinds.
+type timelineRow struct {
+	ID               string    `gorm:"column:id"`
+	Kind             string    `gorm:"column:kind"`
+	At               time.Time `gorm:"column:at"`
+	AlertID          *string   `gorm:"column:alert_id"`
+	SourceID         *string   `gorm:"column:source_id"`
+	UDM              []byte    `gorm:"column:udm"`
+	ActorID          *string   `gorm:"column:actor_id"`
+	ActorDisplayName *string   `gorm:"column:actor_display_name"`
+	Action           *string   `gorm:"column:action"`
+	Details          []byte    `gorm:"column:details"`
 }
 
 // StatusCounts is the status block of the counts response.
@@ -277,6 +365,12 @@ type Counts struct {
 	Cap    int          `json:"cap"`
 }
 
+// countQuery is one capped count to run.
+type countQuery struct {
+	target *int64
+	filter ListFilter
+}
+
 // SeverityCounts is the severity block of a histogram bucket.
 type SeverityCounts struct {
 	High   int64 `json:"HIGH"`
@@ -296,6 +390,26 @@ type Histogram struct {
 	Buckets  []HistogramBucket `json:"buckets"`
 }
 
+// histogramInterval is one choice of the automatic histogram interval.
+type histogramInterval struct {
+	label    string
+	duration time.Duration
+	value    string
+}
+
+// histogramCountRow is one severity count of one bucket.
+type histogramCountRow struct {
+	BucketStart time.Time `gorm:"column:bucket_start"`
+	Severity    string    `gorm:"column:severity"`
+	Count       int64     `gorm:"column:count"`
+}
+
+// countsCacheEntry is one cached counts response and its expiry.
+type countsCacheEntry struct {
+	value     Counts
+	expiresAt time.Time
+}
+
 // Service writes cases inside the caller's transaction and serves the case
 // reads. It implements alerts.CaseHooks.
 type Service struct {
@@ -307,18 +421,6 @@ type Service struct {
 	countsLock  sync.Mutex
 	countsCache map[string]countsCacheEntry
 	// shortcut: per-process cache; shared cache or case_counts table if replicas disagree visibly (case-volume measurement).
-}
-
-// NewService builds the case service. publicURL is the externally reachable
-// base URL that outbox links point at.
-func NewService(database *gorm.DB, publicURL string, maxCasesPerHour int) *Service {
-	return &Service{
-		database:        database,
-		publicURL:       strings.TrimSuffix(publicURL, "/"),
-		maxCasesPerHour: maxCasesPerHour,
-		now:             time.Now,
-		countsCache:     make(map[string]countsCacheEntry),
-	}
 }
 
 // caseRow is one cases row. The database supplies ID, CaseNumber, the
@@ -346,10 +448,6 @@ type caseRow struct {
 	Version        int        `gorm:"column:version;default:1"`
 }
 
-func (caseRow) TableName() string {
-	return "cases"
-}
-
 // caseAlertRow is one case_alerts row. The database supplies CreatedAt.
 type caseAlertRow struct {
 	CaseID        string    `gorm:"column:case_id"`
@@ -357,6 +455,10 @@ type caseAlertRow struct {
 	Outcome       *string   `gorm:"column:outcome"`
 	ClosureReason *string   `gorm:"column:closure_reason"`
 	CreatedAt     time.Time `gorm:"column:created_at;default:now();autoCreateTime:false;->"`
+}
+
+func (caseRow) TableName() string {
+	return "cases"
 }
 
 func (caseAlertRow) TableName() string {
@@ -370,5 +472,21 @@ func validSeverity(severity alerts.Severity) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (validation ValidationError) Error() string {
+	return validation.Parameter + ": " + validation.Message
+}
+
+// NewService builds the case service. publicURL is the externally reachable
+// base URL that outbox links point at.
+func NewService(database *gorm.DB, publicURL string, maxCasesPerHour int) *Service {
+	return &Service{
+		database:        database,
+		publicURL:       strings.TrimSuffix(publicURL, "/"),
+		maxCasesPerHour: maxCasesPerHour,
+		now:             time.Now,
+		countsCache:     make(map[string]countsCacheEntry),
 	}
 }

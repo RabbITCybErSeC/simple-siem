@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -208,6 +209,9 @@ func TestCaseRoutes(t *testing.T) {
 			{"tag filter", "/api/v1/cases?tag=phishing", "tag"},
 			{"oversized cursor", "/api/v1/cases?cursor=" + cursor, "cursor"},
 			{"non-numeric limit", "/api/v1/cases?limit=ten", "limit"},
+			{"zero limit", "/api/v1/cases?limit=0", "limit"},
+			{"zero alerts limit", "/api/v1/cases/" + caseID + "/alerts?limit=0", "limit"},
+			{"zero timeline limit", "/api/v1/cases/" + caseID + "/timeline?limit=0", "limit"},
 			{"repeated query", "/api/v1/cases?q=a&q=b", "q"},
 			{"unknown counts parameter", "/api/v1/cases/counts?limit=10", "limit"},
 			{"repeated counts status", "/api/v1/cases/counts?status=OPEN&status=CLOSED", "status"},
@@ -394,6 +398,62 @@ func TestCaseRoutes(t *testing.T) {
 			assertJSONKeys(t, assigned, []string{"action", "actor", "at", "details", "id", "kind"})
 		})
 	})
+}
+
+func TestCaseListRelativeRangePaginates(t *testing.T) {
+	router, service, database, _ := newAPIRouter(t)
+	admin, _ := apiAdmin(t, router, service)
+	analyst := apiCreateUser(t, service, admin, caseAnalystEmail, "Case Analyst", "ANALYST")
+	apiActivateUser(t, service, admin, analyst.User.ID, caseAnalystPassword)
+	token := loginTokenFor(t, router, caseAnalystEmail, caseAnalystPassword)
+
+	titles := []string{"Relative one", "Relative two", "Relative three"}
+	for _, title := range titles {
+		caseID, _ := insertCaseRow(t, database, caseSeed{Title: title, Status: cases.StatusClosed})
+		// Keep the rows an hour inside the range, so request-time clock
+		// differences cannot move them out of it.
+		if err := database.Exec(`
+			UPDATE cases
+			SET first_event_at = now() - interval '2 hours',
+			    last_event_at = now() - interval '1 hour',
+			    closed_at = now() - interval '1 hour'
+			WHERE id = ?`, caseID).Error; err != nil {
+			t.Fatalf("move case %q into the range: %v", title, err)
+		}
+	}
+
+	target := "/api/v1/cases?status=CLOSED&from=now-24h&to=now&limit=1"
+	seen := make(map[string]bool)
+	for page := 1; page <= len(titles)+1; page++ {
+		response := get(router, target, "", bearer(token))
+		if response.Code != http.StatusOK {
+			t.Fatalf("page %d = %d, want 200: %s", page, response.Code, response.Body)
+		}
+		var body struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+			Pagination struct {
+				NextCursor *string `json:"nextCursor"`
+			} `json:"pagination"`
+		}
+		decodeJSON(t, response, &body)
+		for _, item := range body.Data {
+			seen[item.ID] = true
+		}
+		if body.Pagination.NextCursor == nil {
+			break
+		}
+		if page == len(titles)+1 {
+			t.Fatalf("pagination did not finish after %d pages", page)
+		}
+		target = "/api/v1/cases?status=CLOSED&from=now-24h&to=now&limit=1&cursor=" +
+			url.QueryEscape(*body.Pagination.NextCursor)
+	}
+
+	if len(seen) != len(titles) {
+		t.Errorf("paged through %d cases, want %d", len(seen), len(titles))
+	}
 }
 
 func caseRequest(router http.Handler, method, target, body, token string) *httptest.ResponseRecorder {

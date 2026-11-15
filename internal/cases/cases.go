@@ -151,8 +151,9 @@ func (service *Service) EvidenceAdded(ctx context.Context, tx *gorm.DB, alertID 
 }
 
 // recordCaseOpened counts this detection's cases in the current hour and
-// reports the first case past the limit. A repeat crossing stays silent,
-// because pipeline only needs to shadow a detection once.
+// reports every case past the limit. Pipeline switches only an ENABLED
+// detection, so a repeat report is harmless and re-shadows one an operator
+// re-enabled within the hour.
 func (service *Service) recordCaseOpened(database *gorm.DB, detectionID string) (bool, error) {
 	var casesOpened int
 	err := database.Raw(`
@@ -164,25 +165,39 @@ func (service *Service) recordCaseOpened(database *gorm.DB, detectionID string) 
 	if err != nil {
 		return false, fmt.Errorf("count detection cases: %w", err)
 	}
-	return casesOpened == service.maxCasesPerHour+1, nil
+	return casesOpened > service.maxCasesPerHour, nil
 }
 
-// assignOnCall locks the on-call rotation and picks the next user, or "" when
-// nobody can take the case. The lock serializes concurrent case creation.
+// assignOnCall picks the next on-call user, or "" when nobody can take the
+// case. The rotation row is locked only when there is someone to assign, so an
+// alert with nobody on call does not serialize case creation.
 func (service *Service) assignOnCall(database *gorm.DB) (string, error) {
+	candidates, err := onCallCandidates(database)
+	if err != nil {
+		return "", err
+	}
+	if len(candidates) == 0 {
+		return "", nil
+	}
+
 	var lastUserID *string
-	err := database.Raw(
+	err = database.Raw(
 		"SELECT last_user_id::text AS last_user_id FROM on_call_rotation WHERE id = 1 FOR UPDATE",
 	).Scan(&lastUserID).Error
 	if err != nil {
 		return "", fmt.Errorf("lock on-call rotation: %w", err)
 	}
-	return nextOnCallUser(database, lastUserID)
+
+	candidates, err = onCallCandidates(database)
+	if err != nil {
+		return "", err
+	}
+	return pickOnCallUser(candidates, lastUserID), nil
 }
 
-// nextOnCallUser picks the first candidate after lastUserID, or the first
-// candidate when the rotation has reached its end.
-func nextOnCallUser(database *gorm.DB, lastUserID *string) (string, error) {
+// onCallCandidates lists the active on-call users who can take a case,
+// ordered by id.
+func onCallCandidates(database *gorm.DB) ([]string, error) {
 	var candidates []string
 	err := database.Raw(`
 		SELECT users.id::text AS id
@@ -194,17 +209,23 @@ func nextOnCallUser(database *gorm.DB, lastUserID *string) (string, error) {
 		GROUP BY users.id
 		ORDER BY users.id`).Scan(&candidates).Error
 	if err != nil {
-		return "", fmt.Errorf("read on-call users: %w", err)
+		return nil, fmt.Errorf("read on-call users: %w", err)
 	}
+	return candidates, nil
+}
+
+// pickOnCallUser picks the first candidate after lastUserID, or the first
+// candidate when the rotation has reached its end.
+func pickOnCallUser(candidates []string, lastUserID *string) string {
 	for _, candidate := range candidates {
 		if lastUserID == nil || candidate > *lastUserID {
-			return candidate, nil
+			return candidate
 		}
 	}
 	if len(candidates) > 0 {
-		return candidates[0], nil
+		return candidates[0]
 	}
-	return "", nil
+	return ""
 }
 
 // normalizeTitle trims the alert summary and cuts it to the column's 500 runes
@@ -251,59 +272,8 @@ func detectionEvent(eventType, caseID string, payload map[string]any) outbox.Eve
 	}
 }
 
-// countsCacheEntry is one cached counts response and its expiry.
-type countsCacheEntry struct {
-	value     Counts
-	expiresAt time.Time
-}
-
-// cursorPayload is the JSON a keyset cursor carries.
-type cursorPayload struct {
-	SortValue string `json:"s"`
-	ID        string `json:"i"`
-	Filter    string `json:"f"`
-}
-
-// cursorKey is a decoded cursor with its sort value parsed.
-type cursorKey struct {
-	SortValue time.Time
-	ID        string
-}
-
-// summaryRow is the read-side row of a case list item.
-type summaryRow struct {
-	ID                  string     `gorm:"column:id"`
-	CaseNumber          int64      `gorm:"column:case_number"`
-	Title               string     `gorm:"column:title"`
-	Status              string     `gorm:"column:status"`
-	Severity            string     `gorm:"column:severity"`
-	Outcome             *string    `gorm:"column:outcome"`
-	ClosureReason       *string    `gorm:"column:closure_reason"`
-	AssigneeUserID      *string    `gorm:"column:assignee_user_id"`
-	AssigneeDisplayName *string    `gorm:"column:assignee_display_name"`
-	FirstEventAt        time.Time  `gorm:"column:first_event_at"`
-	LastEventAt         time.Time  `gorm:"column:last_event_at"`
-	CreatedAt           time.Time  `gorm:"column:created_at"`
-	ClosedAt            *time.Time `gorm:"column:closed_at"`
-	Version             int        `gorm:"column:version"`
-}
-
-// filterHashInput is the canonical encoding a list cursor's hash covers.
-type filterHashInput struct {
-	Statuses     []string   `json:"statuses"`
-	Scope        string     `json:"scope"`
-	AssigneeIDs  []string   `json:"assigneeIds"`
-	Severities   []string   `json:"severities"`
-	DetectionIDs []string   `json:"detectionIds"`
-	Outcomes     []string   `json:"outcomes"`
-	Query        string     `json:"query"`
-	From         *time.Time `json:"from"`
-	To           *time.Time `json:"to"`
-	TimeField    string     `json:"timeField"`
-	Sort         string     `json:"sort"`
-	ActorUserID  string     `json:"actorUserID,omitempty"`
-}
-
+// validStatuses, validSeverities, and validOutcomes are the enum allowlists
+// of every case read.
 var (
 	validStatuses = map[string]struct{}{
 		StatusOpen: {}, StatusInProgress: {}, StatusClosed: {},
@@ -422,12 +392,13 @@ func invalid(parameter, format string, args ...any) ValidationError {
 }
 
 // ValidateListFilter rejects filter values outside the list contract's bounds.
-// The service normalizes a filter before validating it.
+// The service normalizes a filter before validating it; a nil limit is absent
+// and takes the default.
 func ValidateListFilter(filter ListFilter) error {
 	if err := validateFilterValues(filter); err != nil {
 		return err
 	}
-	if filter.Limit < 1 || filter.Limit > MaxListLimit {
+	if filter.Limit != nil && (*filter.Limit < 1 || *filter.Limit > MaxListLimit) {
 		return invalid("limit", "limit must be 1 to %d", MaxListLimit)
 	}
 	return nil
@@ -512,8 +483,9 @@ func normalizeFilter(filter ListFilter) ListFilter {
 	if filter.Sort == "" {
 		filter.Sort = SortLastEventAtDesc
 	}
-	if filter.Limit == 0 {
-		filter.Limit = DefaultListLimit
+	if filter.Limit == nil {
+		limit := DefaultListLimit
+		filter.Limit = &limit
 	}
 	return filter
 }
@@ -526,6 +498,7 @@ func (service *Service) List(ctx context.Context, actorUserID string, filter Lis
 		return CasePage{}, err
 	}
 	filterHash := listFilterHash(filter, actorUserID)
+	limit := *filter.Limit
 
 	var key *cursorKey
 	if filter.Cursor != "" {
@@ -544,7 +517,7 @@ func (service *Service) List(ctx context.Context, actorUserID string, filter Lis
 		conditions = append(conditions, sortKeysets[filter.Sort])
 		arguments = append(arguments, key.SortValue, key.ID)
 	}
-	arguments = append(arguments, filter.Limit+1)
+	arguments = append(arguments, limit+1)
 
 	var rows []summaryRow
 	query := selectCaseSummary + where(conditions) + " ORDER BY " + sortOrders[filter.Sort] + " LIMIT ?"
@@ -552,10 +525,10 @@ func (service *Service) List(ctx context.Context, actorUserID string, filter Lis
 		return CasePage{}, fmt.Errorf("list cases: %w", err)
 	}
 
-	rows, nextCursor := trimPage(rows, filter.Limit, filterHash, func(row summaryRow) (time.Time, string) {
+	rows, nextCursor := trimPage(rows, limit, filterHash, func(row summaryRow) (time.Time, string) {
 		return row.sortValue(filter.Sort), row.ID
 	})
-	page := CasePage{Items: make([]CaseSummary, 0, len(rows)), NextCursor: nextCursor, Limit: filter.Limit}
+	page := CasePage{Items: make([]CaseSummary, 0, len(rows)), NextCursor: nextCursor, Limit: limit}
 	for _, row := range rows {
 		page.Items = append(page.Items, row.summary())
 	}
@@ -703,17 +676,17 @@ func trimPage[Row any](rows []Row, limit int, filterHash string, key func(Row) (
 // continues the filters it was built for.
 func listFilterHash(filter ListFilter, actorUserID string) string {
 	input := filterHashInput{
-		Statuses:     sortedValues(filter.Statuses),
-		Scope:        filter.Scope,
-		AssigneeIDs:  sortedValues(filter.AssigneeIDs),
-		Severities:   sortedValues(filter.Severities),
-		DetectionIDs: sortedValues(filter.DetectionIDs),
-		Outcomes:     sortedValues(filter.Outcomes),
-		Query:        filter.Query,
-		From:         utcTime(filter.From),
-		To:           utcTime(filter.To),
-		TimeField:    filter.TimeField,
-		Sort:         filter.Sort,
+		Statuses:       sortedValues(filter.Statuses),
+		Scope:          filter.Scope,
+		AssigneeIDs:    sortedValues(filter.AssigneeIDs),
+		Severities:     sortedValues(filter.Severities),
+		DetectionIDs:   sortedValues(filter.DetectionIDs),
+		Outcomes:       sortedValues(filter.Outcomes),
+		Query:          filter.Query,
+		FromExpression: filter.FromExpression,
+		ToExpression:   filter.ToExpression,
+		TimeField:      filter.TimeField,
+		Sort:           filter.Sort,
 	}
 	if filter.Scope == ScopeMine {
 		input.ActorUserID = actorUserID
@@ -778,46 +751,6 @@ func (row summaryRow) sortValue(sort string) time.Time {
 		return row.CreatedAt.UTC()
 	}
 	return row.LastEventAt.UTC()
-}
-
-// detailRow is the read-side row of a case detail.
-type detailRow struct {
-	Summary             summaryRow `gorm:"embedded"`
-	PreviousCaseID      *string    `gorm:"column:previous_case_id"`
-	LastActivityAt      time.Time  `gorm:"column:last_activity_at"`
-	Conclusion          *string    `gorm:"column:conclusion"`
-	ClosedByID          *string    `gorm:"column:closed_by_id"`
-	ClosedByDisplayName *string    `gorm:"column:closed_by_display_name"`
-}
-
-// alertSummaryRow is the read-side row of a case's alert.
-type alertSummaryRow struct {
-	ID               string    `gorm:"column:id"`
-	Title            string    `gorm:"column:title"`
-	Severity         string    `gorm:"column:severity"`
-	Status           string    `gorm:"column:status"`
-	DetectionID      string    `gorm:"column:detection_id"`
-	DetectionVersion string    `gorm:"column:detection_version"`
-	EvidenceCount    int       `gorm:"column:evidence_count"`
-	OccurrenceCount  int       `gorm:"column:occurrence_count"`
-	FirstEventAt     time.Time `gorm:"column:first_event_at"`
-	LastEventAt      time.Time `gorm:"column:last_event_at"`
-	Outcome          *string   `gorm:"column:outcome"`
-	ClosureReason    *string   `gorm:"column:closure_reason"`
-}
-
-// timelineRow is the common read-side row of both timeline kinds.
-type timelineRow struct {
-	ID               string    `gorm:"column:id"`
-	Kind             string    `gorm:"column:kind"`
-	At               time.Time `gorm:"column:at"`
-	AlertID          *string   `gorm:"column:alert_id"`
-	SourceID         *string   `gorm:"column:source_id"`
-	UDM              []byte    `gorm:"column:udm"`
-	ActorID          *string   `gorm:"column:actor_id"`
-	ActorDisplayName *string   `gorm:"column:actor_display_name"`
-	Action           *string   `gorm:"column:action"`
-	Details          []byte    `gorm:"column:details"`
 }
 
 // selectCaseDetail reads one case with its assignee and closer.
@@ -1005,8 +938,8 @@ func (row detailRow) detail() CaseDetail {
 }
 
 // ListAlerts returns one page of a case's alerts, oldest first event first.
-func (service *Service) ListAlerts(ctx context.Context, caseID string, limit int, cursor string) (AlertPage, error) {
-	limit, err := normalizePageLimit(limit)
+func (service *Service) ListAlerts(ctx context.Context, caseID string, limit *int, cursor string) (AlertPage, error) {
+	pageLimit, err := normalizePageLimit(limit)
 	if err != nil {
 		return AlertPage{}, err
 	}
@@ -1034,7 +967,7 @@ func (service *Service) ListAlerts(ctx context.Context, caseID string, limit int
 		condition = " AND (alerts.first_event_at, alerts.id) > (?, ?)"
 		arguments = append(arguments, key.SortValue, key.ID)
 	}
-	arguments = append(arguments, limit+1)
+	arguments = append(arguments, pageLimit+1)
 
 	var rows []alertSummaryRow
 	query := selectAlerts + condition + " ORDER BY alerts.first_event_at, alerts.id LIMIT ?"
@@ -1042,10 +975,10 @@ func (service *Service) ListAlerts(ctx context.Context, caseID string, limit int
 		return AlertPage{}, fmt.Errorf("list case alerts: %w", err)
 	}
 
-	rows, nextCursor := trimPage(rows, limit, filterHash, func(row alertSummaryRow) (time.Time, string) {
+	rows, nextCursor := trimPage(rows, pageLimit, filterHash, func(row alertSummaryRow) (time.Time, string) {
 		return row.FirstEventAt, row.ID
 	})
-	page := AlertPage{Items: make([]AlertSummary, 0, len(rows)), NextCursor: nextCursor, Limit: limit}
+	page := AlertPage{Items: make([]AlertSummary, 0, len(rows)), NextCursor: nextCursor, Limit: pageLimit}
 	for _, row := range rows {
 		page.Items = append(page.Items, row.summary())
 	}
@@ -1071,13 +1004,13 @@ func (row alertSummaryRow) summary() AlertSummary {
 }
 
 // Timeline returns one page of a case's evidence and activity entries.
-func (service *Service) Timeline(ctx context.Context, caseID string, kind string, limit int, cursor string) (TimelinePage, error) {
+func (service *Service) Timeline(ctx context.Context, caseID string, kind string, limit *int, cursor string) (TimelinePage, error) {
 	switch kind {
 	case "", KindEvidence, KindActivity:
 	default:
 		return TimelinePage{}, invalid("kind", "kind %q is not EVIDENCE or ACTIVITY", kind)
 	}
-	limit, err := normalizePageLimit(limit)
+	pageLimit, err := normalizePageLimit(limit)
 	if err != nil {
 		return TimelinePage{}, err
 	}
@@ -1115,17 +1048,17 @@ func (service *Service) Timeline(ctx context.Context, caseID string, kind string
 		arguments = append(arguments, key.SortValue, key.ID)
 	}
 	query += " ORDER BY merged.at, merged.id LIMIT ?" + timelineTail
-	arguments = append(arguments, limit+1)
+	arguments = append(arguments, pageLimit+1)
 
 	var rows []timelineRow
 	if err := service.database.WithContext(ctx).Raw(query, arguments...).Scan(&rows).Error; err != nil {
 		return TimelinePage{}, fmt.Errorf("read case timeline: %w", err)
 	}
 
-	rows, nextCursor := trimPage(rows, limit, filterHash, func(row timelineRow) (time.Time, string) {
+	rows, nextCursor := trimPage(rows, pageLimit, filterHash, func(row timelineRow) (time.Time, string) {
 		return row.At, row.ID
 	})
-	page := TimelinePage{Items: make([]TimelineEntry, 0, len(rows)), NextCursor: nextCursor, Limit: limit}
+	page := TimelinePage{Items: make([]TimelineEntry, 0, len(rows)), NextCursor: nextCursor, Limit: pageLimit}
 	for _, row := range rows {
 		entry, err := row.entry()
 		if err != nil {
@@ -1353,12 +1286,6 @@ func (service *Service) Counts(ctx context.Context, actorUserID string, filter L
 	return counts, nil
 }
 
-// countQuery is one capped count to run.
-type countQuery struct {
-	target *int64
-	filter ListFilter
-}
-
 // countInto runs one capped count into its target.
 func (service *Service) countInto(ctx context.Context, actorUserID string, query countQuery) error {
 	count, err := service.countCases(ctx, actorUserID, query.filter)
@@ -1403,7 +1330,7 @@ func countsBase(filter ListFilter) ListFilter {
 	filter.Statuses = nil
 	filter.Scope = ScopeAll
 	filter.Cursor = ""
-	filter.Limit = 0
+	filter.Limit = nil
 	filter.Sort = ""
 	return filter
 }
@@ -1465,13 +1392,6 @@ func (service *Service) storeCounts(key string, value Counts) {
 	service.countsCache[key] = countsCacheEntry{value: value, expiresAt: now.Add(countsCacheTTL)}
 }
 
-// histogramInterval is one choice of the automatic histogram interval.
-type histogramInterval struct {
-	label    string
-	duration time.Duration
-	value    string
-}
-
 var histogramIntervals = []histogramInterval{
 	{"1m", time.Minute, "1 minute"},
 	{"5m", 5 * time.Minute, "5 minutes"},
@@ -1482,13 +1402,6 @@ var histogramIntervals = []histogramInterval{
 	{"6h", 6 * time.Hour, "6 hours"},
 	{"12h", 12 * time.Hour, "12 hours"},
 	{"1d", 24 * time.Hour, "1 day"},
-}
-
-// histogramCountRow is one severity count of one bucket.
-type histogramCountRow struct {
-	BucketStart time.Time `gorm:"column:bucket_start"`
-	Severity    string    `gorm:"column:severity"`
-	Count       int64     `gorm:"column:count"`
 }
 
 // Histogram returns the severity counts per bucket over a required range.
@@ -1621,13 +1534,14 @@ func userCaseEvent(eventType, caseID, userID string, payload map[string]any) out
 	}
 }
 
-// normalizePageLimit applies the default and bounds of the cursor pages.
-func normalizePageLimit(limit int) (int, error) {
-	if limit == 0 {
+// normalizePageLimit applies the default and bounds of the cursor pages. A nil
+// limit is absent and takes the default.
+func normalizePageLimit(limit *int) (int, error) {
+	if limit == nil {
 		return DefaultListLimit, nil
 	}
-	if limit < 1 || limit > MaxListLimit {
+	if *limit < 1 || *limit > MaxListLimit {
 		return 0, invalid("limit", "limit must be 1 to %d", MaxListLimit)
 	}
-	return limit, nil
+	return *limit, nil
 }

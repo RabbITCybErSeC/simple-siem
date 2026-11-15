@@ -229,13 +229,14 @@ func parseCaseFilter(c *gin.Context, allowedNames ...string) (url.Values, cases.
 			invalidParameter(c, "limit")
 			return nil, cases.ListFilter{}, false
 		}
-		filter.Limit = limit
+		filter.Limit = &limit
 	}
 
 	// One now anchors both bounds, so a relative range is never a second wide.
 	now := time.Now()
 	if query.Has("from") {
-		from, err := cases.ParseTime(query.Get("from"), now)
+		filter.FromExpression = query.Get("from")
+		from, err := cases.ParseTime(filter.FromExpression, now)
 		if err != nil {
 			invalidParameter(c, "from")
 			return nil, cases.ListFilter{}, false
@@ -243,7 +244,8 @@ func parseCaseFilter(c *gin.Context, allowedNames ...string) (url.Values, cases.
 		filter.From = &from
 	}
 	if query.Has("to") {
-		to, err := cases.ParseTime(query.Get("to"), now)
+		filter.ToExpression = query.Get("to")
+		to, err := cases.ParseTime(filter.ToExpression, now)
 		if err != nil {
 			invalidParameter(c, "to")
 			return nil, cases.ListFilter{}, false
