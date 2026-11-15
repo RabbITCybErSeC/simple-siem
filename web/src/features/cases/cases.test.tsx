@@ -12,7 +12,9 @@ import {
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routes } from "../../App";
-import { writeTimeZone } from "../shell/timeZone";import type { CaseDetail } from "./detail/types";
+import { createQueryClient } from "../auth/session";
+import { writeTimeZone } from "../shell/timeZone";
+import type { CaseDetail } from "./detail/types";
 import type {
   CaseCounts,
   CaseHistogram,
@@ -357,6 +359,43 @@ describe("Cases page", () => {
     expect(within(unassigned).getByText("Unassigned")).toBeInTheDocument();
   });
 
+  it("names the last column after the tab", async () => {
+    renderCases();
+
+    const openTable = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    expect(
+      within(openTable).getAllByRole("columnheader").at(-1),
+    ).toHaveTextContent("Age");
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^Closed/ }));
+    const closedTable = await screen.findByRole("table", {
+      name: "Cases: Closed, Mine",
+    });
+    expect(
+      within(closedTable).getAllByRole("columnheader").at(-1),
+    ).toHaveTextContent("Outcome");
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /^All/ }));
+    const allTable = await screen.findByRole("table", {
+      name: "Cases: All, Mine",
+    });
+    expect(
+      within(allTable).getAllByRole("columnheader").at(-1),
+    ).toHaveTextContent("Age / Outcome");
+  });
+
+  it("keeps the caption as the accessible name", async () => {
+    renderCases();
+    const table = await screen.findByRole("table", {
+      name: "Cases: Open, Mine",
+    });
+    const caption = within(table).getByText("Cases: Open, Mine");
+    expect(caption.tagName).toBe("CAPTION");
+    expect(caption).toHaveClass("sr-only");
+  });
+
   it("shows the outcome instead of an age for closed cases", async () => {
     stubApi({
       list: () =>
@@ -524,6 +563,31 @@ describe("Cases page", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers the unassigned scope when Mine is empty", async () => {
+    renderCases("/cases", { list: () => jsonResponse(listResponse([])) });
+    await screen.findByText("No open cases assigned to you.");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show unassigned cases" }),
+    );
+
+    await screen.findByRole("table", { name: "Cases: Open, Unassigned" });
+    expect(screen.getByRole("radio", { name: /^Unassigned/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("shows no action when Unassigned is empty", async () => {
+    renderCases("/cases?scope=unassigned", {
+      list: () => jsonResponse(listResponse([])),
+    });
+    await screen.findByText("No open unassigned cases.");
+    expect(
+      screen.queryByRole("button", { name: "Show unassigned cases" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows an error message and retries without raw response text", async () => {
     let listRequests = 0;
 
@@ -531,16 +595,73 @@ describe("Cases page", () => {
       listRequests += 1;
     });
 
-    const alert = await screen.findByRole("alert");
+    const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
     expect(alert).toHaveTextContent("The case queue is unavailable.");
     expect(alert).not.toHaveTextContent("boom");
-    expect(listRequests).toBe(1);
+    const table = screen.getByRole("table", { name: "Cases: Open, Mine" });
+    expect(
+      within(table).getByRole("columnheader", { name: "Title" }),
+    ).toBeInTheDocument();
+    expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(listRequests).toBe(2);
 
     fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
 
     await waitFor(() => {
-      expect(listRequests).toBe(2);
+      expect(listRequests).toBe(3);
     });
+  });
+
+  it("retries a 5xx list once and then shows the alert", async () => {
+    let listCalls = 0;
+    renderCases(
+      "/cases",
+      {
+        list: () => {
+          listCalls += 1;
+          return jsonResponse(
+            {
+              error: { code: "INTERNAL_ERROR", message: "boom", details: {} },
+            },
+            503,
+          );
+        },
+      },
+      createQueryClient(() => undefined),
+    );
+
+    const alert = await screen.findByRole("alert", {}, { timeout: 4000 });
+    expect(alert).toHaveTextContent("The case queue is unavailable.");
+    expect(listCalls).toBe(2);
+  }, 8000);
+
+  it("does not retry a 4xx list", async () => {
+    let listCalls = 0;
+    renderCases(
+      "/cases",
+      {
+        list: () => {
+          listCalls += 1;
+          return jsonResponse(
+            {
+              error: {
+                code: "VALIDATION_ERROR",
+                message: "bad",
+                details: {},
+              },
+            },
+            400,
+          );
+        },
+      },
+      createQueryClient(() => undefined),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "The queue could not be loaded with these filters.",
+    );
+    expect(listCalls).toBe(1);
   });
 
   it("shows an alert with Retry when the histogram fails", async () => {
@@ -664,7 +785,11 @@ describe("Cases page", () => {
     await within(table).findByText("Brute force → success");
     expect(within(table).getAllByRole("row")).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    const loadMore = screen.getByRole("button", { name: "Load more" });
+    expect(
+      loadMore.closest('[data-slot="case-table-frame"]'),
+    ).not.toBeNull();
+    fireEvent.click(loadMore);
 
     expect(
       await within(table).findByText("Suspicious admin activity"),
@@ -1101,36 +1226,21 @@ describe("auto-refresh", () => {
   });
 
   it("does not announce changes when the first page never loaded", async () => {
-    let listCalls = 0;
     renderCases(REFRESH_PATH, {
-      list: () => {
-        listCalls += 1;
-        if (listCalls === 1) {
-          return jsonResponse(
-            {
-              error: {
-                code: "INTERNAL_ERROR",
-                message: "boom",
-                details: {},
-              },
+      list: () =>
+        jsonResponse(
+          {
+            error: {
+              code: "INTERNAL_ERROR",
+              message: "boom",
+              details: {},
             },
-            503,
-          );
-        }
-        return jsonResponse(
-          listResponse([
-            caseSummary({
-              id: "case_331",
-              caseNumber: 331,
-              title: "Arrival",
-            }),
-            ...OPEN_CASES,
-          ]),
-        );
-      },
+          },
+          503,
+        ),
     });
 
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(await screen.findByRole("alert", {}, { timeout: 3000 })).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);

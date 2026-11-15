@@ -5,7 +5,7 @@ import {
 } from "@tanstack/react-query";
 import type { QueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
-import { ApiError, get } from "../../api/client";
+import { ApiError, get, isClientError } from "../../api/client";
 import type {
   CaseCounts,
   CaseHistogram,
@@ -46,6 +46,7 @@ export function useCaseList(state: CaseQueueState) {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) =>
       lastPage.pagination.nextCursor ?? undefined,
+    retry: (count, error) => !isClientError(error) && count < 1,
   });
 
   useEffect(() => {

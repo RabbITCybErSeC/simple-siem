@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, apiRequest, get, post } from "./client";
+import { ApiError, apiRequest, get, isClientError, post } from "./client";
 
 type FetchFunction = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -203,5 +203,23 @@ describe("request helpers", () => {
 
     expect(fetchMock.mock.calls[0][1].method).toBe("GET");
     expect(fetchMock.mock.calls[1][1].method).toBe("POST");
+  });
+});
+
+describe("isClientError", () => {
+  it.each([400, 404, 499])("is true for %i", (status) => {
+    expect(isClientError(new ApiError(status, "VALIDATION_ERROR", "bad"))).toBe(
+      true,
+    );
+  });
+
+  it.each([500, 503])("is false for %i", (status) => {
+    expect(isClientError(new ApiError(status, "INTERNAL_ERROR", "bad"))).toBe(
+      false,
+    );
+  });
+
+  it("is false for a network TypeError", () => {
+    expect(isClientError(new TypeError("Failed to fetch"))).toBe(false);
   });
 });

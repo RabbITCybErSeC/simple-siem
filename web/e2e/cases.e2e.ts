@@ -49,9 +49,13 @@ interface ColourGlobals {
   document: {
     createElement(tagName: string): ColourCanvas;
   };
-  getComputedStyle(element: unknown): {
+  getComputedStyle(
+    element: unknown,
+    pseudoElement?: string,
+  ): {
     backgroundColor: string;
     color: string;
+    width: string;
   };
 }
 
@@ -686,4 +690,36 @@ test("an open case fills the main area below the split width", async ({
       number,
     );
   }
+});
+
+test("the select-all checkbox shows a minus for a partial selection", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto("/cases");
+  const table = openCasesTable(page);
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+
+  for (let index = 0; index < 3; index += 1) {
+    await table
+      .locator("tbody tr")
+      .nth(index)
+      .getByRole("checkbox", { name: /^Select case/ })
+      .click();
+  }
+
+  const selectAll = table.getByRole("checkbox", {
+    name: "Select all on this page",
+  });
+  await expect(selectAll).toHaveAttribute("aria-checked", "mixed");
+  await expect(selectAll.locator("svg"), "the check mark is hidden").toBeHidden();
+
+  const minusWidth = await selectAll.evaluate((element) => {
+    const browser = globalThis as unknown as ColourGlobals;
+    return browser.getComputedStyle(element, "::before").width;
+  });
+  expect(
+    Number.parseFloat(minusWidth),
+    "the select-all minus has a width",
+  ).toBeGreaterThan(0);
 });

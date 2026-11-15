@@ -6,9 +6,14 @@ import {
   useRef,
   useState,
 } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  ReactNode,
+} from "react";
+import { InboxIcon, TriangleAlertIcon } from "lucide-react";
 import { ApiError } from "../../api/client";
 import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
 import { Checkbox } from "../../components/ui/checkbox";
 import {
   Table,
@@ -20,7 +25,7 @@ import {
   TableRow,
 } from "../../components/ui/table";
 import type { TimeZoneSetting } from "../shell/types";
-import { SectionError } from "./detail/CaseSections";
+import { EmptyState } from "../shell/EmptyState";
 import { formatExact, relativeTime } from "./timeRange";
 import type {
   CaseOutcome,
@@ -39,6 +44,9 @@ export interface CaseTableProps {
   error: Error | null;
   selectedIds: ReadonlySet<string>;
   onRetry: () => void;
+  onScopeChange: (scope: CaseScope) => void;
+  onLoadMore?: () => void;
+  loadingMore: boolean;
   onSelectCase: (item: CaseSummary, selected: boolean) => void;
   onSelectAll: (selected: boolean) => void;
   onOpen?: (item: CaseSummary) => void;
@@ -103,6 +111,9 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
       error,
       selectedIds,
       onRetry,
+      onScopeChange,
+      onLoadMore,
+      loadingMore,
       onSelectCase,
       onSelectAll,
       onOpen,
@@ -218,46 +229,93 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
       focusRow(nextIndex);
     }
 
-    if (error !== null) {
-      return (
-        <SectionError message={caseErrorMessage(error)} onRetry={onRetry} />
-      );
-    }
-
     return (
-      <div ref={containerRef}>
+      <div
+        ref={containerRef}
+        data-slot="case-table-frame"
+        className="overflow-hidden rounded-xl border"
+      >
         <Table aria-busy={loading}>
-          <TableCaption>{caption(tab, scope)}</TableCaption>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-10">
+          <TableCaption className="sr-only">
+            {caption(tab, scope)}
+          </TableCaption>
+          <TableHeader className="bg-muted/50 text-xs font-medium">
+            <TableRow className="h-9">
+              <TableHead className="h-9 w-10 px-3">
                 <Checkbox
                   aria-label="Select all on this page"
                   checked={
-                    allSelected ? true : selectedCount > 0 ? "indeterminate" : false
+                    allSelected
+                      ? true
+                      : selectedCount > 0
+                        ? "indeterminate"
+                        : false
                   }
+                  className="data-indeterminate:border-primary data-indeterminate:bg-primary data-indeterminate:text-primary-foreground data-indeterminate:[&_svg]:hidden data-indeterminate:before:h-0.5 data-indeterminate:before:w-2 data-indeterminate:before:rounded-full data-indeterminate:before:bg-current"
                   onCheckedChange={(checked) =>
                     onSelectAll(checked === true)
                   }
                 />
               </TableHead>
-              <TableHead>Number</TableHead>
-              <TableHead>Title</TableHead>
-              <TableHead>Severity</TableHead>
-              <TableHead>Assignee</TableHead>
-              <TableHead>Last event</TableHead>
-              <TableHead>Age</TableHead>
+              <TableHead className="h-9 w-px px-3 text-muted-foreground">
+                Number
+              </TableHead>
+              <TableHead className="h-9 w-full max-w-0 min-w-40 truncate px-3 text-muted-foreground">
+                Title
+              </TableHead>
+              <TableHead className="h-9 w-px px-3 text-muted-foreground">
+                Severity
+              </TableHead>
+              <TableHead className="h-9 w-px px-3 text-muted-foreground">
+                Assignee
+              </TableHead>
+              <TableHead className="h-9 w-px px-3 text-right text-muted-foreground">
+                Last event
+              </TableHead>
+              <TableHead className="h-9 w-px px-3 text-right text-muted-foreground">
+                {lastColumnLabel(tab)}
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody onKeyDown={handleRowKeyDown}>
             {loading ? (
               <SkeletonRows />
+            ) : error !== null ? (
+              <StateRow>
+                <EmptyState
+                  tone="error"
+                  icon={TriangleAlertIcon}
+                  title={caseErrorMessage(error)}
+                  action={
+                    <Button type="button" variant="outline" onClick={onRetry}>
+                      Retry
+                    </Button>
+                  }
+                />
+              </StateRow>
             ) : cases.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="py-8 text-muted-foreground">
-                  {emptyMessage(tab, scope)}
-                </TableCell>
-              </TableRow>
+              <StateRow>
+                <EmptyState
+                  icon={InboxIcon}
+                  title={emptyMessage(tab, scope)}
+                  description={
+                    scope === "mine"
+                      ? "Cases assigned to you show up here."
+                      : undefined
+                  }
+                  action={
+                    scope === "mine" ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => onScopeChange("unassigned")}
+                      >
+                        Show unassigned cases
+                      </Button>
+                    ) : undefined
+                  }
+                />
+              </StateRow>
             ) : (
               cases.map((item, index) => (
                 <CaseRow
@@ -275,10 +333,36 @@ export const CaseTable = forwardRef<CaseTableHandle, CaseTableProps>(
             )}
           </TableBody>
         </Table>
+        {onLoadMore === undefined ? null : (
+          <div className="flex justify-center border-t py-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={loadingMore}
+              onClick={onLoadMore}
+            >
+              Load more
+            </Button>
+          </div>
+        )}
       </div>
     );
   },
 );
+
+interface StateRowProps {
+  children: ReactNode;
+}
+
+function StateRow({ children }: StateRowProps) {
+  return (
+    <TableRow>
+      <TableCell colSpan={7} className="p-0">
+        {children}
+      </TableCell>
+    </TableRow>
+  );
+}
 
 interface CaseRowProps {
   item: CaseSummary;
@@ -308,33 +392,42 @@ function CaseRow({
       data-case-id={item.id}
       tabIndex={active ? 0 : -1}
       onFocus={onFocus}
+      className="h-9 focus:bg-muted focus:ring-2 focus:ring-ring focus:ring-inset"
     >
-      <TableCell>
+      <TableCell className="h-9 w-10 px-3">
         <Checkbox
           aria-label={`Select case #${item.caseNumber}`}
           checked={selected}
           onCheckedChange={(checked) => onSelect(item, checked === true)}
         />
       </TableCell>
-      <TableCell className="font-mono">#{item.caseNumber}</TableCell>
+      <TableCell className="h-9 w-px px-3 font-mono text-[13px]">
+        #{item.caseNumber}
+      </TableCell>
       <TableCell
         className={
           onOpen === undefined
-            ? "font-medium"
-            : "cursor-pointer font-medium underline-offset-4 hover:underline"
+            ? "h-9 w-full max-w-0 min-w-40 truncate px-3 font-medium"
+            : "h-9 w-full max-w-0 min-w-40 cursor-pointer truncate px-3 font-medium underline-offset-4 hover:underline"
         }
         onClick={onOpen === undefined ? undefined : () => onOpen(item)}
       >
         {item.title}
       </TableCell>
-      <TableCell>
-        <Badge className={severity.className}>{severity.label}</Badge>
+      <TableCell className="h-9 w-px px-3">
+        <Badge
+          className={`${severity.className} h-5 rounded-md px-1.5 text-[11px] font-semibold tracking-wide`}
+        >
+          {severity.label}
+        </Badge>
       </TableCell>
-      <TableCell>{item.assignee?.displayName ?? "Unassigned"}</TableCell>
-      <TableCell>
+      <TableCell className="h-9 w-px px-3">
+        {item.assignee?.displayName ?? "Unassigned"}
+      </TableCell>
+      <TableCell className="h-9 w-px px-3 text-right tabular-nums">
         <TimeCell value={item.lastEventAt} timeZone={timeZone} now={now} />
       </TableCell>
-      <TableCell>
+      <TableCell className="h-9 w-px px-3 text-right tabular-nums">
         {item.status === "CLOSED" ? (
           outcomeLabel(item.outcome)
         ) : (
@@ -366,12 +459,28 @@ function SkeletonRows() {
   return (
     <>
       {Array.from({ length: SKELETON_ROWS }, (_, index) => (
-        <TableRow key={index}>
-          {Array.from({ length: 7 }, (_cell, cellIndex) => (
-            <TableCell key={cellIndex}>
-              <div className="h-4 w-full animate-pulse rounded bg-muted" />
-            </TableCell>
-          ))}
+        <TableRow key={index} className="h-9">
+          <TableCell className="h-9 w-10 px-3">
+            <div className="size-4 animate-pulse rounded bg-muted" />
+          </TableCell>
+          <TableCell className="h-9 w-px px-3">
+            <div className="h-4 w-9 animate-pulse rounded bg-muted" />
+          </TableCell>
+          <TableCell className="h-9 w-full max-w-0 min-w-40 px-3">
+            <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
+          </TableCell>
+          <TableCell className="h-9 w-px px-3">
+            <div className="h-5 w-14 animate-pulse rounded-md bg-muted" />
+          </TableCell>
+          <TableCell className="h-9 w-px px-3">
+            <div className="h-4 w-20 animate-pulse rounded bg-muted" />
+          </TableCell>
+          <TableCell className="h-9 w-px px-3">
+            <div className="h-4 w-12 animate-pulse rounded bg-muted" />
+          </TableCell>
+          <TableCell className="h-9 w-px px-3">
+            <div className="h-4 w-12 animate-pulse rounded bg-muted" />
+          </TableCell>
         </TableRow>
       ))}
     </>
@@ -380,6 +489,16 @@ function SkeletonRows() {
 
 function caption(tab: CaseTab, scope: CaseScope): string {
   return `Cases: ${TAB_LABELS[tab]}, ${SCOPE_LABELS[scope]}`;
+}
+
+function lastColumnLabel(tab: CaseTab): string {
+  if (tab === "closed") {
+    return "Outcome";
+  }
+  if (tab === "all") {
+    return "Age / Outcome";
+  }
+  return "Age";
 }
 
 function emptyMessage(tab: CaseTab, scope: CaseScope): string {

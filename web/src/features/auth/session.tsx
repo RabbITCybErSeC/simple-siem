@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
-import { ApiError, get, post } from "../../api/client";
+import { ApiError, get, isClientError, post } from "../../api/client";
 import type { LoginRequest, LoginResponse, User } from "../../api/types";
 import { Button } from "../../components/ui/button";
 
@@ -48,12 +48,7 @@ export function createQueryClient(onUnauthorized: () => void): QueryClient {
     }),
     defaultOptions: {
       queries: {
-        retry: (count, error) =>
-          !(
-            error instanceof ApiError &&
-            error.status >= 400 &&
-            error.status < 500
-          ) && count < 2,
+        retry: (count, error) => !isClientError(error) && count < 2,
         refetchOnWindowFocus: false,
       },
       mutations: {

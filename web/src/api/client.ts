@@ -21,6 +21,12 @@ export class ApiError extends Error {
   }
 }
 
+export function isClientError(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status >= 400 && error.status < 500
+  );
+}
+
 export async function apiRequest<T>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,

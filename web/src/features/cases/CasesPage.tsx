@@ -649,24 +649,19 @@ function CaseQueuePage({ caseNumber }: CaseQueuePageProps) {
                   error={listError}
                   selectedIds={selectedIds}
                   onRetry={() => void listQuery.refetch()}
+                  onScopeChange={(next) => updateState({ scope: next }, false)}
+                  onLoadMore={
+                    listQuery.hasNextPage && listError === null
+                      ? () => void listQuery.fetchNextPage()
+                      : undefined
+                  }
+                  loadingMore={listQuery.isFetchingNextPage}
                   onSelectCase={selectCase}
                   onSelectAll={selectPage}
                   onOpen={openCase}
                   onAssign={assignRow}
                   onClose={requestClose}
                 />
-                {listQuery.hasNextPage && listError === null && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-3"
-                    disabled={listQuery.isFetchingNextPage}
-                    onClick={() => void listQuery.fetchNextPage()}
-                  >
-                    Load more
-                  </Button>
-                )}
               </TabsContent>
             </Tabs>
           </div>

@@ -1,15 +1,13 @@
 import { useState } from "react";
 import { Bar, BarChart, ReferenceArea, XAxis, YAxis } from "recharts";
+import { Button } from "../../components/ui/button";
 import {
   ChartContainer,
-  ChartLegend,
-  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
 } from "../../components/ui/chart";
 import type { TimeZoneSetting } from "../shell/types";
-import { SectionError } from "./detail/CaseSections";
 import {
   formatExact,
   toSecondIso,
@@ -47,7 +45,17 @@ const chartConfig = {
   LOW: { label: "Low" },
 } satisfies ChartConfig;
 
-const severityOrder = ["HIGH", "MEDIUM", "LOW"];
+const severityOrder = ["HIGH", "MEDIUM", "LOW"] as const;
+
+const SEVERITY_SWATCHES: Record<(typeof severityOrder)[number], string> = {
+  HIGH: "bg-severity-high",
+  MEDIUM: "bg-severity-medium",
+  LOW: "bg-severity-low",
+};
+
+const TREND_HINT =
+  "Drag across the bars to zoom; use the time range picker from the keyboard.";
+const TREND_HINT_ID = "trend-drag-hint";
 
 const tickFormats: Record<TimeZoneSetting, Intl.DateTimeFormat> = {
   local: new Intl.DateTimeFormat("en-US", {
@@ -182,30 +190,64 @@ export function TrendChart({
       : buckets[Math.max(drag.startIndex, drag.endIndex)]?.start;
 
   return (
-    <figure className="space-y-2">
-      <figcaption className="text-sm font-medium">
-        Cases over time by severity
-      </figcaption>
-      <p className="text-xs text-muted-foreground">
-        Drag across the bars to zoom; use the time range picker from the
-        keyboard.
+    <section
+      aria-labelledby="trend-title"
+      className="rounded-xl border bg-card px-4 py-3"
+    >
+      <div className="flex items-center gap-3">
+        <span id="trend-title" className="text-sm font-medium">
+          Cases over time by severity
+        </span>
+        <div
+          aria-hidden="true"
+          data-slot="trend-legend"
+          className="ml-auto flex items-center gap-3 text-xs text-muted-foreground"
+        >
+          {severityOrder.map((severity) => (
+            <span key={severity} className="flex items-center gap-1.5">
+              <span
+                className={`size-2 rounded-[2px] ${SEVERITY_SWATCHES[severity]}`}
+              />
+              {chartConfig[severity].label}
+            </span>
+          ))}
+        </div>
+      </div>
+      <p id={TREND_HINT_ID} className="sr-only">
+        {TREND_HINT}
       </p>
 
       {loading ? (
         <div
           aria-busy="true"
-          className="h-40 animate-pulse rounded-lg bg-muted"
+          className="mt-2 h-24 animate-pulse rounded-lg bg-muted sm:h-28"
         />
       ) : error && histogram === undefined ? (
-        <SectionError message="Could not load the trend." onRetry={onRetry} />
+        <div
+          role="alert"
+          className="mt-2 flex h-24 flex-col items-center justify-center gap-2 text-sm text-muted-foreground sm:h-28"
+        >
+          <span>Could not load the trend.</span>
+          <Button type="button" variant="outline" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
       ) : !hasCases ? (
-        <p className="text-sm text-muted-foreground">No cases in this range.</p>
+        <p className="mt-2 flex h-24 items-center justify-center text-sm text-muted-foreground sm:h-28">
+          No cases in this range.
+        </p>
       ) : (
         <>
-          <div aria-hidden="true">
-            <ChartContainer config={chartConfig} className="h-40 w-full">
+          <div aria-hidden="true" className="mt-2">
+            <ChartContainer
+              config={chartConfig}
+              className="h-24 w-full sm:h-28"
+              title={TREND_HINT}
+              aria-describedby={TREND_HINT_ID}
+            >
               <BarChart
                 data={data}
+                barCategoryGap={2}
                 accessibilityLayer={false}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
@@ -220,14 +262,8 @@ export function TrendChart({
                     bucketTick(value, intervalMilliseconds, timeZone)
                   }
                 />
-                <YAxis allowDecimals={false} width={32} />
+                <YAxis hide />
                 <ChartTooltip content={<ChartTooltipContent />} />
-                <ChartLegend
-                  content={<ChartLegendContent />}
-                  itemSorter={(item) =>
-                    severityOrder.indexOf(String(item.dataKey))
-                  }
-                />
                 <Bar
                   dataKey="HIGH"
                   stackId="severity"
@@ -283,7 +319,7 @@ export function TrendChart({
           </table>
         </>
       )}
-    </figure>
+    </section>
   );
 }
 

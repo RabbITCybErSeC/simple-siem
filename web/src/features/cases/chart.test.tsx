@@ -156,7 +156,7 @@ describe("TrendChart", () => {
       "var(--color-severity-medium)",
       "var(--color-severity-low)",
     ]);
-    const legend = container.querySelector(".recharts-legend-wrapper");
+    const legend = container.querySelector('[data-slot="trend-legend"]');
     expect(legend).not.toBeNull();
     expect(legend?.textContent).toBe("HighMediumLow");
   });
