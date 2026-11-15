@@ -1,0 +1,46 @@
+name: Bug report
+description: Report behavior that differs from what you expected
+labels: [bug]
+body:
+  - type: textarea
+    id: version
+    attributes:
+      label: Version
+      description: Paste the output of `simple-siem version`.
+      placeholder: simple-siem v0.1.0 (abc1234)
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps that lead to the problem.
+      placeholder: |
+        1. Start the service with ...
+        2. Sign in as ...
+        3. Open ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant log lines. Remove passwords, tokens, secrets, and any personal data first.
+      render: text
+    validations:
+      required: false
