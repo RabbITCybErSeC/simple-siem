@@ -538,6 +538,6 @@ describe("session handling", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/cases");
     });
-    expect(screen.getByText("Cases page")).toBeInTheDocument();
+    expect(await screen.findByText("Cases page")).toBeInTheDocument();
   });
 });
