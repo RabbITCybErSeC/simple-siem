@@ -1,5 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router";
+import { useLayoutEffect, useRef } from "react";
 import {
   Command,
   CommandEmpty,
@@ -15,21 +14,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../../components/ui/dialog";
-import {
-  applyTheme,
-  readThemePreference,
-  writeThemePreference,
-} from "../../theme/theme";
-import type { ThemePreference } from "../../theme/theme";
-import { buildShellCommands, useCaseCommands } from "./commands";
-import { useTimeZone, writeTimeZone } from "./timeZone";
 import type { ShellCommand } from "./types";
 
 export interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onShowShortcuts: () => void;
-  onSignOut: () => void;
+  commands: ShellCommand[];
 }
 
 const GROUP_ORDER: ShellCommand["group"][] = [
@@ -44,37 +34,10 @@ const GROUP_ORDER: ShellCommand["group"][] = [
 export function CommandPalette({
   open,
   onOpenChange,
-  onShowShortcuts,
-  onSignOut,
+  commands,
 }: CommandPaletteProps) {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const timeZone = useTimeZone();
-  const caseCommands = useCaseCommands();
-  const [theme, setTheme] = useState(readThemePreference);
   const opener = useRef<HTMLElement | null>(null);
   const pendingCommand = useRef<ShellCommand | undefined>(undefined);
-
-  const chooseTheme = (preference: ThemePreference) => {
-    writeThemePreference(preference);
-    applyTheme(preference);
-    setTheme(preference);
-  };
-
-  const commands = buildShellCommands({
-    pathname: location.pathname,
-    search: location.search,
-    theme,
-    timeZone,
-    caseCommands,
-    onNavigate: (path) => {
-      void navigate(path);
-    },
-    onThemeChange: chooseTheme,
-    onTimeZoneChange: writeTimeZone,
-    onShowShortcuts,
-    onSignOut,
-  });
 
   const runCommand = (command: ShellCommand) => {
     if (!command.movesFocus) {
@@ -129,7 +92,7 @@ export function CommandPalette({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="top-1/3 translate-y-0 overflow-hidden rounded-xl! p-0"
+        className="top-[20%] translate-y-0 overflow-hidden p-0 max-sm:w-[calc(100%-2rem)]"
         showCloseButton={false}
         onOpenAutoFocus={handleOpenAutoFocus}
         onCloseAutoFocus={handleCloseAutoFocus}
@@ -142,7 +105,7 @@ export function CommandPalette({
         </DialogHeader>
         <Command>
           <CommandInput placeholder="Type a command…" />
-          <CommandList>
+          <CommandList className="max-h-80">
             <CommandEmpty>No results.</CommandEmpty>
             {GROUP_ORDER.map((group) => {
               const groupCommands = commands.filter(

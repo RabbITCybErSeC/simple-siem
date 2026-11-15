@@ -1,4 +1,8 @@
-import { expect, signIn, test } from "./support/test.ts";
+import { expect, openCases, signIn, test } from "./support/test.ts";
+
+type BrowserStorage = {
+  localStorage: { setItem: (key: string, value: string) => void };
+};
 
 test("palette opens without a CSP violation and locks scroll", async ({
   page,
@@ -174,4 +178,103 @@ test("keeps the sidebar collapsed after a reload", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: "Expand sidebar" }),
   ).toHaveAttribute("aria-expanded", "false");
+});
+
+test("the sidebar is a rail on a phone and restores the stored state at 1440", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.addInitScript(() => {
+    const browser = globalThis as unknown as BrowserStorage;
+    browser.localStorage.setItem("simple-siem.sidebar", "expanded");
+  });
+
+  await openCases(page);
+
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(
+    nav,
+    "the sidebar is the 56px rail below md",
+  ).toHaveCSS("width", "56px");
+  await expect(page.getByRole("link", { name: "Cases" })).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Collapse sidebar",
+      includeHidden: true,
+    }),
+    "the sidebar toggle is not shown on a phone",
+  ).toBeHidden();
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await expect(
+    nav,
+    "the stored expanded state applies again from md up",
+  ).toHaveCSS("width", "224px");
+  await expect(
+    page.getByRole("button", { name: "Collapse sidebar" }),
+  ).toBeVisible();
+});
+
+test("the palette and account buttons fit on a phone", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await openCases(page);
+
+  const buttons = [
+    {
+      label: "palette",
+      locator: page.getByRole("button", {
+        name: "Search or run a command…",
+        exact: true,
+      }),
+    },
+    {
+      label: "account",
+      locator: page.getByRole("button", {
+        name: "Account: Alice Analyst",
+        exact: true,
+      }),
+    },
+  ];
+
+  for (const { label, locator } of buttons) {
+    await expect(locator, `the ${label} button is shown`).toBeVisible();
+    const box = await locator.boundingBox();
+    if (box === null) {
+      throw new Error(`the ${label} button has no box`);
+    }
+    expect(box.x, `${label} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+    expect(box.y, `${label} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width, `${label} ends inside the viewport`).toBeLessThanOrEqual(390);
+    expect(box.y + box.height, `${label} ends inside the viewport`).toBeLessThanOrEqual(900);
+  }
+});
+
+test("the palette is inset and its overlay does not blur on a phone", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await openCases(page);
+
+  await page.keyboard.press("Control+k");
+  await expect(page.getByPlaceholder("Type a command…")).toBeVisible();
+
+  const palette = page.locator('[data-slot="dialog-content"]');
+  const box = await palette.boundingBox();
+  if (box === null) {
+    throw new Error("the palette has no box");
+  }
+  expect(
+    box.x,
+    "the palette is at least 16px from the left edge",
+  ).toBeGreaterThanOrEqual(16);
+  expect(
+    box.x + box.width,
+    "the palette is at least 16px from the right edge",
+  ).toBeLessThanOrEqual(390 - 16);
+
+  await expect(
+    page.locator('[data-slot="dialog-overlay"]'),
+    "the palette overlay does not blur the page",
+  ).toHaveCSS("backdrop-filter", "none");
 });

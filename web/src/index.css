@@ -149,6 +149,12 @@
   --tw-ring-color: var(--ring);
 }
 
+/* No per-frame backdrop blur; a darker scrim keeps every dialog legible. */
+[data-slot="dialog-overlay"] {
+  backdrop-filter: none;
+  background-color: oklch(0 0 0 / 0.4);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

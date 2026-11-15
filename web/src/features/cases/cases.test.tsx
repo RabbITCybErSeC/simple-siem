@@ -2170,7 +2170,7 @@ describe("review fixes: row shortcuts and detail state", () => {
       name: "Cases: Open, All",
     });
     await within(table).findByText("Brute force → success");
-    await screen.findByText("Alice Analyst", { selector: "header span" });
+    await screen.findByRole("button", { name: "Account: Alice Analyst" });
     const rows = dataRows(table);
     rows[0].focus();
 

@@ -69,7 +69,9 @@ test("signs in with the keyboard and keeps tokens out of storage", async ({
   await page.keyboard.press("Enter");
 
   await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
-  await expect(page.locator("header")).toContainText(ANALYST.displayName);
+  await expect(
+    page.getByRole("button", { name: `Account: ${ANALYST.displayName}` }),
+  ).toBeVisible();
   await expect(page).toHaveURL(/\/cases$/);
 
   const storage = await page.evaluate(() => {

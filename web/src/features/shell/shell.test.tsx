@@ -24,6 +24,7 @@ type FetchFunction = (
 
 function stubSignedIn(
   logout: () => Response = () => new Response(null, { status: 204 }),
+  displayName = "Alice Analyst",
 ): void {
   vi.stubGlobal(
     "fetch",
@@ -39,7 +40,7 @@ function stubSignedIn(
         JSON.stringify({
           id: "user_1",
           email: "analyst@example.test",
-          displayName: "Alice Analyst",
+          displayName,
           roles: ["ANALYST"],
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
@@ -51,8 +52,9 @@ function stubSignedIn(
 function renderShell(
   initialPath = "/cases",
   logout?: () => Response,
+  displayName?: string,
 ) {
-  stubSignedIn(logout);
+  stubSignedIn(logout, displayName);
   const router = createMemoryRouter(routes, { initialEntries: [initialPath] });
   const queryClient = createQueryClient(() => undefined);
 
@@ -483,5 +485,84 @@ describe("EmptyState", () => {
 
     expect(container.querySelectorAll("p")).toHaveLength(1);
     expect(screen.queryByRole("button")).toBeNull();
+  });
+});
+
+describe("account menu", () => {
+  async function openAccountMenu() {
+    renderShell();
+    await screen.findByRole("heading", { name: "Cases" });
+    const account = await screen.findByRole("button", {
+      name: "Account: Alice Analyst",
+    });
+    fireEvent.click(account);
+    return account;
+  }
+
+  it("shows the initials and the name, email, theme, and sign out", async () => {
+    const account = await openAccountMenu();
+
+    expect(account).toHaveTextContent("AA");
+    expect(await screen.findByText("Alice Analyst")).toBeInTheDocument();
+    expect(screen.getByText("analyst@example.test")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "System" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByRole("radio", { name: "Light" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(
+      screen.getByRole("button", { name: "Sign out" }),
+    ).toBeInTheDocument();
+  });
+
+  it("applies and stores the dark theme", async () => {
+    await openAccountMenu();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
+
+    expect(document.documentElement).toHaveClass("dark");
+    expect(localStorage.getItem("simple-siem.theme")).toBe("dark");
+  });
+
+  it("reports a failed sign out and stays on Cases", async () => {
+    const router = renderShell(
+      "/cases",
+      () =>
+        new Response(
+          JSON.stringify({
+            error: { code: "INTERNAL_ERROR", message: "boom" },
+          }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+    );
+    await screen.findByRole("heading", { name: "Cases" });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Account: Alice Analyst" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Sign out failed. Try again.",
+    );
+    expect(router.state.location.pathname).toBe("/cases");
+  });
+
+  it("shows one initial for a single-word display name", async () => {
+    renderShell("/cases", undefined, "admin");
+    await screen.findByRole("heading", { name: "Cases" });
+
+    expect(
+      await screen.findByRole("button", { name: "Account: admin" }),
+    ).toHaveTextContent("A");
   });
 });
