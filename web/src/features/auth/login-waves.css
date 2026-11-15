@@ -1,0 +1,78 @@
+/*
+ * Login-only backdrop. Vite bundles it into the hashed stylesheet served
+ * from 'self', so the CSP is unchanged. Only transform animates, so the
+ * compositor moves cached layers; the waves tint the page by 3-7%, and every
+ * text element sits on a solid surface, so contrast stays AA in both themes.
+ */
+
+.login-backdrop {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      120% 70% at 50% 0%,
+      color-mix(in oklch, var(--foreground) 5%, transparent),
+      transparent 70%
+    ),
+    var(--background);
+}
+
+.login-wave {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 200%;
+  height: 42vh;
+  min-height: 14rem;
+  fill: var(--foreground);
+  will-change: transform;
+  animation: login-wave-drift linear infinite;
+}
+
+.login-wave--back {
+  fill-opacity: 0.03;
+  height: 48vh;
+  animation-duration: 90s;
+}
+
+.login-wave--middle {
+  fill-opacity: 0.045;
+  height: 38vh;
+  animation-duration: 70s;
+  animation-direction: reverse;
+}
+
+.login-wave--front {
+  fill-opacity: 0.06;
+  height: 28vh;
+  animation-duration: 55s;
+}
+
+.dark .login-wave--back {
+  fill-opacity: 0.04;
+}
+
+.dark .login-wave--middle {
+  fill-opacity: 0.055;
+}
+
+.dark .login-wave--front {
+  fill-opacity: 0.07;
+}
+
+@keyframes login-wave-drift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-wave {
+    animation: none;
+  }
+}

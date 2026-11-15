@@ -1,4 +1,6 @@
+import type { Page } from "@playwright/test";
 import {
+  APP_ORIGIN,
   BROWSER_HEADERS,
   expect,
   signIn,
@@ -12,14 +14,36 @@ interface BrowserStorage {
   getItem(key: string): string | null;
 }
 
+type BrowserKeyframe = Record<string, unknown>;
+
+interface BrowserAnimation {
+  effect: { getKeyframes(): BrowserKeyframe[] } | null;
+  playState: string;
+}
+
 interface BrowserGlobals {
   localStorage: BrowserStorage;
   sessionStorage: BrowserStorage;
-  document: { cookie: string };
+  document: {
+    cookie: string;
+    documentElement: { scrollWidth: number };
+    getAnimations(): BrowserAnimation[];
+  };
+  innerWidth: number;
 }
 
 const ANALYST = TEST_USERS.analyst;
 const LIMITED_EMAIL = "limited@example.test";
+
+function runningAnimationKeyframes(page: Page): Promise<BrowserKeyframe[][]> {
+  return page.evaluate(() => {
+    const browser = globalThis as unknown as BrowserGlobals;
+    return browser.document
+      .getAnimations()
+      .filter((animation) => animation.playState === "running")
+      .map((animation) => animation.effect?.getKeyframes() ?? []);
+  });
+}
 
 test("a signed-out visitor is sent to login with the next path", async ({
   page,
@@ -215,4 +239,106 @@ test("keeps the shell and alerts when sign out fails", async ({ page }) => {
   );
   await expect(page).toHaveURL(/\/cases$/);
   await expect(heading).toBeVisible();
+});
+
+test.describe("login waves", () => {
+  test.describe("with motion", () => {
+    test.use({ reducedMotion: "no-preference" });
+
+    test("runs only transform animations", async ({ page }) => {
+      await page.goto("/login");
+      await expect(
+        page.getByRole("heading", { name: "Sign in to Simple SIEM" }),
+      ).toBeVisible();
+
+      const animations = await runningAnimationKeyframes(page);
+
+      expect(animations.length, "running animations").toBeGreaterThan(0);
+      for (const keyframes of animations) {
+        for (const keyframe of keyframes) {
+          const properties = Object.keys(keyframe).filter(
+            (name) =>
+              !["offset", "computedOffset", "easing", "composite"].includes(
+                name,
+              ),
+          );
+          expect(properties, "animated properties").toEqual(["transform"]);
+        }
+      }
+    });
+  });
+
+  test.describe("with reduced motion", () => {
+    test.use({ reducedMotion: "reduce" });
+
+    test("shows the three waves without running animations", async ({
+      page,
+    }) => {
+      await page.goto("/login");
+
+      const waves = page.locator(".login-wave");
+      await expect(waves).toHaveCount(3);
+      for (const wave of await waves.all()) {
+        await expect(wave).toBeVisible();
+      }
+
+      const running = (await runningAnimationKeyframes(page)).length;
+      expect(running, "running animations under reduced motion").toBe(0);
+    });
+  });
+
+  test("makes every request from the login page same-origin", async ({
+    page,
+  }) => {
+    const requests: string[] = [];
+    page.on("request", (request) => requests.push(request.url()));
+
+    await page.goto("/login");
+    await expect(
+      page.getByRole("heading", { name: "Sign in to Simple SIEM" }),
+    ).toBeVisible();
+
+    expect(requests.length, "login page requests").toBeGreaterThan(0);
+    for (const url of requests) {
+      expect(new URL(url).origin, url).toBe(APP_ORIGIN);
+    }
+  });
+
+  test.describe("at 390px", () => {
+    test.use({ viewport: { width: 390, height: 844 } });
+
+    test("fits without sideways scrolling", async ({ page }) => {
+      await page.goto("/login");
+      await expect(
+        page.getByRole("heading", { name: "Sign in to Simple SIEM" }),
+      ).toBeVisible();
+
+      const card = page.locator("section");
+      await expect(card).toBeVisible();
+
+      const { scrollWidth, innerWidth } = await page.evaluate(() => {
+        const browser = globalThis as unknown as BrowserGlobals;
+        return {
+          scrollWidth: browser.document.documentElement.scrollWidth,
+          innerWidth: browser.innerWidth,
+        };
+      });
+      expect(scrollWidth, "document width at 390px").toBeLessThanOrEqual(
+        innerWidth,
+      );
+
+      const box = await card.boundingBox();
+      if (box === null) {
+        throw new Error("login card has no box");
+      }
+      const viewport = page.viewportSize();
+      if (viewport === null) {
+        throw new Error("no viewport");
+      }
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+    });
+  });
 });

@@ -231,6 +231,21 @@ describe("safeNextPath", () => {
 });
 
 describe("LoginPage", () => {
+  it("shows the hidden backdrop and the subtitle", async () => {
+    stubApi({ "GET /api/v1/me": signedOut });
+    renderLogin();
+
+    const backdrop = document.querySelector(".login-backdrop");
+    expect(backdrop, "login backdrop").not.toBeNull();
+    expect(backdrop).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getAllByRole("heading")[0]).toHaveTextContent(
+      "Sign in to Simple SIEM",
+    );
+    expect(
+      screen.getByText("Use your work email and password."),
+    ).toBeInTheDocument();
+  });
+
   it("sends nothing and focuses the email field on an empty submit", async () => {
     const fetchMock = vi.fn<FetchFunction>(async (input) => {
       const path = new URL(input.toString(), "http://localhost").pathname;
