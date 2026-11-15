@@ -123,6 +123,9 @@ export const test = base.extend<Fixtures>({
       const api = new FixtureApi(page);
       await api.install();
       await use(api);
+      // A route handler can still be fetching /me when the test ends; let it
+      // finish while the context is open, then check what it recorded.
+      await page.unrouteAll({ behavior: "wait" });
       expect(api.violations, "API fixture contract").toEqual([]);
     },
     { auto: true },
