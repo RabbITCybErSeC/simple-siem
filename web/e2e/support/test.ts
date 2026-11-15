@@ -59,6 +59,16 @@ export async function openCases(page: Page): Promise<Locator> {
   return table;
 }
 
+/** Picks an option of a Radix Select; its listbox renders in a portal on the page. */
+export async function chooseOption(
+  page: Page,
+  combobox: Locator,
+  optionName: string,
+): Promise<void> {
+  await combobox.click();
+  await page.getByRole("option", { name: optionName, exact: true }).click();
+}
+
 export async function storeSidebar(
   page: Page,
   collapsed: boolean,

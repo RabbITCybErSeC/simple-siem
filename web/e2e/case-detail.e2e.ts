@@ -3,6 +3,7 @@ import type { AlertSummary } from "../src/features/cases/detail/types.ts";
 import { FIXTURE_NOW } from "./support/cases.ts";
 import {
   APP_ORIGIN,
+  chooseOption,
   expect,
   expectNoSideScroll,
   signIn,
@@ -511,7 +512,7 @@ test("closes a case by keyboard and shows the closed row after Show", async ({
   });
   await expect(reason).toBeFocused();
   await page.keyboard.press("a");
-  await expect(reason).toHaveValue("AUTHORIZED_ACTIVITY");
+  await expect(reason).toHaveText("Authorized activity");
 
   const conclusion = dialog.getByLabel("Conclusion");
   let conclusionFocused = false;
@@ -593,9 +594,11 @@ test("keeps the typed conclusion when the case changed", async ({
     .getByRole("radiogroup", { name: "Outcome" })
     .getByText("Accepted", { exact: true })
     .click();
-  await dialog
-    .getByRole("combobox", { name: "Closure reason", exact: true })
-    .selectOption({ label: "Authorized activity" });
+  await chooseOption(
+    page,
+    dialog.getByRole("combobox", { name: "Closure reason", exact: true }),
+    "Authorized activity",
+  );
   await dialog.getByLabel("Conclusion").fill("Keep this conclusion.");
 
   api.bumpVersion(added.id);
@@ -828,9 +831,11 @@ test("bulk closes selected rows and reports the changed one", async ({
     .getByRole("radiogroup", { name: "Outcome" })
     .getByText("Accepted", { exact: true })
     .click();
-  await dialog
-    .getByRole("combobox", { name: "Closure reason", exact: true })
-    .selectOption({ label: "Authorized activity" });
+  await chooseOption(
+    page,
+    dialog.getByRole("combobox", { name: "Closure reason", exact: true }),
+    "Authorized activity",
+  );
   await dialog.getByLabel("Conclusion").fill("Pentest, SEC-41.");
   await dialog.getByRole("button", { name: "Close selected cases" }).click();
 

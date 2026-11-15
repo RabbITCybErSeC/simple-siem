@@ -232,6 +232,18 @@ test("shows my open cases, counts, and the trend chart", async ({
   expect(parameters.has("from")).toBe(false);
 });
 
+test("opens the Sort select under the real CSP", async ({ page }) => {
+  await openCases(page);
+
+  const sort = page.getByRole("combobox", { name: "Sort" });
+  await sort.click();
+  await expect(page.getByRole("listbox")).toBeVisible();
+  await page.getByRole("option", { name: "Oldest waiting first" }).click();
+
+  await expect(sort).toHaveText("Oldest waiting first");
+  await expect(page).toHaveURL(/[?&]sort=createdAt(%3A|:)asc/);
+});
+
 test("restores a shared link and falls back for an invalid value", async ({
   page,
 }) => {

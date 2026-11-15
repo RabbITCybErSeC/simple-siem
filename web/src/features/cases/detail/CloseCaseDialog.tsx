@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Controller, useForm } from "react-hook-form";
 import type { UseFormReturn } from "react-hook-form";
@@ -22,6 +22,13 @@ import {
 } from "../../../components/ui/field";
 import { Label } from "../../../components/ui/label";
 import { RadioGroup, RadioGroupItem } from "../../../components/ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../../components/ui/select";
 import { Textarea } from "../../../components/ui/textarea";
 import { OUTCOME_LABELS } from "../CaseTable";
 import type { CaseOutcome } from "../types";
@@ -138,20 +145,19 @@ export function CloseCaseDialog({
   const alertsQuery = useAllCaseAlerts(detail.id, open && showDispositions);
   const alerts = useMemo(() => alertsQuery.data ?? [], [alertsQuery.data]);
 
-  const changeOverride = (
-    alertId: string,
-    field: keyof AlertOverride,
-    value: string,
-  ) => {
-    setOverrides((current) => ({
-      ...current,
-      [alertId]: {
-        outcome: current[alertId]?.outcome ?? SAME,
-        closureReason: current[alertId]?.closureReason ?? SAME,
-        [field]: value as AlertOverride[typeof field],
-      },
-    }));
-  };
+  const changeOverride = useCallback(
+    (alertId: string, field: keyof AlertOverride, value: string) => {
+      setOverrides((current) => ({
+        ...current,
+        [alertId]: {
+          outcome: current[alertId]?.outcome ?? SAME,
+          closureReason: current[alertId]?.closureReason ?? SAME,
+          [field]: value as AlertOverride[typeof field],
+        },
+      }));
+    },
+    [],
+  );
 
   const submitClose = useCallback(
     async (values: ClosureValues) => {
@@ -334,28 +340,31 @@ export function ClosureFields({ form, idPrefix }: ClosureFieldsProps) {
           control={form.control}
           name="closureReason"
           render={({ field, fieldState }) => (
-            <select
-              id={`${idPrefix}-reason`}
-              ref={field.ref}
+            <Select
               name={field.name}
               value={field.value ?? ""}
-              onBlur={field.onBlur}
-              onChange={(event) => field.onChange(event.target.value)}
-              className="native-select"
-              aria-invalid={fieldState.error ? true : undefined}
-              aria-describedby={
-                fieldState.error ? `${idPrefix}-reason-error` : undefined
-              }
+              onValueChange={field.onChange}
             >
-              <option value="" disabled>
-                Choose a reason
-              </option>
-              {CLOSURE_REASON_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger
+                id={`${idPrefix}-reason`}
+                ref={field.ref}
+                onBlur={field.onBlur}
+                className="w-full"
+                aria-invalid={fieldState.error ? true : undefined}
+                aria-describedby={
+                  fieldState.error ? `${idPrefix}-reason-error` : undefined
+                }
+              >
+                <SelectValue placeholder="Choose a reason" />
+              </SelectTrigger>
+              <SelectContent>
+                {CLOSURE_REASON_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
         />
         <FieldError
@@ -424,55 +433,82 @@ function AlertDispositions({
         <span>Closure reason</span>
       </div>
       <ul aria-labelledby={DISPOSITIONS_LABEL_ID}>
-        {alerts.map((alert) => {
-          const override = overrides[alert.id];
-          return (
-            <li
-              key={alert.id}
-              className="grid gap-2 border-t py-3 sm:grid-cols-[minmax(0,1fr)_10rem_10rem] sm:items-center"
-            >
-              <span className="text-sm font-medium sm:truncate">
-                {alert.title}
-              </span>
-              <div className="grid grid-cols-2 gap-2 sm:contents">
-                <select
-                  aria-label={`Outcome for ${alert.title}`}
-                  value={override?.outcome ?? SAME}
-                  onChange={(event) =>
-                    onChange(alert.id, "outcome", event.target.value)
-                  }
-                  className="native-select"
-                >
-                  <option value={SAME}>Same as case</option>
-                  {OUTCOME_OPTIONS.map((outcome) => (
-                    <option key={outcome} value={outcome}>
-                      {OUTCOME_LABELS[outcome]}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  aria-label={`Closure reason for ${alert.title}`}
-                  value={override?.closureReason ?? SAME}
-                  onChange={(event) =>
-                    onChange(alert.id, "closureReason", event.target.value)
-                  }
-                  className="native-select"
-                >
-                  <option value={SAME}>Same as case</option>
-                  {CLOSURE_REASON_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </li>
-          );
-        })}
+        {alerts.map((alert) => (
+          <AlertDispositionRow
+            key={alert.id}
+            alert={alert}
+            override={overrides[alert.id]}
+            onChange={onChange}
+          />
+        ))}
       </ul>
     </div>
   );
 }
+
+interface AlertDispositionRowProps {
+  alert: AlertSummary;
+  override: AlertOverride | undefined;
+  onChange: (
+    alertId: string,
+    field: keyof AlertOverride,
+    value: string,
+  ) => void;
+}
+
+const AlertDispositionRow = memo(function AlertDispositionRow({
+  alert,
+  override,
+  onChange,
+}: AlertDispositionRowProps) {
+  return (
+    <li className="grid gap-2 border-t py-3 sm:grid-cols-[minmax(0,1fr)_10rem_10rem] sm:items-center">
+      <span className="text-sm font-medium sm:truncate">{alert.title}</span>
+      <div className="grid grid-cols-2 gap-2 sm:contents">
+        <Select
+          value={override?.outcome ?? SAME}
+          onValueChange={(value) => onChange(alert.id, "outcome", value)}
+        >
+          <SelectTrigger
+            aria-label={`Outcome for ${alert.title}`}
+            className="w-full"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={SAME}>Same as case</SelectItem>
+            {OUTCOME_OPTIONS.map((outcome) => (
+              <SelectItem key={outcome} value={outcome}>
+                {OUTCOME_LABELS[outcome]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={override?.closureReason ?? SAME}
+          onValueChange={(value) =>
+            onChange(alert.id, "closureReason", value)
+          }
+        >
+          <SelectTrigger
+            aria-label={`Closure reason for ${alert.title}`}
+            className="w-full"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={SAME}>Same as case</SelectItem>
+            {CLOSURE_REASON_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </li>
+  );
+});
 
 function buildDispositions(
   alerts: AlertSummary[],

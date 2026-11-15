@@ -275,6 +275,11 @@ function caseRow(table: HTMLElement, caseNumber: number): HTMLElement {
   return row;
 }
 
+async function chooseOption(trigger: HTMLElement, name: string): Promise<void> {
+  fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("option", { name }));
+}
+
 beforeEach(() => {
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   Element.prototype.scrollIntoView = vi.fn();
@@ -884,10 +889,7 @@ describe("Cases page", () => {
     await screen.findByRole("table", { name: "Cases: Open, Mine" });
 
     const sort = screen.getByRole("combobox", { name: "Sort" });
-    fireEvent.pointerDown(sort, { button: 0, pointerType: "mouse" });
-    fireEvent.click(
-      await screen.findByRole("option", { name: "Oldest waiting first" }),
-    );
+    await chooseOption(sort, "Oldest waiting first");
 
     await waitFor(() => {
       expect(listRequests()).toContain(
@@ -1898,10 +1900,10 @@ async function openBulkCloseDialog(): Promise<HTMLElement> {
 
 async function fillBulkClosureFields(dialog: HTMLElement): Promise<void> {
   fireEvent.click(within(dialog).getByRole("radio", { name: "Accepted" }));
-  fireEvent.change(
-    within(dialog).getByRole("combobox", { name: "Closure reason" }),
-    { target: { value: "AUTHORIZED_ACTIVITY" } },
-  );
+  const reason = within(dialog).getByRole("combobox", {
+    name: "Closure reason",
+  });
+  await chooseOption(reason, "Authorized activity");
   fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
     target: { value: "Pentest, SEC-41." },
   });

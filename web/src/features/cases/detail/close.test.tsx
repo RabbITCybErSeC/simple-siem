@@ -217,8 +217,9 @@ async function openCloseDialog(): Promise<HTMLElement> {
   return screen.findByRole("dialog", { name: "Close case #312" });
 }
 
-function chooseOption(select: HTMLElement, value: string): void {
-  fireEvent.change(select, { target: { value } });
+async function chooseOption(trigger: HTMLElement, name: string): Promise<void> {
+  fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("option", { name }));
 }
 
 async function fillClosureFields(
@@ -226,9 +227,9 @@ async function fillClosureFields(
   conclusion = "Authorized pentest by RedTeam.",
 ): Promise<void> {
   fireEvent.click(within(dialog).getByRole("radio", { name: "Accepted" }));
-  chooseOption(
+  await chooseOption(
     within(dialog).getByRole("combobox", { name: "Closure reason" }),
-    "AUTHORIZED_ACTIVITY",
+    "Authorized activity",
   );
   fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
     target: { value: conclusion },
@@ -292,6 +293,33 @@ describe("close case dialog", () => {
     expect(closeRequests(api)).toHaveLength(0);
   });
 
+  it("focuses the closure reason when only it is missing", async () => {
+    const { api } = renderClose();
+    const dialog = await openCloseDialog();
+
+    fireEvent.click(within(dialog).getByRole("radio", { name: "Accepted" }));
+    fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
+      target: { value: "Authorized pentest." },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close case" }));
+
+    const reason = within(dialog).getByRole("combobox", {
+      name: "Closure reason",
+    });
+    await waitFor(() => {
+      expect(reason).toHaveFocus();
+    });
+    expect(reason).toHaveAttribute("aria-invalid", "true");
+    const describedBy = reason.getAttribute("aria-describedby");
+    if (describedBy === null) {
+      throw new Error("the closure reason has no described-by id");
+    }
+    expect(document.getElementById(describedBy)).toHaveTextContent(
+      "Choose a closure reason.",
+    );
+    expect(closeRequests(api)).toHaveLength(0);
+  });
+
   it("closes on Cancel without a request and focuses Close case", async () => {
     const { api } = renderClose();
     const dialog = await openCloseDialog();
@@ -352,12 +380,11 @@ describe("close case dialog", () => {
       name: "Closure reason",
     });
 
+    expect(reason).toHaveTextContent("Choose a reason");
+    fireEvent.pointerDown(reason, { button: 0, pointerType: "mouse" });
     expect(
-      within(reason)
-        .getAllByRole("option")
-        .map((option) => option.textContent),
+      (await screen.findAllByRole("option")).map((option) => option.textContent),
     ).toEqual([
-      "Choose a reason",
       "False positive",
       "Benign true positive",
       "Authorized activity",
@@ -367,9 +394,10 @@ describe("close case dialog", () => {
       "Other",
     ]);
     expect(
-      within(reason).queryByRole("option", { name: "Merged" }),
+      screen.queryByRole("option", { name: "Merged" }),
     ).not.toBeInTheDocument();
-    chooseOption(reason, "AUTHORIZED_ACTIVITY");
+    fireEvent.click(screen.getByRole("option", { name: "Authorized activity" }));
+    expect(reason).toHaveTextContent("Authorized activity");
 
     fireEvent.click(within(dialog).getByRole("radio", { name: "Accepted" }));
     fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
@@ -484,35 +512,35 @@ describe("close case dialog", () => {
       throw new Error("the alert rows are missing");
     }
 
-    chooseOption(
+    await chooseOption(
       within(bruteForce).getByRole("combobox", {
         name: "Outcome for Brute force",
       }),
-      "MALICIOUS",
+      "Malicious",
     );
     expect(
       within(bruteForce).getByRole("combobox", {
         name: "Outcome for Brute force",
       }),
-    ).toHaveValue("MALICIOUS");
-    chooseOption(
+    ).toHaveTextContent("Malicious");
+    await chooseOption(
       within(bruteForce).getByRole("combobox", {
         name: "Closure reason for Brute force",
       }),
-      "CONFIRMED_THREAT",
+      "Confirmed threat",
     );
 
-    chooseOption(
+    await chooseOption(
       within(impossibleTravel).getByRole("combobox", {
         name: "Closure reason for Impossible travel",
       }),
-      "DUPLICATE",
+      "Duplicate",
     );
 
     fireEvent.click(within(dialog).getByRole("radio", { name: "Accepted" }));
-    chooseOption(
+    await chooseOption(
       within(dialog).getByRole("combobox", { name: "Closure reason" }),
-      "AUTHORIZED_ACTIVITY",
+      "Authorized activity",
     );
     fireEvent.change(within(dialog).getByLabelText("Conclusion"), {
       target: { value: "Mostly authorized." },
