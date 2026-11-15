@@ -81,6 +81,10 @@ type Filter struct{ EventTypes []udm.EventType }
 // together.
 type Store interface {
 	RegisterDataset(ctx context.Context, transaction *gorm.DB, dataset Dataset) error
+	// WriteBatch writes one batch in the caller's transaction. A caller writes
+	// at most one batch per transaction: ensureDayPartitions takes its own
+	// connection and the dataset advisory lock, so a second batch in the same
+	// transaction would wait on a lock the caller already holds.
 	WriteBatch(ctx context.Context, transaction *gorm.DB, datasetName string, batch Batch) error
 	ReadWindow(ctx context.Context, datasetName string, start, end time.Time, filter Filter) iter.Seq2[Record, error]
 	Watermark(ctx context.Context, datasetName string) (Watermark, error)

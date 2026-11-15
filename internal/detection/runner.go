@@ -22,8 +22,9 @@ var (
 	ErrInvalidWindow     = errors.New("invalid window")
 )
 
-// persistenceTimeout bounds the run and proposal transaction, which runs
-// without the caller's cancellation so a canceled run still leaves its row.
+// persistenceTimeout is the write allowance added to a run's evaluation budget.
+// The run transaction runs without the caller's cancellation, so a canceled
+// run still leaves its row.
 const persistenceTimeout = 5 * time.Second
 
 // inactiveError prints exactly the registry warning while still matching
@@ -82,51 +83,65 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 	if err := runner.checkInputsReady(ctx, manifest, windowEnd); err != nil {
 		return RunResult{}, err
 	}
-	revision, err := runner.nextRevision(ctx, manifest.ID, windowStart, windowEnd)
-	if err != nil {
-		return RunResult{}, err
-	}
 
-	window := Window{
-		Start:    windowStart,
-		End:      windowEnd,
-		Revision: revision,
-		reader:   runner.Store,
-		inputs:   declaredInputs(manifest),
-		budget:   newRowBudget(manifest.Budgets.MaxRows),
-	}
-	startedAt := time.Now().UTC()
-	outcome := evaluate(ctx, manifest, registration.Logic, window)
-
-	result := RunResult{
-		Status:      outcome.status,
-		WindowStart: windowStart,
-		WindowEnd:   windowEnd,
-		Revision:    revision,
-		RowsRead:    window.budget.count(),
-	}
-	if outcome.status == RunStatusOK {
-		result.Proposals = len(outcome.proposals)
-	}
-	if outcome.err != nil {
-		result.Error = outcome.err.Error()
-	}
-
-	run := runRow{
-		DetectionID:      manifest.ID,
-		DetectionVersion: manifest.Version,
-		Status:           string(result.Status),
-		WindowStart:      windowStart,
-		WindowEnd:        windowEnd,
-		Revision:         revision,
-		RowsRead:         result.RowsRead,
-		Proposals:        result.Proposals,
-		Error:            optionalText(result.Error),
-		StartedAt:        startedAt,
-	}
-	persistContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistenceTimeout)
+	// The run transaction takes the window's advisory lock before reading the
+	// revision and holds it through the insert, so concurrent runs of one
+	// detection window are serialised and each gets the next revision. The
+	// evaluation runs inside it so the window and the row share one revision;
+	// the deadline covers a whole evaluation plus the writes, and survives the
+	// caller's cancellation so a canceled run still leaves its row.
+	runDeadline := time.Duration(manifest.Budgets.Timeout) + persistenceTimeout
+	transactionContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), runDeadline)
 	defer cancel()
-	err = runner.Database.WithContext(persistContext).Transaction(func(transaction *gorm.DB) error {
+
+	var result RunResult
+	var run runRow
+	err = runner.Database.WithContext(transactionContext).Transaction(func(transaction *gorm.DB) error {
+		if err := lockWindow(transaction, manifest.ID, windowStart, windowEnd); err != nil {
+			return err
+		}
+		revision, err := nextRevision(transaction, manifest.ID, windowStart, windowEnd)
+		if err != nil {
+			return err
+		}
+
+		window := Window{
+			Start:    windowStart,
+			End:      windowEnd,
+			Revision: revision,
+			reader:   runner.Store,
+			inputs:   declaredInputs(manifest),
+			budget:   newRowBudget(manifest.Budgets.MaxRows),
+		}
+		startedAt := time.Now().UTC()
+		outcome := evaluate(ctx, manifest, registration.Logic, window)
+
+		result = RunResult{
+			Status:      outcome.status,
+			WindowStart: windowStart,
+			WindowEnd:   windowEnd,
+			Revision:    revision,
+			RowsRead:    window.budget.count(),
+		}
+		if outcome.status == RunStatusOK {
+			result.Proposals = len(outcome.proposals)
+		}
+		if outcome.err != nil {
+			result.Error = outcome.err.Error()
+		}
+
+		run = runRow{
+			DetectionID:      manifest.ID,
+			DetectionVersion: manifest.Version,
+			Status:           string(result.Status),
+			WindowStart:      windowStart,
+			WindowEnd:        windowEnd,
+			Revision:         revision,
+			RowsRead:         result.RowsRead,
+			Proposals:        result.Proposals,
+			Error:            dataset.OptionalText(result.Error),
+			StartedAt:        startedAt,
+		}
 		if err := transaction.Create(&run).Error; err != nil {
 			return fmt.Errorf("insert the run record: %w", err)
 		}
@@ -199,10 +214,24 @@ func (runner *Runner) checkInputsReady(ctx context.Context, manifest config.Dete
 		ErrInputNotReady, strings.Join(behind, ", "), formatInstant(windowEnd))
 }
 
+// lockWindow serialises concurrent runs of one detection window. The lock
+// lasts for the run's transaction, so the next run waits and then reads the
+// revision this one committed.
+func lockWindow(transaction *gorm.DB, detectionID string, windowStart, windowEnd time.Time) error {
+	key := detectionID + "|" + windowStart.UTC().Format(time.RFC3339Nano) + "|" + windowEnd.UTC().Format(time.RFC3339Nano)
+	err := transaction.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", key).Error
+	if err != nil {
+		return fmt.Errorf("lock detection %q window [%s, %s): %w",
+			detectionID, formatInstant(windowStart), formatInstant(windowEnd), err)
+	}
+	return nil
+}
+
 // nextRevision is one more than the last revision of this detection window.
-func (runner *Runner) nextRevision(ctx context.Context, detectionID string, windowStart, windowEnd time.Time) (int, error) {
+// It runs in the run's transaction, under the window lock.
+func nextRevision(transaction *gorm.DB, detectionID string, windowStart, windowEnd time.Time) (int, error) {
 	var current int
-	row := runner.Database.WithContext(ctx).
+	row := transaction.
 		Model(&runRow{}).
 		Select("COALESCE(MAX(revision), 0)").
 		Where("detection_id = ? AND window_start = ? AND window_end = ?", detectionID, windowStart, windowEnd).
@@ -212,13 +241,6 @@ func (runner *Runner) nextRevision(ctx context.Context, detectionID string, wind
 			detectionID, formatInstant(windowStart), formatInstant(windowEnd), err)
 	}
 	return current + 1, nil
-}
-
-func optionalText(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
 }
 
 func formatInstant(value time.Time) string {

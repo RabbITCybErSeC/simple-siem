@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +266,50 @@ func TestRunWindowIncrementsRevision(t *testing.T) {
 	}
 	if len(revisions) != 2 || revisions[0] != 1 || revisions[1] != 2 {
 		t.Fatalf("window revisions = %v, want [1 2]", revisions)
+	}
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 2 || runs[0].Revision != 1 || runs[1].Revision != 2 {
+		t.Fatalf("detection_runs = %+v, want revisions 1 and 2", runs)
+	}
+}
+
+func TestRunWindowSerializesConcurrentRuns(t *testing.T) {
+	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) {
+		// Holding inside evaluation widens the gap between the revision read
+		// and the insert, which made the pre-fix collision reliable; the run
+		// lock now serialises the two runs, so this only delays them in turn.
+		time.Sleep(50 * time.Millisecond)
+		return nil, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
+	fixture.markReady(t, "auth_events")
+
+	type outcome struct {
+		result RunResult
+		err    error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	for range 2 {
+		go func() {
+			<-start
+			result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end)
+			outcomes <- outcome{result: result, err: err}
+		}()
+	}
+	close(start)
+
+	revisions := make([]int, 0, 2)
+	for range 2 {
+		outcome := <-outcomes
+		if outcome.err != nil {
+			t.Fatalf("RunWindow() error = %v, want both runs recorded", outcome.err)
+		}
+		revisions = append(revisions, outcome.result.Revision)
+	}
+	slices.Sort(revisions)
+	if !slices.Equal(revisions, []int{1, 2}) {
+		t.Fatalf("result revisions = %v, want [1 2]", revisions)
 	}
 	runs := loadRuns(t, fixture.database)
 	if len(runs) != 2 || runs[0].Revision != 1 || runs[1].Revision != 2 {

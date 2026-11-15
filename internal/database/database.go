@@ -26,6 +26,7 @@ import (
 const (
 	slowQueryThreshold = 200 * time.Millisecond
 	pingTimeout        = 5 * time.Second
+	// shortcut: pool of 20 fits one run per process (each run holds up to three connections); make it configurable above the maximum concurrent runs when the Phase 3 scheduler lands
 	maxOpenConnections = 20
 	maxIdleConnections = 5
 	connectionLifetime = 30 * time.Minute

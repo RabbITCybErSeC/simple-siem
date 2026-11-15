@@ -266,14 +266,14 @@ func eventRowFromRecord(datasetName string, record Record, writtenAt time.Time) 
 		SourceIndex:       record.Key.Index,
 		DocumentID:        record.Key.DocumentID,
 		EventType:         string(record.Event.Metadata.EventType),
-		TargetUser:        nullableString(record.Event.Target.User.UserID),
-		TargetHost:        nullableString(record.Event.Target.Hostname),
+		TargetUser:        OptionalText(record.Event.Target.User.UserID),
+		TargetHost:        OptionalText(record.Event.Target.Hostname),
 		Event:             record.Event,
 		PipelineRunID:     record.RunID,
 		WrittenAt:         writtenAt,
 	}
 	if len(record.Event.Principal.IP) > 0 {
-		row.PrincipalIP = nullableString(record.Event.Principal.IP[0])
+		row.PrincipalIP = OptionalText(record.Event.Principal.IP[0])
 	}
 	return row
 }
@@ -297,14 +297,16 @@ func quarantineRowFromRecord(datasetName, runID string, record QuarantinedRecord
 		DocumentID:        record.Key.DocumentID,
 		Payload:           payload,
 		PayloadTruncated:  truncated,
-		MappingID:         nullableString(record.MappingID),
+		MappingID:         OptionalText(record.MappingID),
 		MappingVersion:    nullableInt(record.MappingVersion),
 		Errors:            problems,
 		PipelineRunID:     runID,
 	}
 }
 
-func nullableString(value string) *string {
+// OptionalText returns nil for an empty string, so an absent value is stored
+// as NULL and omitted from JSON.
+func OptionalText(value string) *string {
 	if value == "" {
 		return nil
 	}

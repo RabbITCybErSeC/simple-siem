@@ -51,11 +51,40 @@ func ValidateFiles(files config.Files) error {
 				pipeline.ID, shape.Step.ID, instance.Type))
 		}
 
-		if _, err := converter.LoadMappings(mappingPaths(files.Directory, shape.Processor.Mappings)); err != nil {
+		mappings, err := converter.LoadMappings(mappingPaths(files.Directory, shape.Processor.Mappings))
+		if err != nil {
 			problems = append(problems, fmt.Errorf("pipeline %q: %w", pipeline.ID, err))
+			continue
+		}
+		if known {
+			problems = append(problems, validateTimeField(pipeline, instance, mappings)...)
 		}
 	}
 	return errors.Join(problems...)
+}
+
+// validateTimeField requires the mapping entry that sets event time to read
+// from the instance's effective time_field. A typo in either makes an
+// event-time source look like an ingest-time source, which silently narrows
+// the run's overlap and drops late events.
+func validateTimeField(pipeline config.Pipeline, instance config.FetcherInstance, mappings []converter.Mapping) []error {
+	var problems []error
+	for _, mapping := range mappings {
+		for _, field := range mapping.Fields {
+			if field.To != "metadata.event_timestamp" {
+				continue
+			}
+			for _, source := range field.From {
+				if source != instance.Defaults.TimeField {
+					problems = append(problems, fmt.Errorf(
+						"pipeline %q: mapping %q: metadata.event_timestamp reads from %q, but the instance's time_field is %q",
+						pipeline.ID, mapping.ID, source, instance.Defaults.TimeField))
+					break
+				}
+			}
+		}
+	}
+	return problems
 }
 
 // phaseOneShape resolves a pipeline to the one fetcher step, converter and
@@ -242,8 +271,12 @@ func (runner *Runner) Run(ctx context.Context, pipelineID string) (RunResult, er
 	if runContext.Err() == nil {
 		fetchStatus, fetchErr = fetcherInstance.Fetch(runContext, request, emit)
 	}
+	// A failed fetch drops its pending partial batch: the watermark stays at
+	// the last committed batch, and the next run's overlap re-reads those
+	// records. Successful and truncated fetches still commit the remainder.
 	var remainderErr error
-	if failedClosed == nil && runContext.Err() == nil && ctx.Err() == nil {
+	if failedClosed == nil && runContext.Err() == nil && ctx.Err() == nil &&
+		fetchStatus.Status != fetcher.StatusFailed {
 		remainderErr = commitPending()
 	}
 
@@ -402,7 +435,7 @@ func (runner *Runner) recordSkipped(ctx context.Context, pipeline config.Pipelin
 			PipelineID:  pipeline.ID,
 			Dataset:     shape.Dataset,
 			Status:      string(StatusSkipped),
-			Error:       optionalText(message),
+			Error:       dataset.OptionalText(message),
 			FetchErrors: []fetchErrorRow{},
 			Warnings:    []string{},
 			FinishedAt:  &finishedAt,
@@ -543,7 +576,7 @@ func (runner *Runner) finishRun(ctx context.Context, result RunResult, fetchFail
 		"truncated":                     result.Truncated,
 		"fetch_errors":                  gorm.Expr("?::jsonb", string(failures)),
 		"warnings":                      gorm.Expr("?::jsonb", string(warnings)),
-		"error":                         optionalText(result.Error),
+		"error":                         dataset.OptionalText(result.Error),
 		"finished_at":                   gorm.Expr("now()"),
 	}
 	if renderedQueryHash != "" {
@@ -678,13 +711,6 @@ func fetchFailureMessage(status fetcher.FetchStatus, fetchErr error) string {
 
 func sanitizedError(err error) string {
 	return strings.ReplaceAll(err.Error(), "\n", " ")
-}
-
-func optionalText(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
 }
 
 // detach returns a context that survives the run ending, bounded by

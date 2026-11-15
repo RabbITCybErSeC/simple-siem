@@ -21,6 +21,9 @@ const failedAttemptsThreshold = 10
 // the logic cannot read the manifest, so the two are kept in step by hand.
 const maxEvidence = 1000
 
+// maxBufferedFailures is the evidence bound: the success needs the last slot.
+const maxBufferedFailures = maxEvidence - 1
+
 //go:embed detection.yaml
 var manifest []byte
 
@@ -31,9 +34,44 @@ var Registration = detection.Registration{Manifest: manifest, Logic: Detection{}
 type Detection struct{}
 
 // attempts accumulates the failures of one account, host, and origin until a
-// success consumes them.
+// success consumes them. Only the latest maxEvidence-1 failures are kept as
+// evidence: the count supplies the summary, so an arbitrarily long burst costs
+// a bounded amount of memory.
 type attempts struct {
-	failures []dataset.Record
+	failureCount int
+	recent       []dataset.Record // ring of the latest failures
+	oldest       int              // index of the oldest entry once recent is full
+}
+
+// recordFailure counts one failure and keeps it as evidence, dropping the
+// oldest kept failure once the ring is full.
+func (current *attempts) recordFailure(record dataset.Record) {
+	if current.recent == nil {
+		current.recent = make([]dataset.Record, 0, maxBufferedFailures)
+	}
+	current.failureCount++
+	if len(current.recent) < maxBufferedFailures {
+		current.recent = append(current.recent, record)
+		return
+	}
+	current.recent[current.oldest] = record
+	current.oldest = (current.oldest + 1) % maxBufferedFailures
+}
+
+// bufferedFailures is the number of failures kept for evidence. The memory
+// bound test reads it; nothing else should depend on the buffer's size.
+func (current *attempts) bufferedFailures() int {
+	return len(current.recent)
+}
+
+// evidenceOf lists the kept failures oldest first, followed by the success.
+func (current *attempts) evidenceOf(success dataset.Record) []detection.Evidence {
+	evidence := make([]detection.Evidence, 0, len(current.recent)+1)
+	for offset := 0; offset < len(current.recent); offset++ {
+		record := current.recent[(current.oldest+offset)%len(current.recent)]
+		evidence = append(evidence, detection.EvidenceOf(record))
+	}
+	return append(evidence, detection.EvidenceOf(success))
 }
 
 // Evaluate reports one proposal per burst of at least ten failed logons
@@ -57,23 +95,23 @@ func (Detection) Evaluate(ctx context.Context, window detection.Window) ([]detec
 
 		action := event.SecurityResult.Action
 		if action == udm.ActionBlock {
-			current.failures = append(current.failures, record)
+			current.recordFailure(record)
 			continue
 		}
 		if action != udm.ActionAllow {
 			continue
 		}
-		if len(current.failures) < failedAttemptsThreshold {
+		if current.failureCount < failedAttemptsThreshold {
 			continue
 		}
-		failedAttempts := len(current.failures)
+		failedAttempts := current.failureCount
 		proposals = append(proposals, detection.Proposal{
 			Subject:  event,
 			Summary:  fmt.Sprintf("%d failed logons, then a success", failedAttempts),
 			Details:  map[string]string{"failed_attempts": strconv.Itoa(failedAttempts)},
-			Evidence: evidenceOf(current.failures, record),
+			Evidence: current.evidenceOf(record),
 		})
-		current.failures = nil // a later burst is a separate proposal
+		*current = attempts{} // a later burst is a separate proposal
 	}
 	return proposals, nil
 }
@@ -84,18 +122,4 @@ func firstIP(origin udm.Noun) string {
 		return ""
 	}
 	return origin.IP[0]
-}
-
-// evidenceOf lists the most recent failures of a burst followed by its
-// success, capped so the proposal fits maxEvidence. The failure count and the
-// summary still carry the real total.
-func evidenceOf(failures []dataset.Record, success dataset.Record) []detection.Evidence {
-	if len(failures) > maxEvidence-1 {
-		failures = failures[len(failures)-(maxEvidence-1):]
-	}
-	evidence := make([]detection.Evidence, 0, len(failures)+1)
-	for _, failure := range failures {
-		evidence = append(evidence, detection.EvidenceOf(failure))
-	}
-	return append(evidence, detection.EvidenceOf(success))
 }

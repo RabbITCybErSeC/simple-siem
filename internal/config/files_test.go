@@ -1408,6 +1408,20 @@ func TestFetcherInstances(t *testing.T) {
 			wantErrors: []string{"defaults.fetch_time_field", "characters"},
 		},
 		{
+			name: "time field with invalid characters",
+			fetchers: `fetchers:
+  elastic-dev:
+    type: elasticsearch
+    addresses: [https://es.example.internal:9200]
+    auth:
+      api_key: ${secret:ELASTIC_DEV_API_KEY}
+    defaults:
+      time_field: "@time stamp"
+    allowed_indexes: [auth-*]
+`,
+			wantErrors: []string{"fetchers.elastic-dev.defaults.time_field", "characters"},
+		},
+		{
 			name: "fetch time field explicitly empty",
 			fetchers: `fetchers:
   elastic-dev:
@@ -2059,6 +2073,13 @@ outputs:
 			name:       "index outside the allowlist",
 			pipeline:   strings.ReplaceAll(minimalPipeline, "index: auth-*", "index: edr-*"),
 			wantErrors: []string{"fetchers[0].inputs.index", "edr-*", "elastic-prod"},
+		},
+		{
+			name:     "no effective index",
+			pipeline: strings.ReplaceAll(minimalPipeline, "      index: auth-*\n", ""),
+			wantErrors: []string{
+				"fetchers[0].inputs.index", `pipeline "auth-events"`, `step "auth"`, "elastic-prod",
+			},
 		},
 		{
 			name:       "step index with a comma",

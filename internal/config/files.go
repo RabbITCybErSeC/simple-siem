@@ -74,7 +74,7 @@ var (
 	variableNamePattern        = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 	versionPattern             = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 	templatePlaceholderPattern = regexp.MustCompile(`^\$\{parameters\.([a-z][a-z0-9_]{0,62})\}$`)
-	fetchTimeFieldPattern      = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,255}$`)
+	timeFieldPattern           = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,255}$`)
 
 	reservedTemplateParameterNames = []string{"start", "end", "index"}
 )
@@ -477,8 +477,12 @@ func validateFetchers(fetchers map[string]FetcherInstance, environment Environme
 			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.max_results",
 				fmt.Sprintf("must be between %d and %d", minFetcherMaxResults, maxFetcherMaxResults)))
 		}
-		if !fetchTimeFieldPattern.MatchString(defaults.FetchTimeField) {
+		if !timeFieldPattern.MatchString(defaults.FetchTimeField) {
 			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.fetch_time_field",
+				"must be 1 to 255 characters from A-Z, a-z, 0-9, _ . @ -"))
+		}
+		if !timeFieldPattern.MatchString(defaults.TimeField) {
+			problems = append(problems, fileError("fetchers.yaml", prefix+"defaults.time_field",
 				"must be 1 to 255 characters from A-Z, a-z, 0-9, _ . @ -"))
 		}
 		if defaults.PageSize < minFetcherPageSize || defaults.PageSize > maxFetcherPageSize {
@@ -820,12 +824,11 @@ func validatePipelineFetchers(pipeline *Pipeline, fetchers map[string]FetcherIns
 			if !validIndexPattern(input.Literal) {
 				problems = append(problems, fileError(pipeline.File, path,
 					fmt.Sprintf("invalid index pattern %q", input.Literal)))
-				continue
 			}
-			if known && !IndexAllowed(input.Literal, instance.AllowedIndexes) {
-				problems = append(problems, fileError(pipeline.File, path,
-					fmt.Sprintf("index %q is not allowed by fetcher instance %q", input.Literal, step.Ref)))
-			}
+		}
+
+		if known {
+			problems = append(problems, validateEffectiveIndex(pipeline, step, prefix, instance)...)
 		}
 
 		if known && instance.Type == fetcherTypeElasticsearch {
@@ -833,6 +836,31 @@ func validatePipelineFetchers(pipeline *Pipeline, fetchers map[string]FetcherIns
 		}
 	}
 	return stepIDs, problems
+}
+
+// validateEffectiveIndex requires the index a fetcher step will query — its
+// index input, else the instance default — to be set and allowed. The runner
+// repeats both checks as a defence.
+func validateEffectiveIndex(pipeline *Pipeline, step *FetcherStep, prefix string, instance FetcherInstance) []error {
+	index := instance.Defaults.Index
+	if input, set := step.Inputs["index"]; set {
+		if input.Variable != "" || !validIndexPattern(input.Literal) {
+			return nil // the input's own error already fails validation
+		}
+		index = input.Literal
+	}
+
+	switch {
+	case index == "":
+		return []error{fileError(pipeline.File, prefix+"inputs.index",
+			fmt.Sprintf("pipeline %q: step %q: fetcher instance %q has no default index and the step sets no index",
+				pipeline.ID, step.ID, step.Ref))}
+	case !IndexAllowed(index, instance.AllowedIndexes):
+		return []error{fileError(pipeline.File, prefix+"inputs.index",
+			fmt.Sprintf("pipeline %q: step %q: index %q is not allowed by fetcher instance %q",
+				pipeline.ID, step.ID, index, step.Ref))}
+	}
+	return nil
 }
 
 func validateStepTemplate(pipeline *Pipeline, step *FetcherStep, prefix string, instance FetcherInstance, templates map[string]QueryTemplate) []error {

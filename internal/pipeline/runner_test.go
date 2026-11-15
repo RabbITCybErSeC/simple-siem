@@ -50,7 +50,14 @@ func phaseOneFiles(t *testing.T) config.Files {
 	return config.Files{
 		Directory: directory,
 		Fetchers: map[string]config.FetcherInstance{
-			"elastic-dev": {ID: "elastic-dev", Type: "elasticsearch"},
+			"elastic-dev": {
+				ID:   "elastic-dev",
+				Type: "elasticsearch",
+				Defaults: config.FetcherDefaults{
+					TimeField:      "@timestamp",
+					FetchTimeField: "event.ingested",
+				},
+			},
 		},
 		Pipelines: []config.Pipeline{{
 			ID: "auth-events",
@@ -156,6 +163,15 @@ fields:
 			},
 			wantErrors: []string{"auth-events", "missing.yaml"},
 		},
+		{
+			name: "time field disagrees with the mapping",
+			mutate: func(t *testing.T, files *config.Files) {
+				instance := files.Fetchers["elastic-dev"]
+				instance.Defaults.TimeField = "@timestmp"
+				files.Fetchers["elastic-dev"] = instance
+			},
+			wantErrors: []string{"auth-events", `mapping "auth"`, "@timestmp", "@timestamp"},
+		},
 	}
 
 	for _, test := range tests {
@@ -182,6 +198,19 @@ fields:
 				}
 			}
 		})
+	}
+}
+
+// TestValidateFilesAcceptsShippedConfig proves the Phase 1 checks accept the
+// config/ directory an operator runs.
+func TestValidateFilesAcceptsShippedConfig(t *testing.T) {
+	files, err := config.LoadFiles(filepath.Join("..", "..", "config"), config.EnvironmentDevelopment,
+		func(string) string { return "shipped-config-secret" })
+	if err != nil {
+		t.Fatalf("LoadFiles(config/) error = %v", err)
+	}
+	if err := ValidateFiles(files); err != nil {
+		t.Fatalf("ValidateFiles(config/) error = %v", err)
 	}
 }
 
@@ -661,13 +690,13 @@ func TestRunBatches(t *testing.T) {
 func TestRunFailedKeepsLastCommittedBatch(t *testing.T) {
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	eventTime := time.Now().UTC().Add(-5 * time.Minute)
-	records := make([]fetcher.SourceRecord, 15)
+	records := make([]fetcher.SourceRecord, 12)
 	for index := range records {
 		records[index] = sourceRecord(fmt.Sprintf("doc-%d", index+1), base.Add(time.Duration(index)*time.Minute),
 			loginPayload(t, eventTime))
 	}
-	pages := [][]fetcher.SourceRecord{records[0:5], records[5:10], records[10:15]}
-	fake := &scriptedFetcher{pages: pages, failAfterPage: 2}
+	pages := [][]fetcher.SourceRecord{records[0:5], records[5:10], records[10:12]}
+	fake := &scriptedFetcher{pages: pages, failAfterPage: 3}
 	runner, database := newRunner(t, fake, func(files *config.Files) {
 		files.System.Runner.BatchSize = 5
 	})
