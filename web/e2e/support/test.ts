@@ -1,5 +1,5 @@
 import { expect, test as base } from "@playwright/test";
-import type { ConsoleMessage, Page } from "@playwright/test";
+import type { ConsoleMessage, Locator, Page } from "@playwright/test";
 import { FixtureApi } from "./api.ts";
 
 // Must match SIMPLE_SIEM_PUBLIC_URL=http://127.0.0.1:8090 in the Makefile
@@ -40,6 +40,16 @@ export async function signIn(
     data: { email: user.email, password: user.password },
   });
   expect(response.status(), `sign in as ${user.email}`).toBe(200);
+}
+
+// Signs in and settles the default queue, so the shell, the tabs, and the
+// table are rendered before a state is measured.
+export async function openCases(page: Page): Promise<Locator> {
+  await signIn(page);
+  await page.goto("/cases");
+  const table = page.getByRole("table", { name: "Cases: Open, Mine" });
+  await expect(table.locator("tbody tr")).toHaveCount(50);
+  return table;
 }
 
 export const BASE_CONTENT_SECURITY_POLICY =

@@ -45,8 +45,8 @@ const pairsAt3 = [["destructive", "background"]] as const;
 // The vendored controls draw the ring at half alpha until the unlayered rule
 // in index.css raises it to the full token.
 const FULL_ALPHA_RING_RULE =
-  '[data-slot]:focus-visible:not([aria-invalid="true"])';
-const ringAlpha = stylesheet.includes(FULL_ALPHA_RING_RULE) ? 1 : 0.5;
+  /\[data-slot\]:focus-visible:not\(\[aria-invalid="true"\]\)\s*\{[^}]*--tw-ring-color:\s*var\(--ring\)/;
+const ringAlpha = FULL_ALPHA_RING_RULE.test(stylesheet) ? 1 : 0.5;
 
 const cases = (["light", "dark"] as const).flatMap((theme) => [
   ...pairsAt45.map(([foreground, background]) => ({

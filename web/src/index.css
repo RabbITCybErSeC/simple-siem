@@ -168,9 +168,12 @@
 
 @utility segmented-item {
   @apply inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors outline-none hover:text-foreground;
-  @apply aria-checked:bg-background aria-checked:text-foreground aria-checked:shadow-sm dark:aria-checked:bg-input/50;
-  @apply has-checked:bg-background has-checked:text-foreground has-checked:shadow-sm dark:has-checked:bg-input/50;
-  @apply has-aria-checked:bg-background has-aria-checked:text-foreground has-aria-checked:shadow-sm dark:has-aria-checked:bg-input/50;
+  &:is([aria-checked="true"], :has(:checked), :has([aria-checked="true"])) {
+    @apply bg-background text-foreground shadow-sm;
+    .dark & {
+      @apply bg-input/50;
+    }
+  }
   @apply focus-visible:ring-3 focus-visible:ring-ring;
   @apply has-focus-visible:ring-3 has-focus-visible:ring-ring;
 }

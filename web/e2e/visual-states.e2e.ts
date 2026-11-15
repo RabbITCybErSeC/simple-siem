@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { expect, signIn, test } from "./support/test.ts";
+import { expect, openCases, signIn, test } from "./support/test.ts";
 
 // The test tsconfig has Node types only, like auth.e2e.ts: a page callback
 // reaches the browser's globals through one cast.
@@ -32,14 +32,11 @@ interface BrowserGlobals {
   getComputedStyle(element: unknown): BrowserStyle;
 }
 
-// Every test signs in and settles the default queue, so the shell, the tabs,
-// and the table are all rendered before a state is measured.
-async function openCases(page: Page): Promise<Locator> {
+// Tests that do not measure the queue table only need the shell and heading.
+async function openShell(page: Page): Promise<void> {
   await signIn(page);
   await page.goto("/cases");
-  const table = page.getByRole("table", { name: "Cases: Open, Mine" });
-  await expect(table.locator("tbody tr")).toHaveCount(50);
-  return table;
+  await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
 }
 
 function readComputedProperty(
@@ -99,10 +96,10 @@ test("the queue and detail tab lists sit above their panels", async ({
     .locator('[data-slot="tabs"]')
     .filter({ has: page.getByRole("tablist", { name: "Status" }) });
   await expect(queueTabs, "the queue has one Tabs root").toHaveCount(1);
-  expect(
-    await readComputedProperty(queueTabs, "flex-direction"),
+  await expect(
+    queueTabs,
     "the Status tab list is a column, so it sits above the case table",
-  ).toBe("column");
+  ).toHaveCSS("flex-direction", "column");
 
   await page.goto("/cases/7?layout=full");
   await expect(
@@ -113,10 +110,10 @@ test("the queue and detail tab lists sit above their panels", async ({
     .locator('[data-slot="tabs"]')
     .filter({ has: page.getByRole("tablist", { name: "Case sections" }) });
   await expect(sectionTabs, "the detail has one Tabs root").toHaveCount(1);
-  expect(
-    await readComputedProperty(sectionTabs, "flex-direction"),
+  await expect(
+    sectionTabs,
     "the section tab list is a column, so it sits above its panel",
-  ).toBe("column");
+  ).toHaveCSS("flex-direction", "column");
 });
 
 test("the selected Status tab has a background of its own", async ({ page }) => {
@@ -149,7 +146,7 @@ test("the selected Status tab has a background of its own", async ({ page }) => 
 test("exactly one palette option is highlighted and ArrowDown moves it", async ({
   page,
 }) => {
-  await openCases(page);
+  await openShell(page);
 
   await page.keyboard.press("Control+k");
   await expect(page.getByPlaceholder("Type a command…")).toBeVisible();
@@ -201,18 +198,16 @@ test("a checked row checkbox is filled with the primary colour", async ({
   });
 
   // The checkbox transitions its colour, so wait for the settled value.
-  await expect
-    .poll(() => readComputedProperty(checkbox, "background-color"), {
-      message:
-        "the checked row checkbox background settles on the --primary colour",
-    })
-    .toBe(expected);
+  await expect(
+    checkbox,
+    "the checked row checkbox background settles on the --primary colour",
+  ).toHaveCSS("background-color", expected);
 });
 
 test("the shortcuts dialog content runs its open animation", async ({
   page,
 }) => {
-  await openCases(page);
+  await openShell(page);
 
   await page.keyboard.press("?");
   const content = page.locator('[data-slot="dialog-content"]');
@@ -232,7 +227,7 @@ test("the shortcuts dialog content runs its open animation", async ({
 test("the built stylesheet maps Radix state and orientation attributes", async ({
   page,
 }) => {
-  await openCases(page);
+  await openShell(page);
 
   const stylesheet = page.locator('link[rel="stylesheet"]');
   await expect(stylesheet, "the page links one stylesheet").toHaveCount(1);
@@ -300,16 +295,20 @@ test("the Alerts table region takes keyboard focus and scrolls sideways", async 
 test("a keyboard-focused button draws its ring at full alpha", async ({
   page,
 }) => {
-  await openCases(page);
+  await openShell(page);
 
   const focusedButton = page.locator('button[data-slot="button"]:focus');
-  for (let index = 0; index < 10; index += 1) {
-    if ((await focusedButton.count()) > 0) {
-      break;
-    }
-    await page.keyboard.press("Tab");
-  }
-  await expect(focusedButton, "a button takes keyboard focus").toHaveCount(1);
+  await expect
+    .poll(
+      async () => {
+        if ((await focusedButton.count()) === 0) {
+          await page.keyboard.press("Tab");
+        }
+        return focusedButton.count();
+      },
+      { message: "a button takes keyboard focus" },
+    )
+    .toBe(1);
 
   // The ring transitions in, so wait until it has its drawn 3px spread.
   await expect
@@ -318,12 +317,7 @@ test("a keyboard-focused button draws its ring at full alpha", async ({
         ringAlphaFromShadow(
           await readComputedProperty(focusedButton, "box-shadow"),
         ),
-      { message: "the focused button ring finishes its transition" },
+      { message: "the focused button ring draws at full alpha" },
     )
-    .not.toBeUndefined();
-
-  const alpha = ringAlphaFromShadow(
-    await readComputedProperty(focusedButton, "box-shadow"),
-  );
-  expect(alpha, `focused button ring alpha is ${alpha}, expected 1`).toBe(1);
+    .toBe(1);
 });
