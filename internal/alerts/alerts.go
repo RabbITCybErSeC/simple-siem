@@ -76,11 +76,22 @@ func shouldMerge(policy Policy, open alertRow, first, last time.Time) bool {
 	case ModeUnique:
 		return true
 	case ModeMerge:
-		gap := first.Sub(open.LastEventAt)
-		if gap < 0 {
-			gap = 0
+		var gap time.Duration
+		switch {
+		case first.After(open.LastEventAt):
+			gap = first.Sub(open.LastEventAt)
+		case last.Before(open.FirstEventAt):
+			gap = open.FirstEventAt.Sub(last)
 		}
-		return gap <= policy.CoalesceWindow && last.Sub(open.FirstEventAt) <= policy.MaxAlertSpan
+		spanStart := first
+		if open.FirstEventAt.Before(spanStart) {
+			spanStart = open.FirstEventAt
+		}
+		spanEnd := last
+		if open.LastEventAt.After(spanEnd) {
+			spanEnd = open.LastEventAt
+		}
+		return gap <= policy.CoalesceWindow && spanEnd.Sub(spanStart) <= policy.MaxAlertSpan
 	default:
 		return false
 	}
@@ -298,10 +309,15 @@ func (service *Service) create(ctx context.Context, tx *gorm.DB, proposal Propos
 // merge adds evidence to an open alert, records one occurrence, and widens
 // the alert's range and counts.
 func (service *Service) merge(ctx context.Context, tx *gorm.DB, proposal Proposal, open alertRow, newEvidence []hashedEvidence, first, last time.Time) (Outcome, error) {
-	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(evidenceRows(open.ID, newEvidence)).Error; err != nil {
-		return Outcome{}, fmt.Errorf("insert alert evidence: %w", err)
+	result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(evidenceRows(open.ID, newEvidence))
+	if result.Error != nil {
+		return Outcome{}, fmt.Errorf("insert alert evidence: %w", result.Error)
 	}
-	if err := insertOccurrence(tx, open.ID, proposal.DetectionRunID, len(newEvidence), first, last); err != nil {
+	inserted := int(result.RowsAffected)
+	if inserted == 0 {
+		return Outcome{Action: ActionNoop}, nil
+	}
+	if err := insertOccurrence(tx, open.ID, proposal.DetectionRunID, inserted, first, last); err != nil {
 		return Outcome{}, err
 	}
 	row := tx.Raw(`
@@ -314,17 +330,17 @@ func (service *Service) merge(ctx context.Context, tx *gorm.DB, proposal Proposa
 		    version = version + 1
 		WHERE id = ?
 		RETURNING last_event_at`,
-		first, last, len(newEvidence), open.ID).Row()
+		first, last, inserted, open.ID).Row()
 	var mergedLastEventAt time.Time
 	if err := row.Scan(&mergedLastEventAt); err != nil {
 		return Outcome{}, fmt.Errorf("merge alert %q: %w", open.ID, err)
 	}
 	if service.Hooks != nil {
-		if err := service.Hooks.EvidenceAdded(ctx, tx, open.ID, mergedLastEventAt, len(newEvidence)); err != nil {
+		if err := service.Hooks.EvidenceAdded(ctx, tx, open.ID, mergedLastEventAt, inserted); err != nil {
 			return Outcome{}, fmt.Errorf("case hook: %w", err)
 		}
 	}
-	return Outcome{Action: ActionMerged, AlertID: open.ID, NewEvidence: len(newEvidence)}, nil
+	return Outcome{Action: ActionMerged, AlertID: open.ID, NewEvidence: inserted}, nil
 }
 
 // insertOccurrence records one run's evidence contribution to an alert.

@@ -1,10 +1,12 @@
 package detection
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,6 +54,12 @@ type appliedProposals struct {
 	created      int
 	merged       int
 	deduplicated int
+}
+
+// identifiedProposal pairs a proposal with its computed identity.
+type identifiedProposal struct {
+	proposal Proposal
+	identity Identity
 }
 
 // Runner evaluates one detection window and records the run and its
@@ -175,8 +183,12 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 			return fmt.Errorf("read the detection status: %w", err)
 		}
 		mode := RunModeShadow
-		if status == alerts.RuntimeStatusEnabled && !options.Shadow && runner.Alerts != nil {
-			mode = RunModeEnabled
+		if status == alerts.RuntimeStatusEnabled && !options.Shadow {
+			if runner.Alerts != nil {
+				mode = RunModeEnabled
+			} else {
+				runner.Logger.Warn("detection is ENABLED but the runner has no alert service; storing proposals", "detection", manifest.ID)
+			}
 		}
 
 		storedProposals := outcome.proposals
@@ -216,7 +228,9 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 	if err != nil {
 		if errors.Is(err, errApplyAlerts) {
 			runner.Logger.Error("apply alerts", "detection", manifest.ID, "error", err)
-			return runner.recordApplyFailure(transactionContext, manifest, windowStart, windowEnd, startedAt, result.RowsRead)
+			failureContext, cancelFailure := context.WithTimeout(context.WithoutCancel(ctx), persistenceTimeout)
+			defer cancelFailure()
+			return runner.recordApplyFailure(failureContext, manifest, windowStart, windowEnd, startedAt, result.RowsRead)
 		}
 		return RunResult{}, fmt.Errorf("detection %q: %w", manifest.ID, err)
 	}
@@ -224,9 +238,9 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 	return result, nil
 }
 
-// applyEnabledProposals applies proposals in order. After a guardrail trip it
-// returns the proposals that still need to be stored; without one it returns
-// none.
+// applyEnabledProposals applies proposals in ascending identity-hash order,
+// so concurrent runs take the same locks in the same order. After a guardrail
+// trip it returns the proposals not yet applied, in that sorted order.
 func (runner *Runner) applyEnabledProposals(ctx context.Context, transaction *gorm.DB,
 	manifest config.DetectionManifest, runID string, proposals []Proposal) (appliedProposals, error) {
 	policy := alerts.Policy{
@@ -234,14 +248,22 @@ func (runner *Runner) applyEnabledProposals(ctx context.Context, transaction *go
 		CoalesceWindow: time.Duration(manifest.Alerting.CoalesceWindow),
 		MaxAlertSpan:   time.Duration(manifest.Alerting.MaxAlertSpan),
 	}
-	var applied appliedProposals
+	identified := make([]identifiedProposal, len(proposals))
 	for index, proposal := range proposals {
 		identity, err := ComputeIdentity(manifest.ID, manifest.Alerting, proposal.Subject)
 		if err != nil {
 			return appliedProposals{}, err
 		}
+		identified[index] = identifiedProposal{proposal: proposal, identity: identity}
+	}
+	slices.SortStableFunc(identified, func(left, right identifiedProposal) int {
+		return cmp.Compare(left.identity.Hash, right.identity.Hash)
+	})
+
+	var applied appliedProposals
+	for index, item := range identified {
 		outcome, err := runner.Alerts.Apply(
-			ctx, transaction, policy, alertProposal(manifest, runID, identity, proposal))
+			ctx, transaction, policy, alertProposal(manifest, runID, item.identity, item.proposal))
 		if err != nil {
 			return appliedProposals{}, fmt.Errorf("%w: %w", errApplyAlerts, err)
 		}
@@ -254,7 +276,10 @@ func (runner *Runner) applyEnabledProposals(ctx context.Context, transaction *go
 			applied.deduplicated++
 		}
 		if outcome.GuardrailTripped {
-			applied.stored = proposals[index+1:]
+			applied.stored = make([]Proposal, 0, len(identified)-index-1)
+			for _, remaining := range identified[index+1:] {
+				applied.stored = append(applied.stored, remaining.proposal)
+			}
 			break
 		}
 	}

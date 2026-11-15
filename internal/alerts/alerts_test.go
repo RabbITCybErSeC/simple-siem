@@ -1046,3 +1046,134 @@ func storedOutboxEvents(t *testing.T, db *gorm.DB) []outboxEventRow {
 	}
 	return rows
 }
+
+func TestApplySplitsBackfillBeforeSpan(t *testing.T) {
+	db := databasetest.New(t)
+	runID := insertRun(t, db, testDetectionID)
+	service := &Service{}
+	policy := Policy{Mode: ModeMerge, CoalesceWindow: 15 * time.Minute, MaxAlertSpan: time.Hour}
+
+	created := applyProposal(t, db, service, policy,
+		newProposal(runID, testEventTime, testEventTime.Add(30*time.Minute)))
+	if created.Action != ActionCreated {
+		t.Fatalf("first action = %q, want CREATED", created.Action)
+	}
+
+	backfill := applyProposal(t, db, service, policy,
+		newProposal(runID, testEventTime.Add(-2*time.Hour), testEventTime.Add(-115*time.Minute)))
+	if backfill.Action != ActionCreated {
+		t.Fatalf("backfill action = %q, want CREATED (a split)", backfill.Action)
+	}
+	oldAlert := loadAlert(t, db, created.AlertID)
+	if oldAlert.Coalescing {
+		t.Error("old alert coalescing = true, want false")
+	}
+	if oldAlert.Status != "OPEN" {
+		t.Errorf("old alert status = %q, want OPEN", oldAlert.Status)
+	}
+	newAlert := loadAlert(t, db, backfill.AlertID)
+	if newAlert.PreviousAlertID == nil || *newAlert.PreviousAlertID != created.AlertID {
+		t.Errorf("backfill previous id = %v, want %q", newAlert.PreviousAlertID, created.AlertID)
+	}
+	if got := countRows(t, db, &alertRow{}); got != 2 {
+		t.Errorf("alerts = %d, want 2", got)
+	}
+}
+
+func TestApplyMergesNearBackfill(t *testing.T) {
+	db := databasetest.New(t)
+	runID := insertRun(t, db, testDetectionID)
+	service := &Service{}
+	policy := Policy{Mode: ModeMerge, CoalesceWindow: 15 * time.Minute, MaxAlertSpan: time.Hour}
+
+	created := applyProposal(t, db, service, policy,
+		newProposal(runID, testEventTime, testEventTime.Add(30*time.Minute)))
+	merged := applyProposal(t, db, service, policy, newProposal(runID, testEventTime.Add(-10*time.Minute)))
+	if merged.Action != ActionMerged {
+		t.Fatalf("near backfill action = %q, want MERGED", merged.Action)
+	}
+	alert := loadAlert(t, db, created.AlertID)
+	if !alert.FirstEventAt.UTC().Equal(testEventTime.Add(-10 * time.Minute).UTC()) {
+		t.Errorf("first event at = %v, want %v", alert.FirstEventAt, testEventTime.Add(-10*time.Minute))
+	}
+	if !alert.LastEventAt.UTC().Equal(testEventTime.Add(30 * time.Minute).UTC()) {
+		t.Errorf("last event at = %v, want %v", alert.LastEventAt, testEventTime.Add(30*time.Minute))
+	}
+}
+
+func TestApplyMergeCountsInsertedEvidence(t *testing.T) {
+	db := databasetest.New(t)
+	runID := insertRun(t, db, testDetectionID)
+	service := &Service{}
+	policy := Policy{Mode: ModeUnique, CoalesceWindow: 2 * time.Hour, MaxAlertSpan: time.Hour}
+
+	first := newProposal(runID, testEventTime)
+	created := applyProposal(t, db, service, policy, first)
+	if created.Action != ActionCreated {
+		t.Fatalf("first action = %q, want CREATED", created.Action)
+	}
+
+	later := testEventTime.Add(4 * time.Hour)
+	proposal := newProposal(runID, later)
+	proposal.Evidence = []Evidence{
+		{SourceKey: first.Evidence[0].SourceKey, EventTime: later},
+		{SourceKey: dataset.SourceKey{FetcherInstanceID: "fetcher-1", Index: "auth-*", DocumentID: "fresh"}, EventTime: later},
+	}
+	outcome := applyProposal(t, db, service, policy, proposal)
+	if outcome.Action != ActionMerged {
+		t.Fatalf("merge action = %q, want MERGED", outcome.Action)
+	}
+	if outcome.NewEvidence != 1 {
+		t.Errorf("new evidence = %d, want the one row actually inserted", outcome.NewEvidence)
+	}
+	alert := loadAlert(t, db, created.AlertID)
+	if alert.EvidenceCount != 2 {
+		t.Errorf("evidence count = %d, want 2", alert.EvidenceCount)
+	}
+	if got := countRows(t, db, &evidenceRow{}); got != 2 {
+		t.Errorf("evidence rows = %d, want 2", got)
+	}
+	occurrences := loadOccurrences(t, db, created.AlertID)
+	if len(occurrences) != 2 {
+		t.Fatalf("occurrences = %d, want 2", len(occurrences))
+	}
+	if occurrences[1].NewEvidenceCount != 1 {
+		t.Errorf("occurrence new evidence = %d, want 1", occurrences[1].NewEvidenceCount)
+	}
+}
+
+func TestApplyMergeWithOnlyConflictsIsNoop(t *testing.T) {
+	db := databasetest.New(t)
+	runID := insertRun(t, db, testDetectionID)
+	hook := &recordingHook{}
+	service := &Service{Hooks: hook}
+	policy := Policy{Mode: ModeUnique, CoalesceWindow: 2 * time.Hour, MaxAlertSpan: time.Hour}
+
+	first := newProposal(runID, testEventTime)
+	created := applyProposal(t, db, service, policy, first)
+	before := loadAlert(t, db, created.AlertID)
+	occurrencesBefore := len(loadOccurrences(t, db, created.AlertID))
+
+	later := testEventTime.Add(4 * time.Hour)
+	conflict := newProposal(runID, later)
+	conflict.Evidence = []Evidence{{SourceKey: first.Evidence[0].SourceKey, EventTime: later}}
+	outcome := applyProposal(t, db, service, policy, conflict)
+	if outcome.Action != ActionNoop {
+		t.Fatalf("action = %q, want NOOP when the insert added no evidence", outcome.Action)
+	}
+	if outcome.NewEvidence != 0 {
+		t.Errorf("new evidence = %d, want 0", outcome.NewEvidence)
+	}
+	after := loadAlert(t, db, created.AlertID)
+	if after.EvidenceCount != before.EvidenceCount || after.OccurrenceCount != before.OccurrenceCount || after.Version != before.Version {
+		t.Errorf("alert after conflict = evidence %d, occurrences %d, version %d; want %d, %d, %d",
+			after.EvidenceCount, after.OccurrenceCount, after.Version,
+			before.EvidenceCount, before.OccurrenceCount, before.Version)
+	}
+	if got := len(loadOccurrences(t, db, created.AlertID)); got != occurrencesBefore {
+		t.Errorf("occurrences = %d, want %d", got, occurrencesBefore)
+	}
+	if len(hook.evidence) != 0 {
+		t.Errorf("EvidenceAdded calls = %d, want 0", len(hook.evidence))
+	}
+}

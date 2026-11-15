@@ -68,6 +68,20 @@ func (hook failingHook) EvidenceAdded(context.Context, *gorm.DB, string, time.Ti
 	return nil
 }
 
+// recordingHook records created alerts in call order.
+type recordingHook struct {
+	created []alerts.NewAlert
+}
+
+func (hook *recordingHook) AlertCreated(_ context.Context, _ *gorm.DB, alert alerts.NewAlert) (alerts.CaseOutcome, error) {
+	hook.created = append(hook.created, alert)
+	return alerts.CaseOutcome{}, nil
+}
+
+func (hook *recordingHook) EvidenceAdded(context.Context, *gorm.DB, string, time.Time, int) error {
+	return nil
+}
+
 func newRunnerFixture(t *testing.T, logic Detection, files config.Files, edits ...[2]string) *runnerFixture {
 	t.Helper()
 	database := databasetest.New(t)
@@ -1207,5 +1221,98 @@ func TestRunWindowUsesRegisteredRuntimeStatus(t *testing.T) {
 	}
 	if status, version := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "SHADOW" || version != 1 {
 		t.Errorf("runtime status/version = %q/%d, want SHADOW/1", status, version)
+	}
+}
+
+// blockingHook keeps AlertCreated inside the transaction until its context ends.
+type blockingHook struct{}
+
+func (blockingHook) AlertCreated(ctx context.Context, _ *gorm.DB, _ alerts.NewAlert) (alerts.CaseOutcome, error) {
+	<-ctx.Done()
+	return alerts.CaseOutcome{}, ctx.Err()
+}
+
+func (blockingHook) EvidenceAdded(context.Context, *gorm.DB, string, time.Time, int) error {
+	return nil
+}
+
+func TestRunWindowRecordsApplyFailureAfterDeadline(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute))}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"),
+		enableDetection, [2]string{"timeout: 30s", "timeout: 1s"})
+	fixture.runner.Alerts.Hooks = blockingHook{}
+	fixture.markReady(t, "auth_events")
+
+	result, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want the failure recorded", err)
+	}
+	if result.Status != RunStatusFailed || result.Error != "apply alerts failed" {
+		t.Fatalf("RunWindow() result = %+v, want FAILED with apply alerts failed", result)
+	}
+	if result.RunID == "" {
+		t.Error("result run id is empty, want the FAILED row")
+	}
+	runs := loadRuns(t, fixture.database)
+	if len(runs) != 1 {
+		t.Fatalf("detection_runs rows = %d, want exactly 1", len(runs))
+	}
+	if runs[0].Status != string(RunStatusFailed) || runs[0].Mode != string(RunModeShadow) {
+		t.Errorf("run row = %+v, want FAILED and SHADOW", runs[0])
+	}
+	if runs[0].Error == nil || *runs[0].Error != "apply alerts failed" {
+		t.Errorf("run row error = %v, want apply alerts failed", runs[0].Error)
+	}
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 0 {
+		t.Errorf("alerts = %d, want 0", got)
+	}
+}
+
+func TestRunWindowAppliesProposalsInIdentityHashOrder(t *testing.T) {
+	hook := &recordingHook{}
+	var reverse bool
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		alice := proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute))
+		bob := proposalAt("bob", "dc01", "bob-1", window.Start.Add(2*time.Minute))
+		if reverse {
+			return []Proposal{bob, alice}, nil
+		}
+		return []Proposal{alice, bob}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.runner.Alerts.Hooks = hook
+	fixture.markReady(t, "auth_events")
+
+	aliceIdentity, err := ComputeIdentity(fixture.manifest.ID, fixture.manifest.Alerting, identitySubject("alice", "web01", ""))
+	if err != nil {
+		t.Fatalf("compute the alice identity: %v", err)
+	}
+	bobIdentity, err := ComputeIdentity(fixture.manifest.ID, fixture.manifest.Alerting, identitySubject("bob", "dc01", ""))
+	if err != nil {
+		t.Fatalf("compute the bob identity: %v", err)
+	}
+	// Hand the runner the descending order, so only a stable sort makes the
+	// hook see ascending hashes.
+	reverse = aliceIdentity.Hash < bobIdentity.Hash
+
+	result, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("RunWindow() error = %v, want nil", err)
+	}
+	if result.AlertsCreated != 2 {
+		t.Fatalf("alerts created = %d, want 2", result.AlertsCreated)
+	}
+	if len(hook.created) != 2 {
+		t.Fatalf("AlertCreated calls = %d, want 2", len(hook.created))
+	}
+	smaller, larger := aliceIdentity.Hash, bobIdentity.Hash
+	if smaller > larger {
+		smaller, larger = larger, smaller
+	}
+	if hook.created[0].IdentityHash != smaller || hook.created[1].IdentityHash != larger {
+		t.Errorf("hook order = %q, %q; want ascending %q, %q",
+			hook.created[0].IdentityHash, hook.created[1].IdentityHash, smaller, larger)
 	}
 }
