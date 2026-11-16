@@ -210,7 +210,7 @@ lint: network toolchain web/node_modules
 # SHA pins stop a moved tag from changing what CI runs.
 	$(RUN) $(TOOLCHAIN_IMAGE) sh -c 'govulncheck ./... && actionlint && { \
 		quote=$$(printf "\047"); \
-		extract="s/^([^:]+:[0-9]+).*[^[:alnum:]_]uses[^:[:space:]]*[[:space:]]*:[[:space:]]*[$${quote}\"]?([^[:space:],}$${quote}\"]*).*/\\1:\\2/p"; \
+		extract="s/^([^:]+:[0-9]+).*[^[:alnum:]_]uses[$${quote}\"]?[[:space:]]*:[[:space:]]*[$${quote}\"]?([^[:space:],}$${quote}\"]*).*/\\1:\\2/p"; \
 		allowed=":(\\./[^[:space:]]*|docker://[^[:space:]]+@sha256:[0-9a-f]{64}|[^@[:space:]]+@[0-9a-f]{40})$$"; \
 		check_pins() { \
 			sed -nE "$$extract" | grep -vE "$$allowed" | sed -E "s/^([^:]+:[0-9]+):.*/\\1/"; \
@@ -241,7 +241,8 @@ lint: network toolchain web/node_modules
 			"- {uses: \"actions/checkout@1111111111111111111111111111111111111111\"}" \
 			"uses: ./.github/actions/setup" \
 			"uses: docker://alpine@sha256:1111111111111111111111111111111111111111111111111111111111111111" \
-			"uses: actions/checkout@1111111111111111111111111111111111111111 # v4"); \
+			"uses: actions/checkout@1111111111111111111111111111111111111111 # v4" \
+			"uses_count: 3"); \
 		check_fixture "$$unpinned_fixture" unpinned; \
 		check_fixture "$$pinned_fixture" pinned; \
 		unpinned=$$(grep -rnH --include="*.yml" --include="*.yaml" "" .github | check_pins); \
