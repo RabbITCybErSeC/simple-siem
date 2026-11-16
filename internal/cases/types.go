@@ -51,12 +51,12 @@ const (
 
 // Limits of the case reads. Group 3 validates query strings against them.
 const (
-	DefaultListLimit   = 50
-	MaxListLimit       = 200
-	MaxFilterAssignees = 50
-	MaxQueryRunes      = 200
-	MaxCursorBytes     = 512
-	CountsCap          = 1000
+	DefaultListLimit = 50
+	MaxListLimit     = 200
+	MaxFilterValues  = 50
+	MaxQueryRunes    = 200
+	MaxCursorBytes   = 512
+	CountsCap        = 1000
 )
 
 const (

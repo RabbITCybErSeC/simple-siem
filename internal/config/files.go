@@ -79,6 +79,11 @@ var (
 	reservedTemplateParameterNames = []string{"start", "end", "index"}
 )
 
+// ValidDetectionID reports whether id is a valid detection manifest id.
+func ValidDetectionID(id string) bool {
+	return identifierPattern.MatchString(id)
+}
+
 // LoadFiles loads and validates the file configuration in directory. Every
 // problem is returned joined, and the Files value is zero when any exists.
 func LoadFiles(directory string, environment Environment, getenv func(string) string) (Files, error) {

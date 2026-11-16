@@ -18,6 +18,7 @@ import (
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/alerts"
 	"github.com/RabbITCybErSeC/simple-siem/internal/audit"
+	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/outbox"
 	"gorm.io/gorm"
 )
@@ -128,8 +129,10 @@ func (service *Service) EvidenceAdded(ctx context.Context, tx *gorm.DB, alertID 
 	err := database.Raw(`
 		UPDATE cases
 		SET last_event_at = greatest(cases.last_event_at, ?),
+		    first_event_at = least(cases.first_event_at, alerts.first_event_at),
 		    last_activity_at = now(), updated_at = now(), version = cases.version + 1
 		FROM case_alerts
+		JOIN alerts ON alerts.id = case_alerts.alert_id
 		WHERE case_alerts.case_id = cases.id AND case_alerts.alert_id = ?
 		  AND cases.status <> 'CLOSED'
 		RETURNING cases.id::text AS id, cases.case_number`, lastEventAt, alertID).Scan(&updated).Error
@@ -284,10 +287,6 @@ var (
 	validOutcomes = map[string]struct{}{"MALICIOUS": {}, "ACCEPTED": {}}
 )
 
-// detectionPattern is the manifest id pattern, declared here because
-// internal/config keeps its copy unexported.
-var detectionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-
 // offsetPattern matches the relative-time grammar of the console.
 var offsetPattern = regexp.MustCompile(`^now-([1-9]\d*)([mhdw])$`)
 
@@ -343,8 +342,8 @@ const selectCaseSummary = `
 	LEFT JOIN users AS assignee ON assignee.id = cases.assignee_user_id`
 
 // ParseTime resolves a contract time expression against now. Accepted forms
-// are now, now-<n><m|h|d|w> with a positive count, now/d, now/w, and an RFC
-// 3339 UTC time. Anything else is an error.
+// are now, now-<n><m|h|d|w> with a positive count, now/d, now/w, and any RFC
+// 3339 time whose UTC offset is zero. Anything else is an error.
 func ParseTime(value string, now time.Time) (time.Time, error) {
 	now = now.UTC()
 	switch value {
@@ -371,14 +370,14 @@ func ParseTime(value string, now time.Time) (time.Time, error) {
 		return now.Add(-time.Duration(count) * unit), nil
 	}
 
-	if strings.HasSuffix(value, "Z") {
-		parsed, err := time.Parse(time.RFC3339, value)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("time %q is not RFC 3339 UTC", value)
-		}
-		return parsed.UTC(), nil
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("time %q is not a supported expression", value)
 	}
-	return time.Time{}, fmt.Errorf("time %q is not a supported expression", value)
+	if _, offset := parsed.Zone(); offset != 0 {
+		return time.Time{}, fmt.Errorf("time %q must be UTC (Z or +00:00)", value)
+	}
+	return parsed.UTC(), nil
 }
 
 // startOfUTCDay is midnight of now's UTC day.
@@ -406,6 +405,29 @@ func ValidateListFilter(filter ListFilter) error {
 
 // validateFilterValues checks every filter value every case read accepts.
 func validateFilterValues(filter ListFilter) error {
+	lists := []struct {
+		parameter string
+		values    []string
+	}{
+		{"status", filter.Statuses},
+		{"assignee", filter.AssigneeIDs},
+		{"severity", filter.Severities},
+		{"detection", filter.DetectionIDs},
+		{"outcome", filter.Outcomes},
+	}
+	for _, list := range lists {
+		if len(list.values) > MaxFilterValues {
+			return invalid(list.parameter, "%s accepts at most %d values", list.parameter, MaxFilterValues)
+		}
+		seen := make(map[string]struct{}, len(list.values))
+		for _, value := range list.values {
+			if _, duplicate := seen[value]; duplicate {
+				return invalid(list.parameter, "%s lists %q twice", list.parameter, value)
+			}
+			seen[value] = struct{}{}
+		}
+	}
+
 	for _, status := range filter.Statuses {
 		if _, ok := validStatuses[status]; !ok {
 			return invalid("status", "status %q is not OPEN, IN_PROGRESS, or CLOSED", status)
@@ -415,9 +437,6 @@ func validateFilterValues(filter ListFilter) error {
 	case "", ScopeMine, ScopeUnassigned, ScopeAll:
 	default:
 		return invalid("scope", "scope %q is not mine, unassigned, or all", filter.Scope)
-	}
-	if len(filter.AssigneeIDs) > MaxFilterAssignees {
-		return invalid("assignee", "assignee accepts at most %d ids", MaxFilterAssignees)
 	}
 	for _, assigneeID := range filter.AssigneeIDs {
 		if !audit.ValidID(assigneeID) {
@@ -430,7 +449,7 @@ func validateFilterValues(filter ListFilter) error {
 		}
 	}
 	for _, detectionID := range filter.DetectionIDs {
-		if !detectionPattern.MatchString(detectionID) {
+		if !config.ValidDetectionID(detectionID) {
 			return invalid("detection", "detection %q is not a detection id", detectionID)
 		}
 	}
@@ -438,6 +457,10 @@ func validateFilterValues(filter ListFilter) error {
 		if _, ok := validOutcomes[outcome]; !ok {
 			return invalid("outcome", "outcome %q is not MALICIOUS or ACCEPTED", outcome)
 		}
+	}
+
+	if !utf8.ValidString(filter.Query) || strings.ContainsRune(filter.Query, 0) {
+		return invalid("q", "q must be UTF-8 text without NUL characters")
 	}
 
 	query := strings.TrimSpace(filter.Query)
@@ -509,18 +532,12 @@ func (service *Service) List(ctx context.Context, actorUserID string, filter Lis
 		key = &decoded
 	}
 
-	conditions, arguments, err := caseConditions(filter, actorUserID)
+	query, arguments, err := listQuery(filter, actorUserID, key)
 	if err != nil {
 		return CasePage{}, err
 	}
-	if key != nil {
-		conditions = append(conditions, sortKeysets[filter.Sort])
-		arguments = append(arguments, key.SortValue, key.ID)
-	}
-	arguments = append(arguments, limit+1)
 
 	var rows []summaryRow
-	query := selectCaseSummary + where(conditions) + " ORDER BY " + sortOrders[filter.Sort] + " LIMIT ?"
 	if err := service.database.WithContext(ctx).Raw(query, arguments...).Scan(&rows).Error; err != nil {
 		return CasePage{}, fmt.Errorf("list cases: %w", err)
 	}
@@ -533,6 +550,20 @@ func (service *Service) List(ctx context.Context, actorUserID string, filter Lis
 		page.Items = append(page.Items, row.summary())
 	}
 	return page, nil
+}
+
+// listQuery builds the statement and arguments of one case list page.
+func listQuery(filter ListFilter, actorUserID string, key *cursorKey) (string, []any, error) {
+	conditions, arguments, err := caseConditions(filter, actorUserID)
+	if err != nil {
+		return "", nil, err
+	}
+	if key != nil {
+		conditions = append(conditions, sortKeysets[filter.Sort])
+		arguments = append(arguments, key.SortValue, key.ID)
+	}
+	arguments = append(arguments, *filter.Limit+1)
+	return selectCaseSummary + where(conditions) + " ORDER BY " + sortOrders[filter.Sort] + " LIMIT ?", arguments, nil
 }
 
 // caseConditions builds the WHERE conditions every case read shares. All
@@ -1157,20 +1188,20 @@ func (service *Service) Assign(ctx context.Context, actor Actor, caseID string, 
 			return ErrVersionConflict
 		}
 
+		assigneeChanged := (current.AssigneeUserID == nil) != (assigneeID == nil) ||
+			(current.AssigneeUserID != nil && *current.AssigneeUserID != *assigneeID)
+		statusMoved := current.Status == StatusOpen && assigneeID != nil
+		if !assigneeChanged && !statusMoved {
+			detail, err = loadCaseDetail(tx, "cases.id = ?", caseID)
+			return err
+		}
+
 		if assigneeID != nil {
 			if err := lockValidAssignee(tx, *assigneeID); err != nil {
 				return err
 			}
 		}
 
-		sameAssignee := (current.AssigneeUserID == nil && assigneeID == nil) ||
-			(current.AssigneeUserID != nil && assigneeID != nil && *current.AssigneeUserID == *assigneeID)
-		if sameAssignee {
-			detail, err = loadCaseDetail(tx, "cases.id = ?", caseID)
-			return err
-		}
-
-		statusMoved := current.Status == StatusOpen && assigneeID != nil
 		update := "UPDATE cases SET assignee_user_id = ?, last_activity_at = now(), updated_at = now(), version = version + 1"
 		if statusMoved {
 			update += ", status = 'IN_PROGRESS'"
@@ -1179,37 +1210,37 @@ func (service *Service) Assign(ctx context.Context, actor Actor, caseID string, 
 			return fmt.Errorf("assign case: %w", err)
 		}
 
-		eventName, action := eventCaseUnassigned, "unassign"
-		changes := map[string]any{}
-		if assigneeID != nil {
-			eventName, action = eventCaseAssigned, "assign"
-			changes = map[string]any{"assigneeId": *assigneeID}
-		}
-		if err := audit.Record(tx, userCaseAuditEvent(actor, caseID, eventName, action, changes)); err != nil {
-			return err
+		link := service.caseLink(current.CaseNumber)
+		if assigneeChanged {
+			eventName, action := eventCaseUnassigned, "unassign"
+			changes := map[string]any{}
+			if assigneeID != nil {
+				eventName, action = eventCaseAssigned, "assign"
+				changes = map[string]any{"assigneeId": *assigneeID}
+			}
+			if err := audit.Record(tx, userCaseAuditEvent(actor, caseID, eventName, action, changes)); err != nil {
+				return err
+			}
+
+			var assignedID any
+			if assigneeID != nil {
+				assignedID = *assigneeID
+			}
+			if err := outbox.Record(tx, userCaseEvent(outbox.TypeCaseAssigned, caseID, actor.UserID, map[string]any{
+				"caseId":     caseID,
+				"caseNumber": current.CaseNumber,
+				"assigneeId": assignedID,
+				"onCall":     false,
+				"link":       link,
+			})); err != nil {
+				return err
+			}
 		}
 		if statusMoved {
 			if err := audit.Record(tx, userCaseAuditEvent(actor, caseID, eventCaseStatusChanged, "change_status",
 				map[string]any{"from": StatusOpen, "to": StatusInProgress})); err != nil {
 				return err
 			}
-		}
-
-		link := service.caseLink(current.CaseNumber)
-		var assignedID any
-		if assigneeID != nil {
-			assignedID = *assigneeID
-		}
-		if err := outbox.Record(tx, userCaseEvent(outbox.TypeCaseAssigned, caseID, actor.UserID, map[string]any{
-			"caseId":     caseID,
-			"caseNumber": current.CaseNumber,
-			"assigneeId": assignedID,
-			"onCall":     false,
-			"link":       link,
-		})); err != nil {
-			return err
-		}
-		if statusMoved {
 			if err := outbox.Record(tx, userCaseEvent(outbox.TypeCaseStatusChanged, caseID, actor.UserID, map[string]any{
 				"caseId":     caseID,
 				"caseNumber": current.CaseNumber,

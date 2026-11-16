@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RabbITCybErSeC/simple-siem/internal/auth"
 	"github.com/RabbITCybErSeC/simple-siem/internal/cases"
 	"gorm.io/gorm"
 )
@@ -39,10 +40,7 @@ type caseState struct {
 func TestCaseRoutes(t *testing.T) {
 	router, service, database, _ := newAPIRouter(t)
 	admin, _ := apiAdmin(t, router, service)
-	analyst := apiCreateUser(t, service, admin, caseAnalystEmail, "Case Analyst", "ANALYST")
-	apiActivateUser(t, service, admin, analyst.User.ID, caseAnalystPassword)
-	analystToken := loginTokenFor(t, router, caseAnalystEmail, caseAnalystPassword)
-	analystID := analyst.User.ID
+	analystID, analystToken := caseAnalystLogin(t, router, service, admin)
 	reader := apiCreateUser(t, service, admin, readOnlyEmail, "Read Only", "READ_ONLY")
 	apiActivateUser(t, service, admin, reader.User.ID, readOnlyPassword)
 	readerToken := loginTokenFor(t, router, readOnlyEmail, readOnlyPassword)
@@ -56,6 +54,7 @@ func TestCaseRoutes(t *testing.T) {
 		body   string
 	}{
 		{"list", http.MethodGet, "/api/v1/cases", ""},
+		{"list with zero offset", http.MethodGet, "/api/v1/cases?from=2026-11-15T08:30:00%2B00:00", ""},
 		{"counts", http.MethodGet, "/api/v1/cases/counts", ""},
 		{"histogram", http.MethodGet, "/api/v1/cases/histogram?from=now-24h&to=now", ""},
 		{"detail by id", http.MethodGet, "/api/v1/cases/" + readCaseID, ""},
@@ -203,6 +202,7 @@ func TestCaseRoutes(t *testing.T) {
 			{"repeated list parameter", "/api/v1/cases?status=OPEN&status=CLOSED", "status"},
 			{"empty comma item", "/api/v1/cases?status=OPEN,", "status"},
 			{"invalid status", "/api/v1/cases?status=BOGUS", "status"},
+			{"too many status values", "/api/v1/cases?status=" + strings.Repeat("OPEN,", cases.MaxFilterValues) + "OPEN", "status"},
 			{"invalid scope", "/api/v1/cases?scope=everyone", "scope"},
 			{"invalid time field", "/api/v1/cases?timeField=bogus", "timeField"},
 			{"invalid sort", "/api/v1/cases?sort=title:asc", "sort"},
@@ -213,6 +213,8 @@ func TestCaseRoutes(t *testing.T) {
 			{"zero alerts limit", "/api/v1/cases/" + caseID + "/alerts?limit=0", "limit"},
 			{"zero timeline limit", "/api/v1/cases/" + caseID + "/timeline?limit=0", "limit"},
 			{"repeated query", "/api/v1/cases?q=a&q=b", "q"},
+			{"NUL query", "/api/v1/cases?q=%00", "q"},
+			{"invalid UTF-8 query", "/api/v1/cases?q=%FF", "q"},
 			{"unknown counts parameter", "/api/v1/cases/counts?limit=10", "limit"},
 			{"repeated counts status", "/api/v1/cases/counts?status=OPEN&status=CLOSED", "status"},
 			{"invalid counts status", "/api/v1/cases/counts?status=BOGUS", "status"},
@@ -403,9 +405,7 @@ func TestCaseRoutes(t *testing.T) {
 func TestCaseListRelativeRangePaginates(t *testing.T) {
 	router, service, database, _ := newAPIRouter(t)
 	admin, _ := apiAdmin(t, router, service)
-	analyst := apiCreateUser(t, service, admin, caseAnalystEmail, "Case Analyst", "ANALYST")
-	apiActivateUser(t, service, admin, analyst.User.ID, caseAnalystPassword)
-	token := loginTokenFor(t, router, caseAnalystEmail, caseAnalystPassword)
+	_, token := caseAnalystLogin(t, router, service, admin)
 
 	titles := []string{"Relative one", "Relative two", "Relative three"}
 	for _, title := range titles {
@@ -454,6 +454,15 @@ func TestCaseListRelativeRangePaginates(t *testing.T) {
 	if len(seen) != len(titles) {
 		t.Errorf("paged through %d cases, want %d", len(seen), len(titles))
 	}
+}
+
+// caseAnalystLogin creates, activates, and signs in the analyst the case route
+// tests share, returning the analyst id and session token.
+func caseAnalystLogin(t *testing.T, router http.Handler, service *auth.Service, admin auth.Actor) (string, string) {
+	t.Helper()
+	analyst := apiCreateUser(t, service, admin, caseAnalystEmail, "Case Analyst", "ANALYST")
+	apiActivateUser(t, service, admin, analyst.User.ID, caseAnalystPassword)
+	return analyst.User.ID, loginTokenFor(t, router, caseAnalystEmail, caseAnalystPassword)
 }
 
 func caseRequest(router http.Handler, method, target, body, token string) *httptest.ResponseRecorder {

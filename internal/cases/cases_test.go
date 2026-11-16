@@ -481,6 +481,50 @@ func TestEvidenceAddedKeepsLastEventWhenEvidenceIsOlder(t *testing.T) {
 	}
 }
 
+func TestEvidenceAddedMovesFirstEventBack(t *testing.T) {
+	service, db := newTestService(t, 50)
+	writer := &alerts.Service{Hooks: service}
+	policy := alerts.Policy{
+		Mode: alerts.ModeMerge, CoalesceWindow: 30 * time.Minute, MaxAlertSpan: time.Hour,
+	}
+	runID := insertDetectionRun(t, db, "brute-force")
+	ensureEnabledRuntime(t, db, "brute-force")
+
+	firstEventAt := testNow.Add(-10 * time.Minute)
+	tests := []struct {
+		name       string
+		identity   string
+		evidenceAt time.Time
+		wantFirst  time.Time
+		wantLast   time.Time
+	}{
+		{"backfill", "identity-backfill", firstEventAt.Add(-20 * time.Minute), firstEventAt.Add(-20 * time.Minute), firstEventAt},
+		{"later evidence", "identity-later", firstEventAt.Add(25 * time.Minute), firstEventAt, firstEventAt.Add(25 * time.Minute)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			created := applyAlertProposal(t, db, writer, policy,
+				alertProposal(runID, "brute-force", test.identity, test.identity+"-1", firstEventAt))
+			if created.Action != alerts.ActionCreated {
+				t.Fatalf("first apply = %+v, want a created alert", created)
+			}
+			merged := applyAlertProposal(t, db, writer, policy,
+				alertProposal(runID, "brute-force", test.identity, test.identity+"-2", test.evidenceAt))
+			if merged.Action != alerts.ActionMerged || merged.AlertID != created.AlertID {
+				t.Fatalf("second apply = %+v, want a merge into %q", merged, created.AlertID)
+			}
+
+			after := loadCaseForAlert(t, db, created.AlertID)
+			if !after.FirstEventAt.Equal(test.wantFirst) {
+				t.Errorf("case first event = %v, want %v", after.FirstEventAt, test.wantFirst)
+			}
+			if !after.LastEventAt.Equal(test.wantLast) {
+				t.Errorf("case last event = %v, want %v", after.LastEventAt, test.wantLast)
+			}
+		})
+	}
+}
+
 func TestEvidenceAddedChangesNothingForClosedCase(t *testing.T) {
 	service, db := newTestService(t, 50)
 	_, alertID, before := openAlertCase(t, service, db, "brute-force", "Brute force")
@@ -1113,6 +1157,67 @@ func TestListTitleMetacharactersMatchLiterally(t *testing.T) {
 	}
 }
 
+func TestQueueReadsWithoutStatusUseAnIndex(t *testing.T) {
+	_, db := newTestService(t, 50)
+	// A realistic queue volume, so the planner weighs the sort it avoids
+	// instead of just scanning a handful of rows.
+	insertBulkCases(t, db, 2000, StatusOpen, testNow)
+	if err := db.Exec("ANALYZE cases").Error; err != nil {
+		t.Fatalf("analyze cases: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		filter ListFilter
+		index  string
+	}{
+		{
+			name: "all tab by last event",
+			filter: ListFilter{
+				Scope: ScopeAll, Sort: SortLastEventAtDesc,
+				From: timePointer(testNow.Add(-24 * time.Hour)), Limit: intPointer(50),
+			},
+			index: "cases_last_event_idx",
+		},
+		{
+			name:   "oldest first by created",
+			filter: ListFilter{Sort: SortCreatedAtAsc, Limit: intPointer(50)},
+			index:  "cases_created_idx",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Exec("SET LOCAL enable_seqscan = off").Error; err != nil {
+					return err
+				}
+				statement, arguments, err := listQuery(normalizeFilter(test.filter), "", nil)
+				if err != nil {
+					return err
+				}
+				var plan []string
+				if err := tx.Raw("EXPLAIN "+statement, arguments...).Scan(&plan).Error; err != nil {
+					return err
+				}
+				joined := strings.Join(plan, "\n")
+				if !strings.Contains(joined, test.index) {
+					t.Errorf("plan does not use %s:\n%s", test.index, joined)
+				}
+				for _, line := range plan {
+					node := strings.TrimLeft(strings.TrimSpace(line), "-> ")
+					if strings.HasPrefix(node, "Sort") || strings.HasPrefix(node, "Incremental Sort") {
+						t.Errorf("plan sorts the cases read:\n%s", joined)
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("explain %s: %v", test.name, err)
+			}
+		})
+	}
+}
+
 func TestCaseSummaryJSONShape(t *testing.T) {
 	service, db := newTestService(t, 50)
 	inserted := insertCase(t, db, caseFixture{Title: "Shape"})
@@ -1151,9 +1256,13 @@ func TestCaseSummaryJSONShape(t *testing.T) {
 }
 
 func TestValidateListFilter(t *testing.T) {
-	tooManyAssignees := make([]string, MaxFilterAssignees+1)
-	for index := range tooManyAssignees {
-		tooManyAssignees[index] = "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
+	assignees := make([]string, MaxFilterValues)
+	for index := range assignees {
+		assignees[index] = fmt.Sprintf("00000000-0000-0000-0000-%012d", index)
+	}
+	detections := make([]string, MaxFilterValues+1)
+	for index := range detections {
+		detections[index] = fmt.Sprintf("detection-%d", index)
 	}
 	validAssignee := "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
 	from := testNow.Add(-time.Hour)
@@ -1170,10 +1279,19 @@ func TestValidateListFilter(t *testing.T) {
 		}, ""},
 		{"status outside the allowlist", ListFilter{Statuses: []string{"open"}, Limit: intPointer(50)}, "status"},
 		{"empty status item", ListFilter{Statuses: []string{StatusOpen, ""}, Limit: intPointer(50)}, "status"},
+		{"huge repeated status list", ListFilter{Statuses: slices.Repeat([]string{StatusOpen}, 70000), Limit: intPointer(50)}, "status"},
 		{"scope outside the allowlist", ListFilter{Scope: "team", Limit: intPointer(50)}, "scope"},
-		{"too many assignees", ListFilter{AssigneeIDs: tooManyAssignees, Limit: intPointer(50)}, "assignee"},
+		{"too many assignees", ListFilter{AssigneeIDs: slices.Repeat([]string{validAssignee}, MaxFilterValues+1), Limit: intPointer(50)}, "assignee"},
+		{"assignees at the limit", ListFilter{AssigneeIDs: assignees, Limit: intPointer(50)}, ""},
+		{"repeated assignee", ListFilter{AssigneeIDs: []string{validAssignee, validAssignee}, Limit: intPointer(50)}, "assignee"},
 		{"assignee not a UUID", ListFilter{AssigneeIDs: []string{"alice"}, Limit: intPointer(50)}, "assignee"},
+		{"repeated severity", ListFilter{Severities: []string{"HIGH", "HIGH"}, Limit: intPointer(50)}, "severity"},
+		{"too many detections", ListFilter{DetectionIDs: detections, Limit: intPointer(50)}, "detection"},
 		{"detection outside the pattern", ListFilter{DetectionIDs: []string{"Bad_ID"}, Limit: intPointer(50)}, "detection"},
+		{"too many outcomes", ListFilter{Outcomes: slices.Repeat([]string{"MALICIOUS"}, MaxFilterValues+1), Limit: intPointer(50)}, "outcome"},
+		{"NUL query", ListFilter{Query: "\x00", Limit: intPointer(50)}, "q"},
+		{"embedded NUL query", ListFilter{Query: "a\x00b", Limit: intPointer(50)}, "q"},
+		{"invalid UTF-8 query", ListFilter{Query: "\xff", Limit: intPointer(50)}, "q"},
 		{"query too long", ListFilter{Query: strings.Repeat("é", MaxQueryRunes+1), Limit: intPointer(50)}, "q"},
 		{"numeric query overflows int64", ListFilter{Query: "99999999999999999999", Limit: intPointer(50)}, "q"},
 		{"limit below one", ListFilter{Limit: intPointer(0)}, "limit"},
@@ -1212,9 +1330,12 @@ func TestParseTime(t *testing.T) {
 		{"now/w", monday, true},
 		{"2026-11-15T08:30:00Z", time.Date(2026, 11, 15, 8, 30, 0, 0, time.UTC), true},
 		{"2026-11-15T08:30:00.123Z", time.Date(2026, 11, 15, 8, 30, 0, 123000000, time.UTC), true},
+		{"2026-11-15T08:30:00+00:00", time.Date(2026, 11, 15, 8, 30, 0, 0, time.UTC), true},
+		{"2026-11-15T08:30:00-00:00", time.Date(2026, 11, 15, 8, 30, 0, 0, time.UTC), true},
 		{"now-0h", time.Time{}, false},
 		{"now+1h", time.Time{}, false},
 		{"yesterday", time.Time{}, false},
+		{"2026-11-15T08:30:00+01:00", time.Time{}, false},
 		{"2026-11-15T08:30:00+02:00", time.Time{}, false},
 		{"now-99999999999w", time.Time{}, false},
 		{"now-99999999999999999999m", time.Time{}, false},
@@ -2075,12 +2196,91 @@ func TestAssignRejectsInvalidAssignee(t *testing.T) {
 	}
 }
 
-func TestAssignSameAssigneeIsNoOp(t *testing.T) {
+func TestAssignSameAssigneeStartsWorkOnOpenCase(t *testing.T) {
 	service, db := newTestService(t, 50)
 	analyst := createUser(t, db, "analyst@example.com", "ANALYST")
-	stored := insertCase(t, db, caseFixture{Title: "Same", AssigneeID: &analyst})
+	stored := insertCase(t, db, caseFixture{Title: "Start work", AssigneeID: &analyst})
 
 	updated, err := service.Assign(context.Background(), testActor(analyst), stored.ID, &analyst, stored.Version)
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if updated.Status != StatusInProgress {
+		t.Errorf("status = %q, want %q", updated.Status, StatusInProgress)
+	}
+	if updated.Version != stored.Version+1 {
+		t.Errorf("version = %d, want %d", updated.Version, stored.Version+1)
+	}
+	if updated.Assignee == nil || updated.Assignee.ID != analyst {
+		t.Errorf("assignee = %+v, want the same analyst", updated.Assignee)
+	}
+
+	audits, _, err := audit.List(context.Background(), db,
+		audit.Filter{TargetType: "CASE", TargetID: stored.ID}, 1, 100)
+	if err != nil {
+		t.Fatalf("read audit events: %v", err)
+	}
+	if len(audits) != 1 {
+		t.Fatalf("audit has %d events, want only the status change", len(audits))
+	}
+	statusChanged, ok := findAuditEvent(audits, eventCaseStatusChanged)
+	if !ok {
+		t.Fatalf("no %s audit event", eventCaseStatusChanged)
+	}
+	wantChanges := map[string]any{"from": StatusOpen, "to": StatusInProgress}
+	if !reflect.DeepEqual(statusChanged.Changes, wantChanges) {
+		t.Errorf("status changes = %v, want %v", statusChanged.Changes, wantChanges)
+	}
+	if _, ok := findAuditEvent(audits, eventCaseAssigned); ok {
+		t.Errorf("audit has a %s event, want none", eventCaseAssigned)
+	}
+
+	statusEvents := outboxEventsOfType(t, db, outbox.TypeCaseStatusChanged)
+	if len(statusEvents) != 1 {
+		t.Fatalf("outbox has %d case.status_changed rows, want 1", len(statusEvents))
+	}
+	wantPayload := map[string]any{
+		"caseId":     stored.ID,
+		"caseNumber": float64(stored.CaseNumber),
+		"from":       StatusOpen,
+		"to":         StatusInProgress,
+		"link":       testPublicURL + "/cases/" + strconv.FormatInt(stored.CaseNumber, 10),
+	}
+	if payload := decodeObject(t, statusEvents[0].Payload); !reflect.DeepEqual(payload, wantPayload) {
+		t.Errorf("case.status_changed payload = %v, want %v", payload, wantPayload)
+	}
+	if assignedEvents := outboxEventsOfType(t, db, outbox.TypeCaseAssigned); len(assignedEvents) != 0 {
+		t.Errorf("outbox has %d case.assigned rows, want 0", len(assignedEvents))
+	}
+}
+
+func TestAssignSameAssigneeInProgressIsNoOp(t *testing.T) {
+	service, db := newTestService(t, 50)
+	analyst := createUser(t, db, "analyst@example.com", "ANALYST")
+	stored := insertCase(t, db, caseFixture{
+		Title: "Same", Status: StatusInProgress, AssigneeID: &analyst,
+	})
+
+	updated, err := service.Assign(context.Background(), testActor(analyst), stored.ID, &analyst, stored.Version)
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if updated.Version != stored.Version || updated.Status != StatusInProgress {
+		t.Errorf("detail version/status = %d/%q, want %d/%q",
+			updated.Version, updated.Status, stored.Version, StatusInProgress)
+	}
+	if updated.Assignee == nil || updated.Assignee.ID != analyst {
+		t.Errorf("assignee = %+v, want the same analyst", updated.Assignee)
+	}
+	expectNoAssignWrites(t, db, stored.ID)
+}
+
+func TestUnassignUnassignedCaseIsNoOp(t *testing.T) {
+	service, db := newTestService(t, 50)
+	analyst := createUser(t, db, "analyst@example.com", "ANALYST")
+	stored := insertCase(t, db, caseFixture{Title: "Unassigned"})
+
+	updated, err := service.Assign(context.Background(), testActor(analyst), stored.ID, nil, stored.Version)
 	if err != nil {
 		t.Fatalf("Assign: %v", err)
 	}
@@ -2088,8 +2288,8 @@ func TestAssignSameAssigneeIsNoOp(t *testing.T) {
 		t.Errorf("detail version/status = %d/%q, want %d/%q",
 			updated.Version, updated.Status, stored.Version, StatusOpen)
 	}
-	if updated.Assignee == nil || updated.Assignee.ID != analyst {
-		t.Errorf("assignee = %+v, want the same analyst", updated.Assignee)
+	if updated.Assignee != nil {
+		t.Errorf("assignee = %+v, want none", updated.Assignee)
 	}
 	expectNoAssignWrites(t, db, stored.ID)
 }
@@ -2126,7 +2326,7 @@ func expectNoAssignWrites(t *testing.T, db *gorm.DB, caseID string) {
 func TestCountsCapped(t *testing.T) {
 	service, db := newTestService(t, 50)
 	actor := createUser(t, db, "actor@example.com", "ANALYST")
-	insertClosedCases(t, db, 1200, testNow.Add(-2*time.Hour))
+	insertBulkCases(t, db, 1200, StatusClosed, testNow.Add(-2*time.Hour))
 
 	counts, err := service.Counts(context.Background(), actor, ListFilter{
 		From: timePointer(testNow.Add(-24 * time.Hour)), To: timePointer(testNow),
@@ -2420,16 +2620,23 @@ func TestHistogramRequiresRange(t *testing.T) {
 	expectValidationError(t, err, "from")
 }
 
-func insertClosedCases(t *testing.T, db *gorm.DB, count int, lastEventAt time.Time) {
+// insertBulkCases inserts count cases of one status, each one minute apart,
+// ending at lastEventAt.
+func insertBulkCases(t *testing.T, db *gorm.DB, count int, status string, lastEventAt time.Time) {
 	t.Helper()
 	err := db.Exec(`
 		INSERT INTO cases (title, status, severity, detection_id, first_event_at,
 		                   last_event_at, closed_at, created_at)
-		SELECT 'Bulk ' || series, 'CLOSED', 'HIGH', 'bulk', ?, ?, ?, ?
+		SELECT 'Bulk ' || series, ?, 'HIGH', 'bulk',
+		       ?::timestamptz - make_interval(mins => series::int),
+		       ?::timestamptz - make_interval(mins => series::int),
+		       CASE WHEN ? = 'CLOSED'
+		            THEN ?::timestamptz - make_interval(mins => series::int) END,
+		       ?::timestamptz - make_interval(mins => series::int)
 		FROM generate_series(1, ?) AS series`,
-		lastEventAt, lastEventAt, lastEventAt, testNow, count).Error
+		status, lastEventAt, lastEventAt, status, lastEventAt, lastEventAt, count).Error
 	if err != nil {
-		t.Fatalf("insert %d closed cases: %v", count, err)
+		t.Fatalf("insert %d %s cases: %v", count, status, err)
 	}
 }
 
