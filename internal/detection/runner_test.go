@@ -507,6 +507,9 @@ func TestConcurrentApplyOfOneDetectionCommitsBoth(t *testing.T) {
 		go func() {
 			var applied appliedProposals
 			err := fixture.database.Transaction(func(transaction *gorm.DB) error {
+				if err := alerts.LockDetection(transaction, fixture.manifest.ID); err != nil {
+					return err
+				}
 				var applyErr error
 				applied, applyErr = fixture.runner.applyEnabledProposals(
 					ctx, transaction, fixture.manifest, runID, proposals)
@@ -602,6 +605,9 @@ func TestDifferentDetectionsDoNotWait(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := fixture.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := alerts.LockDetection(transaction, fixture.manifest.ID); err != nil {
+			return err
+		}
 		_, err := fixture.runner.applyEnabledProposals(
 			ctx, transaction, fixture.manifest, runID, []Proposal{proposal})
 		return err
@@ -613,8 +619,8 @@ func TestDifferentDetectionsDoNotWait(t *testing.T) {
 
 func TestEmptyApplyDoesNotWaitForTheDetectionLock(t *testing.T) {
 	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) { return nil, nil })
-	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
-	runID := fixture.insertRun(t, 1)
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.markReady(t, "auth_events")
 
 	held := fixture.database.Begin()
 	if held.Error != nil {
@@ -629,14 +635,27 @@ func TestEmptyApplyDoesNotWaitForTheDetectionLock(t *testing.T) {
 		t.Fatalf("hold the detection's lock: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err := fixture.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		_, err := fixture.runner.applyEnabledProposals(ctx, transaction, fixture.manifest, runID, nil)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("apply an empty run: %v", err)
+	type runOutcome struct {
+		result RunResult
+		err    error
+	}
+	outcomes := make(chan runOutcome, 1)
+	go func() {
+		result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end, RunOptions{})
+		outcomes <- runOutcome{result: result, err: err}
+	}()
+
+	// RunWindow survives caller cancellation, so bound the wait here.
+	select {
+	case outcome := <-outcomes:
+		if outcome.err != nil {
+			t.Fatalf("RunWindow() error = %v, want a recorded run", outcome.err)
+		}
+		if outcome.result.Mode != RunModeEnabled || outcome.result.AlertsCreated != 0 || outcome.result.Proposals != 0 {
+			t.Errorf("empty run result = %+v, want ENABLED with no alerts or proposals", outcome.result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an empty run waited for the detection lock")
 	}
 }
 
@@ -1221,6 +1240,105 @@ func TestRunWindowCreatesAlertsWhenEnabled(t *testing.T) {
 	}
 	if status, _ := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "ENABLED" {
 		t.Errorf("runtime status = %q, want ENABLED", status)
+	}
+}
+
+func TestRunWaitingForTheDetectionLockSeesTheNewStatus(t *testing.T) {
+	logic := stubDetection(func(_ context.Context, window Window) ([]Proposal, error) {
+		return []Proposal{proposalAt("alice", "web01", "alice-1", window.Start.Add(time.Minute))}, nil
+	})
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"), enableDetection)
+	fixture.markReady(t, "auth_events")
+	if err := fixture.database.Transaction(func(transaction *gorm.DB) error {
+		return alerts.EnsureRuntime(transaction, fixture.manifest.ID, "ENABLED")
+	}); err != nil {
+		t.Fatalf("create the detection runtime row: %v", err)
+	}
+
+	held := fixture.database.Begin()
+	if held.Error != nil {
+		t.Fatalf("begin the held transaction: %v", held.Error)
+	}
+	heldOpen := true
+	defer func() {
+		if heldOpen {
+			if err := held.Rollback().Error; err != nil {
+				t.Errorf("roll back the held transaction: %v", err)
+			}
+		}
+	}()
+	if err := alerts.LockDetection(held, fixture.manifest.ID); err != nil {
+		t.Fatalf("hold the detection lock: %v", err)
+	}
+
+	type runOutcome struct {
+		result RunResult
+		err    error
+	}
+	outcomes := make(chan runOutcome, 1)
+	go func() {
+		result, err := fixture.runner.RunWindow(context.Background(), fixture.registration, fixture.end, RunOptions{})
+		outcomes <- runOutcome{result: result, err: err}
+	}()
+
+	// Wait until the run blocks on the detection lock before releasing it.
+	waitDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		err := fixture.database.Raw(
+			"SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()",
+		).Scan(&waiting).Error
+		if err != nil {
+			t.Fatalf("read the waiting locks: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			t.Fatal("the run never waited for the detection lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The run has read the old status and waits for the lock now. Switch the
+	// detection before releasing the lock, as a run that trips the guardrail
+	// commits its switch together with the lock release.
+	if err := held.Exec(
+		"UPDATE detection_runtime SET status = 'SHADOW' WHERE detection_id = ?", fixture.manifest.ID,
+	).Error; err != nil {
+		t.Fatalf("switch the detection to SHADOW: %v", err)
+	}
+	if err := held.Commit().Error; err != nil {
+		t.Fatalf("commit the status switch: %v", err)
+	}
+	heldOpen = false
+
+	select {
+	case outcome := <-outcomes:
+		if outcome.err != nil {
+			t.Fatalf("RunWindow() error = %v, want a recorded run", outcome.err)
+		}
+		if outcome.result.Mode != RunModeShadow {
+			t.Errorf("mode = %q, want SHADOW", outcome.result.Mode)
+		}
+		if outcome.result.AlertsCreated != 0 {
+			t.Errorf("alerts created = %d, want 0", outcome.result.AlertsCreated)
+		}
+		if outcome.result.Proposals != 1 {
+			t.Errorf("proposals = %d, want 1", outcome.result.Proposals)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run did not finish after the detection lock was released")
+	}
+
+	if got := countRows(t, fixture.database, &alertTableRow{}); got != 0 {
+		t.Errorf("alerts = %d, want 0", got)
+	}
+	if got := countRows(t, fixture.database, &proposalRow{}); got != 1 {
+		t.Errorf("detection_proposals = %d, want 1", got)
+	}
+	if status, _ := detectionRuntimeRow(t, fixture.database, fixture.manifest.ID); status != "SHADOW" {
+		t.Errorf("runtime status = %q, want SHADOW", status)
 	}
 }
 
