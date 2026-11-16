@@ -116,6 +116,11 @@ func TestM1AlertCoalescingEndToEnd(t *testing.T) {
 	if runtimeStatus != "ENABLED" {
 		t.Errorf("detection runtime = %q, want ENABLED", runtimeStatus)
 	}
+	var casesAfterPhase1 int64
+	mustScan(t, testDatabase, &casesAfterPhase1, "SELECT count(*) FROM cases")
+	if casesAfterPhase1 != 2 {
+		t.Errorf("cases after phase 1 = %d, want 2", casesAfterPhase1)
+	}
 
 	phase2 := m1WindowEnds(endA.Add(-10*time.Minute), endB.Add(5*time.Minute))
 	m1RunWindows(t, cliEnvironment, directory, phase2)

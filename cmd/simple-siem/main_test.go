@@ -813,6 +813,13 @@ func TestDetectWindowRecordsRun(t *testing.T) {
 	if severity != string(detection.SeverityHigh) {
 		t.Errorf("alert severity = %q, want HIGH", severity)
 	}
+	var cases, caseAlerts int
+	mustScan(t, testDatabase, &cases, "SELECT count(*) FROM cases")
+	mustScan(t, testDatabase, &caseAlerts,
+		"SELECT count(*) FROM case_alerts JOIN alerts ON alerts.id = case_alerts.alert_id")
+	if cases != 1 || caseAlerts != 1 {
+		t.Errorf("cases/linked case_alerts = %d/%d, want 1/1", cases, caseAlerts)
+	}
 }
 
 func TestDetectWindowEnabledReportsAlertFields(t *testing.T) {
@@ -1787,6 +1794,36 @@ func TestNewHTTPServerWiresAuthService(t *testing.T) {
 }
 
 func TestNewHTTPServerSetsSecureBrowserCookie(t *testing.T) {
+	_, cookie := newHTTPServerWithLoggedInAdmin(t)
+	if !cookie.Secure {
+		t.Error("browser login over an https public URL set no Secure cookie")
+	}
+}
+
+func TestNewHTTPServerServesCases(t *testing.T) {
+	server, cookie := newHTTPServerWithLoggedInAdmin(t)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/cases", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/cases = %d, want 200: %s", response.Code, response.Body)
+	}
+	var body struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode the cases response: %v", err)
+	}
+	if body.Data == nil {
+		t.Errorf("cases body data = %v, want an array", body.Data)
+	}
+}
+
+func newHTTPServerWithLoggedInAdmin(t *testing.T) (*http.Server, *http.Cookie) {
+	t.Helper()
 	database, _ := newAdminTestDatabase(t)
 	service := newAdminTestService(t, database)
 	if _, err := service.CreateAdmin(context.Background(), "admin@example.com", "Admin User", cliTestPassword); err != nil {
@@ -1807,7 +1844,6 @@ func TestNewHTTPServerSetsSecureBrowserCookie(t *testing.T) {
 	request.Header.Set("Origin", "https://siem.example.com")
 	response := httptest.NewRecorder()
 	server.Handler.ServeHTTP(response, request)
-
 	if response.Code != http.StatusOK {
 		t.Fatalf("browser login = %d, want 200: %s", response.Code, response.Body)
 	}
@@ -1815,9 +1851,7 @@ func TestNewHTTPServerSetsSecureBrowserCookie(t *testing.T) {
 	if len(cookies) != 1 {
 		t.Fatalf("browser login set %d cookies, want 1: %v", len(cookies), cookies)
 	}
-	if !cookies[0].Secure {
-		t.Error("browser login over an https public URL set no Secure cookie")
-	}
+	return server, cookies[0]
 }
 
 func newAdminTestDatabase(t *testing.T) (*gorm.DB, func(string) string) {

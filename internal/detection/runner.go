@@ -238,11 +238,20 @@ func (runner *Runner) RunWindow(ctx context.Context, registration Registration, 
 	return result, nil
 }
 
-// applyEnabledProposals applies proposals in ascending identity-hash order,
-// so concurrent runs take the same locks in the same order. After a guardrail
-// trip it returns the proposals not yet applied, in that sorted order.
+// applyEnabledProposals takes the detection's lock, then applies its proposals
+// in ascending identity-hash order. The detection lock serializes whole runs,
+// because the case hook locks rows every identity of the detection shares; the
+// hash order only keeps one run's own identity locks in a stable order. After a
+// guardrail trip it returns the proposals not yet applied, in that sorted order.
 func (runner *Runner) applyEnabledProposals(ctx context.Context, transaction *gorm.DB,
 	manifest config.DetectionManifest, runID string, proposals []Proposal) (appliedProposals, error) {
+	// An empty run takes no locks, so it must not wait for a concurrent apply.
+	if len(proposals) == 0 {
+		return appliedProposals{}, nil
+	}
+	if err := alerts.LockDetection(transaction, manifest.ID); err != nil {
+		return appliedProposals{}, fmt.Errorf("%w: %w", errApplyAlerts, err)
+	}
 	policy := alerts.Policy{
 		Mode:           alerts.Mode(manifest.Alerting.Mode),
 		CoalesceWindow: time.Duration(manifest.Alerting.CoalesceWindow),

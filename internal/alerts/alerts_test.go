@@ -525,40 +525,113 @@ func TestApplyAlwaysNewCreatesSeparateAlerts(t *testing.T) {
 	}
 }
 
-func TestApplyRecurrenceAfterClosure(t *testing.T) {
+func TestApplyAlwaysNewDoesNotLinkAnOpenPredecessor(t *testing.T) {
+	db := databasetest.New(t)
+	runID := insertRun(t, db, testDetectionID)
+	hook := &recordingHook{}
+	service := &Service{Hooks: hook}
+	policy := Policy{Mode: ModeAlwaysNew, CoalesceWindow: 2 * time.Hour, MaxAlertSpan: 24 * time.Hour}
+
+	predecessor := applyProposal(t, db, service, policy, newProposal(runID, testEventTime))
+	successor := applyProposal(t, db, service, policy, newProposal(runID, testEventTime.Add(5*time.Minute)))
+	if predecessor.Action != ActionCreated || successor.Action != ActionCreated {
+		t.Fatalf("actions = %q and %q, want CREATED twice", predecessor.Action, successor.Action)
+	}
+	if predecessor.AlertID == successor.AlertID {
+		t.Fatal("ALWAYS_NEW reused an alert, want one per proposal")
+	}
+
+	first := loadAlert(t, db, predecessor.AlertID)
+	if first.Status != "OPEN" {
+		t.Fatalf("predecessor status = %q, want OPEN", first.Status)
+	}
+	second := loadAlert(t, db, successor.AlertID)
+	if second.PreviousAlertID != nil {
+		t.Errorf("new alert previous id = %q, want nil with an open predecessor", *second.PreviousAlertID)
+	}
+	if len(hook.created) != 2 {
+		t.Fatalf("AlertCreated calls = %d, want 2", len(hook.created))
+	}
+	if hook.created[1].PreviousAlertID != nil {
+		t.Errorf("hook previous alert id = %q, want nil with an open predecessor", *hook.created[1].PreviousAlertID)
+	}
+}
+
+func TestApplySplitLinksTheSplitAlert(t *testing.T) {
 	db := databasetest.New(t)
 	runID := insertRun(t, db, testDetectionID)
 	service := &Service{}
+	policy := Policy{Mode: ModeMerge, CoalesceWindow: 15 * time.Minute, MaxAlertSpan: 24 * time.Hour}
 
-	created := applyProposal(t, db, service, mergePolicy(), newProposal(runID, testEventTime))
-	if err := db.Exec("UPDATE alerts SET status = 'CLOSED' WHERE id = ?", created.AlertID).Error; err != nil {
-		t.Fatalf("close the alert: %v", err)
+	closedAlert := applyProposal(t, db, service, policy, newProposal(runID, testEventTime))
+	closeAlert(t, db, closedAlert.AlertID)
+	openAlert := applyProposal(t, db, service, policy, newProposal(runID, testEventTime.Add(2*time.Hour)))
+	if openAlert.Action != ActionCreated {
+		t.Fatalf("open alert action = %q, want CREATED", openAlert.Action)
 	}
-	closedBefore := loadAlert(t, db, created.AlertID)
+	open := loadAlert(t, db, openAlert.AlertID)
+	if !open.Coalescing {
+		t.Fatal("open alert coalescing = false, want true")
+	}
+	if open.PreviousAlertID == nil || *open.PreviousAlertID != closedAlert.AlertID {
+		t.Fatalf("open alert previous id = %v, want the closed alert %q", open.PreviousAlertID, closedAlert.AlertID)
+	}
 
-	noop := applyProposal(t, db, service, mergePolicy(), newProposal(runID, testEventTime))
-	if noop.Action != ActionNoop {
-		t.Errorf("re-applying the closed alert's evidence = %q, want NOOP", noop.Action)
+	split := applyProposal(t, db, service, policy, newProposal(runID, testEventTime.Add(4*time.Hour)))
+	if split.Action != ActionCreated {
+		t.Fatalf("split action = %q, want CREATED", split.Action)
 	}
-	closedAfterNoop := loadAlert(t, db, created.AlertID)
-	if closedAfterNoop.Version != closedBefore.Version {
-		t.Errorf("closed alert version = %d, want %d", closedAfterNoop.Version, closedBefore.Version)
+	splitOpen := loadAlert(t, db, openAlert.AlertID)
+	if splitOpen.Coalescing {
+		t.Error("split alert coalescing = true, want false")
 	}
+	if splitOpen.Status != "OPEN" {
+		t.Errorf("split alert status = %q, want OPEN", splitOpen.Status)
+	}
+	newAlert := loadAlert(t, db, split.AlertID)
+	if newAlert.PreviousAlertID == nil || *newAlert.PreviousAlertID != openAlert.AlertID {
+		t.Errorf("new alert previous id = %v, want the split alert %q, not the closed alert %q",
+			newAlert.PreviousAlertID, openAlert.AlertID, closedAlert.AlertID)
+	}
+}
 
-	recurrence := applyProposal(t, db, service, mergePolicy(), newProposal(runID, testEventTime.Add(time.Hour)))
-	if recurrence.Action != ActionCreated {
-		t.Fatalf("recurrence action = %q, want CREATED", recurrence.Action)
-	}
-	reopened := loadAlert(t, db, recurrence.AlertID)
-	if reopened.PreviousAlertID == nil || *reopened.PreviousAlertID != created.AlertID {
-		t.Errorf("recurrence previous id = %v, want %q", reopened.PreviousAlertID, created.AlertID)
-	}
-	closedAfter := loadAlert(t, db, created.AlertID)
-	if closedAfter.Status != "CLOSED" {
-		t.Errorf("closed alert status = %q, want CLOSED", closedAfter.Status)
-	}
-	if closedAfter.Version != closedBefore.Version {
-		t.Errorf("closed alert version = %d, want %d", closedAfter.Version, closedBefore.Version)
+func TestApplyRecurrenceAfterClosure(t *testing.T) {
+	for _, mode := range []Mode{ModeMerge, ModeAlwaysNew} {
+		t.Run(string(mode), func(t *testing.T) {
+			db := databasetest.New(t)
+			runID := insertRun(t, db, testDetectionID)
+			service := &Service{}
+			policy := Policy{Mode: mode, CoalesceWindow: 2 * time.Hour, MaxAlertSpan: 24 * time.Hour}
+
+			created := applyProposal(t, db, service, policy, newProposal(runID, testEventTime))
+			closeAlert(t, db, created.AlertID)
+			closedBefore := loadAlert(t, db, created.AlertID)
+
+			noop := applyProposal(t, db, service, policy, newProposal(runID, testEventTime))
+			if noop.Action != ActionNoop {
+				t.Errorf("re-applying the closed alert's evidence = %q, want NOOP", noop.Action)
+			}
+			closedAfterNoop := loadAlert(t, db, created.AlertID)
+			if closedAfterNoop.Version != closedBefore.Version {
+				t.Errorf("closed alert version = %d, want %d", closedAfterNoop.Version, closedBefore.Version)
+			}
+
+			recurrence := applyProposal(t, db, service, policy, newProposal(runID, testEventTime.Add(time.Hour)))
+			if recurrence.Action != ActionCreated {
+				t.Fatalf("recurrence action = %q, want CREATED", recurrence.Action)
+			}
+			reopened := loadAlert(t, db, recurrence.AlertID)
+			if reopened.PreviousAlertID == nil || *reopened.PreviousAlertID != created.AlertID {
+				t.Errorf("recurrence previous id = %v, want %q", reopened.PreviousAlertID, created.AlertID)
+			}
+			closedAfter := loadAlert(t, db, created.AlertID)
+			if closedAfter.Status != "CLOSED" {
+				t.Errorf("closed alert status = %q, want CLOSED", closedAfter.Status)
+			}
+			if closedAfter.Version != closedBefore.Version {
+				t.Errorf("closed alert version = %d, want %d", closedAfter.Version, closedBefore.Version)
+			}
+		})
 	}
 }
 
@@ -996,6 +1069,13 @@ func loadAlert(t *testing.T, db *gorm.DB, id string) alertRow {
 		t.Fatalf("load alert %q: %v", id, err)
 	}
 	return alert
+}
+
+func closeAlert(t *testing.T, db *gorm.DB, alertID string) {
+	t.Helper()
+	if err := db.Exec("UPDATE alerts SET status = 'CLOSED' WHERE id = ?", alertID).Error; err != nil {
+		t.Fatalf("close alert %q: %v", alertID, err)
+	}
 }
 
 func loadAlerts(t *testing.T, db *gorm.DB) []alertRow {

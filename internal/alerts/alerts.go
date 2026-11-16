@@ -31,7 +31,9 @@ type hashedEvidence struct {
 	hash []byte
 }
 
-// Apply applies one proposal inside the caller's transaction.
+// Apply applies one proposal inside the caller's transaction. A caller that
+// applies more than one proposal of one detection in a transaction must call
+// LockDetection before the first Apply.
 func (service *Service) Apply(ctx context.Context, tx *gorm.DB, policy Policy, proposal Proposal) (Outcome, error) {
 	if err := validateProposal(policy, proposal); err != nil {
 		return Outcome{}, err
@@ -58,14 +60,17 @@ func (service *Service) Apply(ctx context.Context, tx *gorm.DB, policy Policy, p
 	if open != nil && shouldMerge(policy, *open, first, last) {
 		return service.merge(ctx, tx, proposal, *open, newEvidence, first, last)
 	}
+	var previousAlertID *string
 	if open != nil {
 		if err := splitAlert(tx, open.ID); err != nil {
 			return Outcome{}, err
 		}
-	}
-	previousAlertID, err := previousAlertOfIdentity(tx, proposal, first, policy.MaxAlertSpan)
-	if err != nil {
-		return Outcome{}, err
+		previousAlertID = &open.ID
+	} else {
+		previousAlertID, err = previousAlertOfIdentity(tx, proposal, first, policy.MaxAlertSpan)
+		if err != nil {
+			return Outcome{}, err
+		}
 	}
 	return service.create(ctx, tx, proposal, policy, newEvidence, first, last, previousAlertID)
 }
@@ -97,23 +102,24 @@ func shouldMerge(policy Policy, open alertRow, first, last time.Time) bool {
 	}
 }
 
-// previousAlertOfIdentity returns the most recent alert of the identity that
-// is recent enough to link, or nil.
+// previousAlertOfIdentity returns the most recent alert of the identity within
+// maxAlertSpan when that alert is CLOSED, or nil. Only a recurrence links; a
+// split passes the alert it split from instead.
 func previousAlertOfIdentity(tx *gorm.DB, proposal Proposal, first time.Time, maxAlertSpan time.Duration) (*string, error) {
-	var ids []string
-	err := tx.Model(&alertRow{}).
+	var previous alertRow
+	err := tx.
 		Where("detection_id = ? AND identity_hash = ? AND last_event_at >= ?",
 			proposal.DetectionID, proposal.IdentityHash, first.Add(-maxAlertSpan)).
 		Order("last_event_at DESC").
 		Limit(1).
-		Pluck("id", &ids).Error
+		Find(&previous).Error
 	if err != nil {
 		return nil, fmt.Errorf("load the previous alert: %w", err)
 	}
-	if len(ids) == 0 {
+	if previous.ID == "" || previous.Status != "CLOSED" {
 		return nil, nil
 	}
-	return &ids[0], nil
+	return &previous.ID, nil
 }
 
 // splitAlert stops the old alert from coalescing; it stays OPEN and linked
@@ -151,6 +157,18 @@ func lockIdentity(tx *gorm.DB, proposal Proposal) error {
 	err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", key).Error
 	if err != nil {
 		return fmt.Errorf("lock alert identity %q: %w", proposal.IdentityHash, err)
+	}
+	return nil
+}
+
+// LockDetection serializes whole apply runs of one detection. A caller that
+// applies more than one proposal of a detection in one transaction takes it
+// before the first Apply: the case hook locks rows every identity of the
+// detection shares, so identity locks alone can deadlock two runs.
+func LockDetection(tx *gorm.DB, detectionID string) error {
+	err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "alert-apply:"+detectionID).Error
+	if err != nil {
+		return fmt.Errorf("lock detection %q: %w", detectionID, err)
 	}
 	return nil
 }

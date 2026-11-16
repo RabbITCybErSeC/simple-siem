@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/RabbITCybErSeC/simple-siem/internal/alerts"
+	"github.com/RabbITCybErSeC/simple-siem/internal/cases"
 	"github.com/RabbITCybErSeC/simple-siem/internal/config"
 	"github.com/RabbITCybErSeC/simple-siem/internal/database/databasetest"
 	"github.com/RabbITCybErSeC/simple-siem/internal/dataset"
@@ -151,6 +152,25 @@ func (fixture *runnerFixture) markReady(t *testing.T, names ...string) {
 		fixture.registerDataset(t, name)
 		fixture.writeBatch(t, name, fixture.end, nil)
 	}
+}
+
+func (fixture *runnerFixture) insertRun(t *testing.T, revision int) string {
+	t.Helper()
+	start, end := fixture.window()
+	run := runRow{
+		DetectionID:      fixture.manifest.ID,
+		DetectionVersion: fixture.manifest.Version,
+		Status:           string(RunStatusOK),
+		WindowStart:      start,
+		WindowEnd:        end,
+		Revision:         revision,
+		Mode:             string(RunModeShadow),
+		StartedAt:        time.Now().UTC(),
+	}
+	if err := fixture.database.Create(&run).Error; err != nil {
+		t.Fatalf("insert detection run %d: %v", revision, err)
+	}
+	return run.ID
 }
 
 func (fixture *runnerFixture) run(t *testing.T) (RunResult, error) {
@@ -398,6 +418,225 @@ func TestRunWindowSerializesConcurrentRuns(t *testing.T) {
 	runs := loadRuns(t, fixture.database)
 	if len(runs) != 2 || runs[0].Revision != 1 || runs[1].Revision != 2 {
 		t.Fatalf("detection_runs = %+v, want revisions 1 and 2", runs)
+	}
+}
+
+// pausedCaseHook passes calls to the real case service and holds run A after
+// its first alert, so a second run can start applying while A still holds the
+// rows every identity of the detection shares.
+type pausedCaseHook struct {
+	inner      *cases.Service
+	pauseAfter string
+	paused     chan struct{}
+	resume     chan struct{}
+}
+
+func (hook *pausedCaseHook) AlertCreated(ctx context.Context, tx *gorm.DB, alert alerts.NewAlert) (alerts.CaseOutcome, error) {
+	outcome, err := hook.inner.AlertCreated(ctx, tx, alert)
+	if err != nil {
+		return alerts.CaseOutcome{}, err
+	}
+	if alert.IdentityHash == hook.pauseAfter {
+		close(hook.paused)
+		select {
+		case <-hook.resume:
+		case <-ctx.Done():
+		}
+	}
+	return outcome, nil
+}
+
+func (hook *pausedCaseHook) EvidenceAdded(ctx context.Context, tx *gorm.DB, alertID string, lastEventAt time.Time, added int) error {
+	return hook.inner.EvidenceAdded(ctx, tx, alertID, lastEventAt, added)
+}
+
+func TestConcurrentApplyOfOneDetectionCommitsBoth(t *testing.T) {
+	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) { return nil, nil })
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
+	if err := fixture.database.Exec(`
+		WITH analyst AS (
+			INSERT INTO users (email, display_name, on_call)
+			VALUES ('oncall@example.com', 'on call', true)
+			RETURNING id
+		)
+		INSERT INTO user_roles (user_id, role_name)
+		SELECT id, 'ANALYST' FROM analyst`).Error; err != nil {
+		t.Fatalf("insert the on-call analyst: %v", err)
+	}
+
+	start, _ := fixture.window()
+	runA := fixture.insertRun(t, 1)
+	runB := fixture.insertRun(t, 2)
+
+	firstUser, firstHost := "alice", "web01"
+	secondUser, secondHost := "bob", "dc01"
+	firstIdentity, err := ComputeIdentity(fixture.manifest.ID, fixture.manifest.Alerting, identitySubject(firstUser, firstHost, ""))
+	if err != nil {
+		t.Fatalf("compute the first identity: %v", err)
+	}
+	secondIdentity, err := ComputeIdentity(fixture.manifest.ID, fixture.manifest.Alerting, identitySubject(secondUser, secondHost, ""))
+	if err != nil {
+		t.Fatalf("compute the second identity: %v", err)
+	}
+	if firstIdentity.Hash > secondIdentity.Hash {
+		firstUser, firstHost, secondUser, secondHost = secondUser, secondHost, firstUser, firstHost
+		firstIdentity, secondIdentity = secondIdentity, firstIdentity
+	}
+
+	proposalA := proposalAt(firstUser, firstHost, "run-a-alert-a", start.Add(time.Minute))
+	proposalB := proposalAt(secondUser, secondHost, "run-a-alert-b", start.Add(2*time.Minute))
+	proposalBAgain := proposalAt(secondUser, secondHost, "run-b-alert-b", start.Add(3*time.Minute))
+
+	hook := &pausedCaseHook{
+		inner:      cases.NewService(fixture.database, "http://localhost", 1000),
+		pauseAfter: firstIdentity.Hash,
+		paused:     make(chan struct{}),
+		resume:     make(chan struct{}),
+	}
+	fixture.runner.Alerts = &alerts.Service{Hooks: hook}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	type applyOutcome struct {
+		applied appliedProposals
+		err     error
+	}
+	startApply := func(runID string, proposals []Proposal) <-chan applyOutcome {
+		outcomes := make(chan applyOutcome, 1)
+		go func() {
+			var applied appliedProposals
+			err := fixture.database.Transaction(func(transaction *gorm.DB) error {
+				var applyErr error
+				applied, applyErr = fixture.runner.applyEnabledProposals(
+					ctx, transaction, fixture.manifest, runID, proposals)
+				return applyErr
+			})
+			outcomes <- applyOutcome{applied: applied, err: err}
+		}()
+		return outcomes
+	}
+	runAOutcome := startApply(runA, []Proposal{proposalA, proposalB})
+
+	select {
+	case <-hook.paused:
+	case <-ctx.Done():
+		t.Fatalf("run A did not pause after creating its first alert: %v", ctx.Err())
+	}
+
+	runBOutcome := startApply(runB, []Proposal{proposalBAgain})
+
+	// Wait until run B blocks, so releasing run A forces the interleaving.
+	waitDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		err := fixture.database.Raw(
+			"SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()",
+		).Scan(&waiting).Error
+		if err != nil {
+			t.Fatalf("read the waiting locks: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			t.Fatal("run B never waited on a lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	close(hook.resume)
+
+	collect := func(outcomes <-chan applyOutcome, name string) applyOutcome {
+		select {
+		case outcome := <-outcomes:
+			return outcome
+		case <-ctx.Done():
+			t.Fatalf("%s did not finish: %v", name, ctx.Err())
+			return applyOutcome{}
+		}
+	}
+	outcomeA := collect(runAOutcome, "run A")
+	outcomeB := collect(runBOutcome, "run B")
+	if outcomeA.err != nil || outcomeB.err != nil {
+		t.Fatalf("apply errors: run A = %v, run B = %v; want both transactions to commit", outcomeA.err, outcomeB.err)
+	}
+	if outcomeB.applied.merged+outcomeB.applied.deduplicated != 1 {
+		t.Errorf("run B applied = %+v, want one merged or no-op proposal", outcomeB.applied)
+	}
+
+	var openForSecond int64
+	err = fixture.database.Raw(`
+		SELECT count(*) FROM alerts
+		WHERE detection_id = ? AND identity_hash = ? AND status = 'OPEN' AND coalescing`,
+		fixture.manifest.ID, secondIdentity.Hash).Scan(&openForSecond).Error
+	if err != nil {
+		t.Fatalf("count the open coalescing alerts: %v", err)
+	}
+	if openForSecond != 1 {
+		t.Errorf("open coalescing alerts for identity b = %d, want exactly 1", openForSecond)
+	}
+}
+
+func TestDifferentDetectionsDoNotWait(t *testing.T) {
+	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) { return nil, nil })
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
+	start, _ := fixture.window()
+	runID := fixture.insertRun(t, 1)
+
+	held := fixture.database.Begin()
+	if held.Error != nil {
+		t.Fatalf("begin the held transaction: %v", held.Error)
+	}
+	defer func() {
+		if err := held.Rollback().Error; err != nil {
+			t.Errorf("roll back the held transaction: %v", err)
+		}
+	}()
+	if err := alerts.LockDetection(held, "detection-one"); err != nil {
+		t.Fatalf("hold the first detection's lock: %v", err)
+	}
+
+	proposal := proposalAt("alice", "web01", "another-detection-alert", start.Add(time.Minute))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := fixture.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		_, err := fixture.runner.applyEnabledProposals(
+			ctx, transaction, fixture.manifest, runID, []Proposal{proposal})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("apply the second detection: %v", err)
+	}
+}
+
+func TestEmptyApplyDoesNotWaitForTheDetectionLock(t *testing.T) {
+	logic := stubDetection(func(context.Context, Window) ([]Proposal, error) { return nil, nil })
+	fixture := newRunnerFixture(t, logic, configFilesWriting("auth_events"))
+	runID := fixture.insertRun(t, 1)
+
+	held := fixture.database.Begin()
+	if held.Error != nil {
+		t.Fatalf("begin the held transaction: %v", held.Error)
+	}
+	defer func() {
+		if err := held.Rollback().Error; err != nil {
+			t.Errorf("roll back the held transaction: %v", err)
+		}
+	}()
+	if err := alerts.LockDetection(held, fixture.manifest.ID); err != nil {
+		t.Fatalf("hold the detection's lock: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := fixture.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		_, err := fixture.runner.applyEnabledProposals(ctx, transaction, fixture.manifest, runID, nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("apply an empty run: %v", err)
 	}
 }
 
