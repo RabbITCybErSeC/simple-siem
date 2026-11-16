@@ -209,10 +209,44 @@ lint: network toolchain web/node_modules
 	$(WEB_RUN) $(TOOLCHAIN_IMAGE) sh -c 'pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck'
 # SHA pins stop a moved tag from changing what CI runs.
 	$(RUN) $(TOOLCHAIN_IMAGE) sh -c 'govulncheck ./... && actionlint && { \
-		unpinned=$$(grep -nHE "^[[:space:]]*(-[[:space:]]*)?uses:" .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
-			| grep -vE "uses:[[:space:]]*\"?(\./[^[:space:]]*|docker://[^[:space:]]+@sha256:[0-9a-f]{64}|[^@[:space:]\"]+@[0-9a-f]{40})\"?([[:space:]]|$$)"); \
+		quote=$$(printf "\047"); \
+		extract="s/^([^:]+:[0-9]+).*[^[:alnum:]_]uses[^:[:space:]]*[[:space:]]*:[[:space:]]*[$${quote}\"]?([^[:space:],}$${quote}\"]*).*/\\1:\\2/p"; \
+		allowed=":(\\./[^[:space:]]*|docker://[^[:space:]]+@sha256:[0-9a-f]{64}|[^@[:space:]]+@[0-9a-f]{40})$$"; \
+		check_pins() { \
+			sed -nE "$$extract" | grep -vE "$$allowed" | sed -E "s/^([^:]+:[0-9]+):.*/\\1/"; \
+		}; \
+		check_fixture() { \
+			fixture=$$1; expected=$$2; \
+			numbered=$$(printf "%s\n" "$$fixture" | awk "{print \"fixture:\" NR \":\" \$$0}"); \
+			flagged=$$(printf "%s\n" "$$numbered" | check_pins); \
+			flagged_count=$$(printf "%s\n" "$$flagged" | grep -c .); \
+			total=$$(printf "%s\n" "$$fixture" | wc -l); \
+			if { [ "$$expected" = unpinned ] && [ "$$flagged_count" -ne "$$total" ]; } || { [ "$$expected" = pinned ] && [ "$$flagged_count" -ne 0 ]; }; then \
+				echo "pin check missed a fixture line" >&2; \
+				printf "%s\n" "$$numbered" >&2; \
+				printf "flagged:\n%s\n" "$$flagged" >&2; \
+				exit 1; \
+			fi; \
+		}; \
+		unpinned_fixture=$$(printf "%s\n" \
+			"uses: actions/checkout@v4" \
+			"- uses: actions/checkout@v4" \
+			"- {uses: actions/checkout@v4}" \
+			"- {name: x, uses: actions/checkout@v4}" \
+			"\"uses\": actions/checkout@v4" \
+			"$${quote}uses$${quote}: \"actions/checkout@v4\"" \
+			"uses: docker://alpine:3"); \
+		pinned_fixture=$$(printf "%s\n" \
+			"uses: actions/checkout@1111111111111111111111111111111111111111" \
+			"- {uses: \"actions/checkout@1111111111111111111111111111111111111111\"}" \
+			"uses: ./.github/actions/setup" \
+			"uses: docker://alpine@sha256:1111111111111111111111111111111111111111111111111111111111111111" \
+			"uses: actions/checkout@1111111111111111111111111111111111111111 # v4"); \
+		check_fixture "$$unpinned_fixture" unpinned; \
+		check_fixture "$$pinned_fixture" pinned; \
+		unpinned=$$(grep -rnH --include="*.yml" --include="*.yaml" "" .github | check_pins); \
 		if [ -n "$$unpinned" ]; then \
-			echo "$$unpinned" | sed -E "s/^([^:]+:[0-9]+):.*/\1: action not pinned to a full commit SHA/" >&2; \
+			printf "%s\n" "$$unpinned" | sed "s/$$/: action not pinned to a full commit SHA/" >&2; \
 			exit 1; \
 		fi; \
 	}'

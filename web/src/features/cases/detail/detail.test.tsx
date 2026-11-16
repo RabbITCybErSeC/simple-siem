@@ -77,6 +77,7 @@ const MARKUP_CONCLUSION =
   "Authorized pentest by RedTeam.\n<img src=x onerror=alert(1)>";
 
 const ALICE = { id: "user_1", displayName: "Alice Analyst" };
+const BOB = { id: "user_2", displayName: "Bob Responder" };
 
 function makeDetail(partial: Partial<CaseDetail> = {}): CaseDetail {
   return {
@@ -96,7 +97,7 @@ const CLOSED_DETAIL = makeDetail({
   outcome: "ACCEPTED",
   closureReason: "AUTHORIZED_ACTIVITY",
   closedAt: "2026-11-09T11:45:00Z",
-  closedBy: { id: "user_2", displayName: "Bob Responder" },
+  closedBy: BOB,
   conclusion: MARKUP_CONCLUSION,
   linkedCases: [
     {
@@ -147,7 +148,7 @@ const ASSIGNED: TimelineActivityEntry = {
   at: "2026-11-09T10:00:00Z",
   actor: { id: "user_1", displayName: "Alice Analyst" },
   action: "ASSIGNED",
-  details: { assignee: { id: "user_2", displayName: "Bob Responder" } },
+  details: { assignee: BOB },
 };
 
 const EVIDENCE_A: TimelineEvidenceEntry = {
@@ -229,7 +230,7 @@ const ACTIVITY: TimelineActivityEntry[] = [
     id: "tl_closed",
     kind: "ACTIVITY",
     at: "2026-11-09T11:45:00Z",
-    actor: { id: "user_2", displayName: "Bob Responder" },
+    actor: BOB,
     action: "CLOSED",
     details: { outcome: "ACCEPTED", closureReason: "AUTHORIZED_ACTIVITY" },
   },
@@ -684,6 +685,12 @@ function errorResponse(
 }
 
 describe("assign to me", () => {
+  const MY_OPEN_CASE = makeDetail({
+    status: "OPEN",
+    assignee: ALICE,
+    version: 1,
+  });
+
   it("assigns from the header with the case version and my id", async () => {
     const { api } = renderDetail("/cases/312?scope=all", {
       detail: () => jsonResponse(makeDetail()),
@@ -740,6 +747,74 @@ describe("assign to me", () => {
       assigneeId: null,
       version: 4,
     });
+  });
+
+  it("starts work on my open case with my id and the case version", async () => {
+    const { api } = renderDetail("/cases/312?scope=all", {
+      detail: () => jsonResponse(MY_OPEN_CASE),
+      assign: () =>
+        jsonResponse(
+          makeDetail({ status: "IN_PROGRESS", assignee: ALICE, version: 2 }),
+        ),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start work" }));
+
+    await waitFor(() => {
+      expect(patchRequests(api)).toHaveLength(1);
+    });
+    expect(patchRequests(api)[0].body).toEqual({
+      assigneeId: ALICE.id,
+      version: 1,
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "Start work" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Unassign" })).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      case: "another analyst's case",
+      detail: makeDetail({ status: "OPEN", assignee: BOB, version: 1 }),
+      header: "Assign to me",
+    },
+    {
+      case: "an unassigned case",
+      detail: makeDetail({ status: "OPEN", assignee: null, version: 1 }),
+      header: "Assign to me",
+    },
+    {
+      case: "my in-progress case",
+      detail: makeDetail({ status: "IN_PROGRESS", assignee: ALICE, version: 2 }),
+      header: "Unassign",
+    },
+  ])("offers no Start work on $case", async ({ detail, header }) => {
+    renderDetail("/cases/312?scope=all", {
+      detail: () => jsonResponse(detail),
+    });
+
+    await screen.findByRole("button", { name: header });
+    expect(
+      screen.queryByRole("button", { name: "Start work" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("disables Start work and Unassign while assigning", async () => {
+    renderDetail("/cases/312?scope=all", {
+      detail: () => jsonResponse(MY_OPEN_CASE),
+      assign: () => new Promise<Response>(() => undefined),
+    });
+
+    const startWork = await screen.findByRole("button", { name: "Start work" });
+    fireEvent.click(startWork);
+
+    await waitFor(() => {
+      expect(startWork).toBeDisabled();
+    });
+    expect(screen.getByRole("button", { name: "Unassign" })).toBeDisabled();
   });
 
   it("assigns from the queue with a and merges the row", async () => {

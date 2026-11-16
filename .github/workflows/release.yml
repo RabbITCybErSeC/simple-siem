@@ -12,12 +12,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  image:
+  gate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
     env:
       VERSION: ${{ github.ref_name }}
     steps:
@@ -37,6 +36,30 @@ jobs:
         # A tag on a red commit must never publish; rerunning the gate avoids a
         # GitHub API call to read CI status.
         run: CONTAINER=docker make lint build test e2e
+
+  # Test code (unit tests, lint, e2e) never runs in the job that holds
+  # packages: write. Build steps run inside BuildKit, which cannot see the
+  # registry login.
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a version tag on main
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release tag must be vX.Y.Z, got '$VERSION'" >&2; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "release tags must point at a commit on main" >&2; exit 1; }
 
       - name: Compute image environment
         shell: bash
@@ -82,7 +105,7 @@ jobs:
           release_version="${VERSION#v}"
           release_minor="${release_version%.*}"
           tags=(--tag "$IMAGE:$release_version")
-          newest_minor_tag=$(git tag --list "v$release_minor.*" | sort -V | tail -n 1)
+          newest_minor_tag=$(git tag --list "v$release_minor.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
           if [ "$newest_minor_tag" = "$VERSION" ]; then
             tags+=(--tag "$IMAGE:$release_minor")
           else

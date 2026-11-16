@@ -194,23 +194,34 @@ export function CaseDetail({
     }
   }, [closeRequested, detail, onCloseRequestHandled]);
 
+  const assign = useCallback(
+    (assigneeId: string | null) => {
+      if (detail === undefined) {
+        return;
+      }
+      setAssignFailed(null);
+      assignCaseMutation(
+        {
+          caseId: detail.id,
+          caseNumber,
+          request: { assigneeId, version: detail.version },
+        },
+        { onError: (error) => setAssignFailed(describeAssignFailure(error)) },
+      );
+    },
+    [assignCaseMutation, caseNumber, detail],
+  );
+
+  const assignedToMe = me !== undefined && detail?.assignee?.id === me.id;
+
   const assignCase = useCallback(() => {
-    if (detail === undefined || me === undefined) {
+    if (me === undefined) {
       return;
     }
-    setAssignFailed(null);
-    assignCaseMutation(
-      {
-        caseId: detail.id,
-        caseNumber,
-        request: {
-          assigneeId: detail.assignee?.id === me.id ? null : me.id,
-          version: detail.version,
-        },
-      },
-      { onError: (error) => setAssignFailed(describeAssignFailure(error)) },
-    );
-  }, [assignCaseMutation, caseNumber, detail, me]);
+    assign(assignedToMe ? null : me.id);
+  }, [assign, assignedToMe, me]);
+
+  const canStartWork = assignedToMe && detail?.status === "OPEN";
 
   // The palette runs the same actions as the pane, so the detail stays the
   // single owner of assign, close, copy link, and the layout toggle. Row and
@@ -224,9 +235,7 @@ export function CaseDetail({
         onLayoutChange(layout === "full" ? "split" : "full"),
     };
     if (detail !== undefined && detail.status !== "CLOSED") {
-      commands.assignLabel = detail.assignee?.id === me?.id
-        ? "Unassign"
-        : "Assign to me";
+      commands.assignLabel = assignedToMe ? "Unassign" : "Assign to me";
       commands.assign = assignCase;
       commands.close = () => setCloseOpen(true);
     }
@@ -234,6 +243,7 @@ export function CaseDetail({
     return () => setCaseCommands(undefined);
   }, [
     assignCase,
+    assignedToMe,
     caseNumber,
     copyLink,
     detail,
@@ -275,14 +285,22 @@ export function CaseDetail({
           <div className="flex flex-wrap items-center gap-2">
             {detail === undefined || detail.status === "CLOSED" ? null : (
               <>
+                {me !== undefined && canStartWork ? (
+                  <Button
+                    type="button"
+                    disabled={assignPending}
+                    onClick={() => assign(me.id)}
+                  >
+                    Start work
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
+                  variant={canStartWork ? "outline" : undefined}
                   disabled={assignPending || me === undefined}
                   onClick={assignCase}
                 >
-                  {detail.assignee?.id === me?.id
-                    ? "Unassign"
-                    : "Assign to me"}
+                  {assignedToMe ? "Unassign" : "Assign to me"}
                 </Button>
                 <Button
                   type="button"

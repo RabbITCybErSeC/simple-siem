@@ -17,7 +17,7 @@ release will be v0.1.0.
 - Fetching auth events from Elasticsearch and converting them to Google SecOps
   UDM.
 - Brute-force-then-success detection over stored auth events.
-- Cases in the web console: filter, inspect, and close.
+- Cases in the web console: filter, inspect, and assign.
 
 ## Requirements
 
@@ -53,14 +53,14 @@ then delete the file:
 ```bash
 cd simple-siem
 mkdir -p .make
-read -rs password && printf '%s\n' "$password" > .make/admin-password && unset password
+printf 'Password: ' >&2; read -rs password && printf '\n' >&2 && printf '%s\n' "$password" > .make/admin-password && unset password
 make run ARGS="admin create --email '<your-email>' --password-file .make/admin-password"
 rm -f .make/admin-password
 ```
 
-Replace `<your-email>` with your own email address. When prompted, type a
-password of 12 to 128 characters and press Enter. The command prints `created
-admin <id>`.
+Replace `<your-email>` with your own email address. At the `Password:` prompt,
+type a password of 12 to 128 characters and press Enter (nothing is shown while
+you type). The command prints `created admin <id>`.
 
 Open <http://127.0.0.1:5173> and sign in with that email address and password.
 
@@ -111,6 +111,7 @@ Configuration comes from environment variables:
 | `SIMPLE_SIEM_SHUTDOWN_TIMEOUT` | `30s` | Time in-flight requests get on SIGTERM |
 | `SIMPLE_SIEM_SESSION_IDLE_TIMEOUT` | `30m` | Idle time before a session expires; must not exceed the absolute lifetime |
 | `SIMPLE_SIEM_SESSION_ABSOLUTE_LIFETIME` | `12h` | Maximum lifetime of a session |
+| `SIMPLE_SIEM_MAX_CASES_PER_HOUR` | `50` | Cases one detection may open per hour before it is switched to shadow mode; a positive integer |
 
 Endpoints: `/` serves the embedded web UI, `/assets/*` serves its hashed
 files with a one-year immutable cache, `/healthz` reports that the process is

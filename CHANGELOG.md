@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An audit trail of security-relevant actions.
 - Elasticsearch fetching of auth events and conversion to Google SecOps UDM.
 - Brute-force-then-success detection over stored auth events.
-- Cases in the web console: filter, inspect, and close.
+- Cases in the web console: filter, inspect, and assign.
 - The MIT license.
 - Contributor docs: `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and this
   changelog.
